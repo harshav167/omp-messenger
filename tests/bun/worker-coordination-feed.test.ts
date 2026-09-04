@@ -56,6 +56,7 @@ function makeConfig(level: CoordinationLevel, dependencies: CrewConfig["dependen
     dependencies,
     coordination: level,
     messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+    team: { enabled: true },
   };
 }
 

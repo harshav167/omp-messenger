@@ -9,8 +9,8 @@ import {
   extractFolder,
   formatDuration,
   type MessengerState,
-  type Dirs,
 } from "./lib.ts";
+import type { Mesh } from "./mesh/types.ts";
 import * as crewStore from "./crew/store.ts";
 import { adjustConcurrency, autonomousState, isAutonomousForCwd, isPlanningForCwd, planningState } from "./crew/state.ts";
 import { loadCrewConfig, cycleCoordinationLevel, setCoordinationOverride } from "./crew/utils/config.ts";
@@ -22,7 +22,7 @@ import {
   renderTaskList,
   renderTaskSummary,
   renderFeedSection,
-  renderAgentsRow,
+  renderPeersRow,
   renderLegend,
   renderEmptyState,
   renderPlanningState,
@@ -44,7 +44,7 @@ import { loadConfig } from "./config.ts";
 import { discoverCrewAgents } from "./crew/utils/discover.ts";
 import { spawnSingleWorker, spawnWorkersForReadyTasks } from "./crew/spawn.ts";
 import * as teamStore from "./crew/team/store.ts";
-import { spawnLobbyWorker, removeLobbyWorkerByIndex, cleanupUnassignedAliveFiles } from "./crew/lobby.ts";
+import { spawnLobbyWorker, removeLobbyWorkerByIndex } from "./crew/lobby.ts";
 
 export interface OverlayCallbacks {
   onBackground?: (snapshot: string) => void;
@@ -72,7 +72,7 @@ export class MessengerOverlay implements Component, Focusable {
     private tui: TUI,
     private theme: Theme,
     private state: MessengerState,
-    private dirs: Dirs,
+    private mesh: Mesh,
     private done: (snapshot?: string) => void,
     private callbacks: OverlayCallbacks,
     cwd: string,
@@ -109,14 +109,14 @@ export class MessengerOverlay implements Component, Focusable {
         return;
       }
     }
-    if (teamStore.taskNeedsApproval(task)) {
-      const message = teamStore.taskNeedsRevision(task) ? `${task.id} needs revision` : `${task.id} needs lead approval`;
+    if (teamStore.taskNeedsApproval(this.cwd, task)) {
+      const message = teamStore.taskNeedsRevision(this.cwd, task) ? `${task.id} needs revision` : `${task.id} needs lead approval`;
       setNotification(this.crewViewState, this.tui, false, message);
       this.tui.requestRender();
       return;
     }
 
-    const worker = spawnSingleWorker(this.cwd, task.id, this.state.model);
+    const worker = spawnSingleWorker(this.cwd, task.id, this.mesh, this.state.model);
     if (worker) {
       setNotification(this.crewViewState, this.tui, true, `${worker.name} → ${task.id}`);
     } else {
@@ -126,11 +126,11 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private spawnWorkerForReadyTask(task: Task, newConcurrency: number): void {
-    const worker = spawnSingleWorker(this.cwd, task.id, this.state.model);
+    const worker = spawnSingleWorker(this.cwd, task.id, this.mesh, this.state.model);
     if (!worker) {
-      const message = teamStore.taskNeedsRevision(task)
+      const message = teamStore.taskNeedsRevision(this.cwd, task)
         ? `${task.id} needs revision`
-        : teamStore.taskNeedsApproval(task)
+        : teamStore.taskNeedsApproval(this.cwd, task)
           ? `${task.id} needs lead approval`
           : `Failed to spawn worker for ${task.id}`;
       setNotification(this.crewViewState, this.tui, false, message);
@@ -154,25 +154,24 @@ export class MessengerOverlay implements Component, Focusable {
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
     const readyTasks = crewStore.getReadyTasksFrom(tasks, { advisory: config.dependencies === "advisory" });
-    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(t));
+    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(this.cwd, t));
     if (startableTasks.length > 0) {
       const target = Math.min(startableTasks.length, autonomousState.concurrency);
-      const { assigned } = spawnWorkersForReadyTasks(this.cwd, target, this.state.model);
-      if (assigned > 0) {
-        setNotification(this.crewViewState, this.tui, true, `Plan ready — ${assigned} worker${assigned > 1 ? "s" : ""} started`);
-        this.tui.requestRender();
-      }
+      void spawnWorkersForReadyTasks(this.cwd, target, this.mesh, this.state.model).then(({ assigned }) => {
+        if (assigned > 0) {
+          setNotification(this.crewViewState, this.tui, true, `Plan ready — ${assigned} worker${assigned > 1 ? "s" : ""} started`);
+          this.tui.requestRender();
+        }
+      });
     } else if (readyTasks.length > 0) {
-      const rejected = readyTasks.filter(teamStore.taskNeedsRevision);
-      const pending = readyTasks.filter(teamStore.taskPendingApproval);
+      const rejected = readyTasks.filter(t => teamStore.taskNeedsRevision(this.cwd, t));
+      const pending = readyTasks.filter(t => teamStore.taskPendingApproval(this.cwd, t));
       const message = rejected.length > 0
         ? `Plan ready — ${rejected.length} task${rejected.length > 1 ? "s" : ""} need revision`
         : `Plan ready — ${pending.length} task${pending.length > 1 ? "s" : ""} need lead approval`;
       setNotification(this.crewViewState, this.tui, false, message);
       this.tui.requestRender();
     }
-
-    cleanupUnassignedAliveFiles(this.cwd);
   }
 
   private checkAutoRefillWorkers(tasks: Task[], hasPlan: boolean): void {
@@ -184,18 +183,19 @@ export class MessengerOverlay implements Component, Focusable {
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
     const readyTasks = crewStore.getReadyTasksFrom(tasks, { advisory: config.dependencies === "advisory" });
-    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(t));
+    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(this.cwd, t));
     if (startableTasks.length === 0) return;
 
     const slots = autonomousState.concurrency - inProgressCount;
     const target = Math.min(startableTasks.length, slots);
     if (target <= 0) return;
 
-    const { assigned } = spawnWorkersForReadyTasks(this.cwd, target, this.state.model);
-    if (assigned > 0) {
-      setNotification(this.crewViewState, this.tui, true, `${assigned} worker${assigned > 1 ? "s" : ""} → ready tasks`);
-      this.tui.requestRender();
-    }
+    void spawnWorkersForReadyTasks(this.cwd, target, this.mesh, this.state.model).then(({ assigned }) => {
+      if (assigned > 0) {
+        setNotification(this.crewViewState, this.tui, true, `${assigned} worker${assigned > 1 ? "s" : ""} → ready tasks`);
+        this.tui.requestRender();
+      }
+    });
   }
 
   private syncCrewRefreshTimers(): void {
@@ -268,7 +268,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (this.crewViewState.inputMode === "message") {
-      handleMessageInput(data, this.crewViewState, this.state, this.dirs, this.cwd, this.tui);
+      handleMessageInput(data, this.crewViewState, this.state, this.mesh, this.cwd, this.tui);
       return;
     }
 
@@ -303,7 +303,7 @@ export class MessengerOverlay implements Component, Focusable {
       if (next > prev) {
         const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
         if (readyTasks.length === 0) {
-          const worker = spawnLobbyWorker(this.cwd, undefined, this.state.model);
+          const worker = spawnLobbyWorker(this.cwd, this.mesh, undefined, this.state.model);
           const label = worker ? `Lobby worker ${worker.name} spawned (${next}w)` : `Workers → ${next}`;
           setNotification(this.crewViewState, this.tui, true, label);
         } else {
@@ -633,11 +633,11 @@ export class MessengerOverlay implements Component, Focusable {
       const hasWorkers = hasLiveWorkers(this.cwd);
 
       let workerLines = renderWorkersSection(this.theme, this.cwd, sectionW, workersLimit);
-      const agentsLine = renderAgentsRow(
+      const agentsLine = renderPeersRow(
         this.cwd,
         sectionW,
         this.state,
-        this.dirs,
+        this.mesh,
         this.stuckThresholdMs,
         new Map([[this.cwd, tasks]]),
       );

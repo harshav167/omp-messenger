@@ -5,6 +5,11 @@ import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.ts";
 import type { FeedEvent } from "../../feed.ts";
 import type { Task } from "../../crew/types.ts";
 import type { CrewConfig, CoordinationLevel } from "../../crew/utils/config.ts";
+import { buildSelfRegistration, type MessengerState } from "../../lib.ts";
+import type { Mesh } from "../../mesh/types.ts";
+import { createTestMesh } from "../helpers/mesh.ts";
+import { executeSend as executeSendHandler } from "../../handlers.ts";
+import type * as FeedModule from "../../feed.ts";
 
 const homedirMock = vi.hoisted(() => vi.fn());
 
@@ -60,6 +65,7 @@ function makeConfig(level: CoordinationLevel, dependencies: CrewConfig["dependen
     dependencies,
     coordination: level,
     messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+    team: { enabled: true },
   };
 }
 
@@ -340,66 +346,59 @@ describe("config coordination", () => {
 
 describe("executeSend broadcast filtering", () => {
   let dirs: TempCrewDirs;
-  let executeSend: typeof import("../../handlers.ts").executeSend;
-  let storeModule: typeof import("../../store.ts");
-  let feedModule: typeof import("../../feed.ts");
-  let messageDirs: { base: string; registry: string; inbox: string };
-  let state: { registered: boolean; agentName: string };
+  let executeSend: typeof executeSendHandler;
+  let feedModule: typeof FeedModule;
+  let mesh: Mesh;
+  let state: MessengerState;
 
   beforeEach(async () => {
     dirs = createTempCrewDirs();
     homedirMock.mockReturnValue(dirs.root);
 
     const handlers = await loadHandlersModule();
-    storeModule = await import("../../store.ts");
     feedModule = await import("../../feed.ts");
     executeSend = handlers.executeSend;
 
-    messageDirs = {
-      base: path.join(dirs.cwd, ".pi", "messenger"),
-      registry: path.join(dirs.cwd, ".pi", "messenger", "registry"),
-      inbox: path.join(dirs.cwd, ".pi", "messenger", "inbox"),
-    };
-    fs.mkdirSync(messageDirs.registry, { recursive: true });
-    fs.mkdirSync(messageDirs.inbox, { recursive: true });
+    ({ mesh, state } = createTestMesh(dirs.cwd, { agentName: "EpicGrove", cwd: dirs.cwd }));
+    state.registered = true;
+    state.messagesSent = 0;
 
-    state = { registered: true, agentName: "EpicGrove" };
-
-    vi.spyOn(storeModule, "getActiveAgents").mockReturnValue([
-      { name: "OakBear" } as any,
-      { name: "PineFox" } as any,
+    vi.spyOn(mesh, "peers").mockReturnValue([
+      { ...buildSelfRegistration(state), name: "OakBear" },
+      { ...buildSelfRegistration(state), name: "PineFox" },
     ]);
-    vi.spyOn(storeModule, "validateTargetAgent").mockReturnValue({ valid: true });
-    vi.spyOn(storeModule, "sendMessageToAgent").mockImplementation(() => ({
-      id: "msg-id",
-      from: "EpicGrove",
-      to: "OakBear",
-      text: "placeholder",
-      timestamp: new Date().toISOString(),
-      replyTo: null,
+    vi.spyOn(mesh, "send").mockImplementation(async (to, text, options) => ({
+      ok: true,
+      message: {
+        id: "msg-id",
+        from: state.agentName,
+        to,
+        text,
+        timestamp: new Date().toISOString(),
+        replyTo: options?.replyTo ?? null,
+      },
     }));
     vi.spyOn(feedModule, "logFeedEvent").mockImplementation(() => {});
   });
 
   afterEach(() => {
-    delete process.env.PI_CREW_WORKER;
     vi.restoreAllMocks();
   });
 
-  it("worker broadcast logs to feed only", () => {
-    process.env.PI_CREW_WORKER = "1";
+  it("worker broadcast logs to feed only", async () => {
+    state.isCrewWorker = true;
 
-    const result = executeSend(
-      state as any,
-      messageDirs as any,
+    const response = await executeSend(
+      state,
+      mesh,
       dirs.cwd,
       undefined,
       true,
       "Worker update"
     );
 
-    expect(result.content[0]?.text).toContain("Broadcast logged");
-    expect(storeModule.sendMessageToAgent).not.toHaveBeenCalled();
+    expect(response.content[0]?.text).toContain("Broadcast logged");
+    expect(mesh.send).not.toHaveBeenCalled();
     expect(feedModule.logFeedEvent).toHaveBeenCalledWith(
       dirs.cwd,
       "EpicGrove",
@@ -409,75 +408,70 @@ describe("executeSend broadcast filtering", () => {
     );
   });
 
-  it("non-worker broadcast delivers to inbox recipients", () => {
-    delete process.env.PI_CREW_WORKER;
+  it("non-worker broadcast delivers to mesh recipients", async () => {
+    state.isCrewWorker = false;
 
-    executeSend(
-      state as any,
-      messageDirs as any,
+    await executeSend(
+      state,
+      mesh,
       dirs.cwd,
       undefined,
       true,
       "Team-wide update"
     );
 
-    expect(storeModule.sendMessageToAgent).toHaveBeenCalledTimes(2);
-    expect(storeModule.sendMessageToAgent).toHaveBeenCalledWith(
-      state,
-      messageDirs,
+    expect(mesh.send).toHaveBeenCalledTimes(2);
+    expect(mesh.send).toHaveBeenCalledWith(
       "OakBear",
       "Team-wide update",
-      undefined,
+      { replyTo: undefined },
     );
-    expect(storeModule.sendMessageToAgent).toHaveBeenCalledWith(
-      state,
-      messageDirs,
+    expect(mesh.send).toHaveBeenCalledWith(
       "PineFox",
       "Team-wide update",
-      undefined,
+      { replyTo: undefined },
     );
   });
 
-  it("worker direct message still delivers", () => {
-    process.env.PI_CREW_WORKER = "1";
+  it("worker direct message still delivers", async () => {
+    state.isCrewWorker = true;
 
-    executeSend(
-      state as any,
-      messageDirs as any,
+    await executeSend(
+      state,
+      mesh,
       dirs.cwd,
       "OakBear",
       undefined,
       "Need your input"
     );
 
-    expect(storeModule.sendMessageToAgent).toHaveBeenCalledTimes(1);
-    expect(storeModule.sendMessageToAgent).toHaveBeenCalledWith(
-      state,
-      messageDirs,
+    expect(mesh.send).toHaveBeenCalledTimes(1);
+    expect(mesh.send).toHaveBeenCalledWith(
       "OakBear",
       "Need your input",
-      undefined,
+      { replyTo: undefined },
     );
   });
 
-  it("worker broadcast increments message budget usage", () => {
-    process.env.PI_CREW_WORKER = "1";
+  it("worker broadcast increments message budget usage", async () => {
+    state.isCrewWorker = true;
+    state.messagesSent = 0;
     writeJson(path.join(dirs.crewDir, "config.json"), {
       coordination: "chatty",
       messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 1 },
     });
 
-    const first = executeSend(
-      state as any,
-      messageDirs as any,
+    const first = await executeSend(
+      state,
+      mesh,
       dirs.cwd,
       undefined,
       true,
       "First broadcast"
     );
-    const second = executeSend(
-      state as any,
-      messageDirs as any,
+    const second = await executeSend(
+      state,
+      mesh,
       dirs.cwd,
       undefined,
       true,

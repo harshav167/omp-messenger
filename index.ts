@@ -38,7 +38,7 @@ function StringEnum<T extends readonly string[]>(
 }
 import {
   type MessengerState,
-  type Dirs,
+  type AgentRegistration,
   type AgentMailMessage,
   MAX_CHAT_HISTORY,
   formatRelativeTime,
@@ -48,15 +48,20 @@ import {
   generateAutoStatus,
   computeStatus,
   agentHasTask,
+  findReservationConflicts,
+  LOCAL_HOST_ID,
 } from "./lib.ts";
-import * as store from "./store.ts";
 import * as handlers from "./handlers.ts";
 import { MessengerOverlay, type OverlayCallbacks } from "./overlay.ts";
 import { MessengerConfigOverlay } from "./config-overlay.ts";
 import { loadConfig, loadGlobalConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.ts";
+import { createMesh } from "./mesh/index.ts";
+import type { Mesh } from "./mesh/types.ts";
 import { executeCrewAction } from "./crew/index.ts";
+import { setSdk } from "./crew/sdk.ts";
+import { detectCrewIdentity } from "./crew/identity.ts";
 import { logFeedEvent, pruneFeed } from "./feed.ts";
-import type { CrewParams } from "./crew/types.ts";
+import type { CrewParams, Task } from "./crew/types.ts";
 import {
   autonomousState,
   clearPlanningState,
@@ -81,11 +86,12 @@ import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.ts";
 import { shutdownAllWorkers } from "./crew/agents.ts";
 import { shutdownLobbyWorkers } from "./crew/lobby.ts";
 
-let overlayTui: TUI | null = null;
-let overlayHandle: OverlayHandle | null = null;
-let overlayOpening = false;
-
 export default function piMessengerExtension(pi: ExtensionAPI) {
+  setSdk(pi.pi);
+  let overlayTui: TUI | null = null;
+  let overlayHandle: OverlayHandle | null = null;
+  let overlayOpening = false;
+
   // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
   // (crew agents now discovered from extension-local directory)
   runLegacyAgentCleanupMigration();
@@ -98,6 +104,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   const state: MessengerState = {
     agentName: process.env.PI_AGENT_NAME || "",
+    explicitName: !!process.env.PI_AGENT_NAME,
+    channel: config.mesh.channel,
+    isCrewWorker: false,
+    messagesSent: 0,
     registered: false,
     watcher: null,
     watcherRetries: 0,
@@ -125,11 +135,6 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
 
   const baseDir = process.env.PI_MESSENGER_DIR || join(homedir(), ".pi/agent/messenger");
-  const dirs: Dirs = {
-    base: baseDir,
-    registry: join(baseDir, "registry"),
-    inbox: join(baseDir, "inbox")
-  };
 
   // ===========================================================================
   // Message Delivery
@@ -154,7 +159,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Build message content with optional context
     // Detect if this is a new agent identity (first contact OR same name but different session)
-    const sender = store.getActiveAgents(state, dirs).find(a => a.name === msg.from);
+    const sender = mesh.peers().find(a => a.name === msg.from);
     const senderSessionId = sender?.sessionId;
     const prevSessionId = state.seenSenders.get(msg.from);
     const isNewIdentity = !prevSessionId || (senderSessionId && prevSessionId !== senderSessionId);
@@ -188,9 +193,21 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     pi.sendMessage(
       { customType: "agent_message", content, display: true, details: msg },
-      { triggerTurn: true, deliverAs: "steer" }
+      msg.urgent
+        ? { triggerTurn: true, deliverAs: "steer" }
+        : { triggerTurn: true, deliverAs: "aside" }
     );
   }
+
+  let mesh: Mesh = createMesh({
+    config,
+    base: baseDir,
+    state,
+    deliver: deliverMessage,
+    onStatusChange: () => {
+      if (latestCtx) updateStatus(latestCtx);
+    },
+  });
 
   // ===========================================================================
   // Stuck Detection
@@ -198,18 +215,18 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   const notifiedStuck = new Set<string>();
 
-  function checkStuckAgents(ctx: ExtensionContext, peers: ReturnType<typeof store.getActiveAgents>): void {
+  function checkStuckAgents(ctx: ExtensionContext, peers: AgentRegistration[]): void {
     if (!config.stuckNotify || !ctx.hasUI || !state.registered) return;
 
     const thresholdMs = config.stuckThreshold * 1000;
-    const allClaims = store.getClaims(dirs);
-    const tasksByCwd = new Map<string, ReturnType<typeof crewStore.getTasks>>();
+    const allClaims = mesh.claims();
+    const tasksByCwd = new Map<string, Task[]>();
     const currentlyStuck = new Set<string>();
 
     for (const agent of peers) {
-      let tasks = tasksByCwd.get(agent.cwd);
-      if (!tasks) {
-        tasks = crewStore.getTasks(agent.cwd);
+      let tasks: Task[] = [];
+      if (agent.hostId === LOCAL_HOST_ID) {
+        tasks = tasksByCwd.get(agent.cwd) ?? crewStore.getTasks(agent.cwd);
         tasksByCwd.set(agent.cwd, tasks);
       }
       const hasTask = agentHasTask(agent.name, allClaims, tasks);
@@ -259,7 +276,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     try {
       if (!ctx.hasUI || !state.registered) return;
 
-      const agents = store.getActiveAgents(state, dirs);
+      const agents = mesh.peers();
       checkStuckAgents(ctx, agents);
       const activeNames = new Set(agents.map(a => a.name));
       const count = agents.length;
@@ -282,6 +299,18 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
       const nameStr = theme.fg("accent", state.agentName);
       const countStr = theme.fg("dim", ` (${count} peer${count === 1 ? "" : "s"})`);
+      const meshStr = mesh.kind === "mesh"
+        ? theme.fg(
+            mesh.status() === "connected" ? "dim" : "warning",
+            mesh.status() === "connected"
+              ? ` ⚡${mesh.channel()}`
+              : mesh.status() === "reconnecting"
+                ? ` ⚡${mesh.channel()}…`
+                : ` ⚡${mesh.channel()}✗`,
+          )
+        : mesh.channel() !== "main"
+          ? theme.fg("dim", ` #${mesh.channel()}`)
+          : "";
       const unreadStr = totalUnread > 0 ? theme.fg("accent", ` ●${totalUnread}`) : "";
 
       const planningCwd = ctx.cwd;
@@ -311,7 +340,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
         }
       }
 
-      ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${unreadStr}${planningStr}${activityStr}${crewStr}`);
+      ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${meshStr}${unreadStr}${planningStr}${activityStr}${crewStr}`);
 
       maybeAutoOpenCrewOverlay(ctx);
     } catch (error) {
@@ -393,6 +422,19 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // ===========================================================================
   // Tool Registration
   // ===========================================================================
+  const teamToolDescription = loadCrewConfig(crewStore.getCrewDir(process.cwd())).team.enabled
+    ? `
+
+  // Team: Optional role-aware layer around Crew
+  pi_messenger({ action: "team.setup", name: "migration-squad" }) → Activate profile, create starter charter, show next steps
+  pi_messenger({ action: "team.profile.list" })                 → List built-in and saved team profiles
+  pi_messenger({ action: "team.profile.use", name: "migration-squad" }) → Activate a team profile
+  pi_messenger({ action: "team.charter.show" })                 → Show project team charter
+  pi_messenger({ action: "team.memory.note", type: "decision", message: "..." })
+  pi_messenger({ action: "team.roles" })                        → Resolve Team roles (packaged pi-subagents vocabulary + optional metadata)
+  pi_messenger({ action: "team.status" })                       → Team summary`
+    : "";
+
 
   pi.registerTool({
     name: "pi_messenger",
@@ -402,7 +444,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
 Usage (action-based API - preferred):
   // Coordination
-  pi_messenger({ action: "join" })                              → Join mesh
+  pi_messenger({ action: "join", channel: "repo-a" })           → Join a mesh channel (channel is optional)
+  pi_messenger({ action: "channels" })                          → List mesh channels
   pi_messenger({ action: "leave" })                             → Leave mesh for this session
   pi_messenger({ action: "status" })                            → Get status
   pi_messenger({ action: "list" })                              → List agents with presence
@@ -435,16 +478,7 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl
-
-  // Team: Optional role-aware layer around Crew
-  pi_messenger({ action: "team.setup", name: "migration-squad" }) → Activate profile, create starter charter, show next steps
-  pi_messenger({ action: "team.profile.list" })                 → List built-in and saved team profiles
-  pi_messenger({ action: "team.profile.use", name: "migration-squad" }) → Activate a team profile
-  pi_messenger({ action: "team.charter.show" })                 → Show project team charter
-  pi_messenger({ action: "team.memory.note", type: "decision", message: "..." })
-  pi_messenger({ action: "team.roles" })                        → Resolve Team roles (packaged pi-subagents vocabulary + optional metadata)
-  pi_messenger({ action: "team.status" })                       → Team summary`,
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl${teamToolDescription}`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -486,6 +520,7 @@ Usage (action-based API - preferred):
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
       name: Type.Optional(Type.String({ description: "Name for rename action or Team setup/profile/charter commands" })),
+      channel: Type.Optional(Type.String({ description: "Mesh channel to join (default: config mesh.channel)" })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // MESSAGING & COORDINATION PARAMETERS
@@ -505,14 +540,14 @@ Usage (action-based API - preferred):
 
       const action = params.action;
       if (!action) {
-        return handlers.executeStatus(state, dirs, ctx.cwd);
+        return handlers.executeStatus(state, mesh, ctx.cwd);
       }
 
       const result = await executeCrewAction(
         action,
         params,
         state,
-        dirs,
+        mesh,
         ctx,
         deliverMessage,
         updateStatus,
@@ -559,11 +594,10 @@ Usage (action-based API - preferred):
 
       // /messenger - open chat overlay (auto-joins if not registered)
       if (!state.registered) {
-        if (!store.register(state, dirs, ctx, nameTheme)) {
+        if (!(await mesh.join(ctx, { nameTheme }))) {
           ctx.ui.notify("Failed to join agent mesh", "error");
           return;
         }
-        store.startWatcher(state, dirs, deliverMessage);
         updateStatus(ctx);
       }
 
@@ -588,7 +622,7 @@ Usage (action-based API - preferred):
       const snapshot = await ctx.ui.custom<string | undefined>(
         (tui, theme, _keybindings, done) => {
           overlayTui = tui;
-          return new MessengerOverlay(tui, theme, state, dirs, done, callbacks, ctx.cwd);
+          return new MessengerOverlay(tui, theme, state, mesh, done, callbacks, ctx.cwd);
         },
         {
           overlay: true,
@@ -705,7 +739,7 @@ Usage (action-based API - preferred):
     if (state.registryFlushTimer) return;
     state.registryFlushTimer = setTimeout(() => {
       state.registryFlushTimer = null;
-      store.flushActivityToRegistry(state, dirs, ctx);
+      mesh.publish(ctx);
     }, REGISTRY_FLUSH_MS);
   }
 
@@ -841,6 +875,25 @@ Usage (action-based API - preferred):
     captureStatusContext(ctx);
     state.cwd = ctx.cwd;
     config = loadConfig(state.cwd);
+    state.channel = config.mesh.channel;
+    const identity = detectCrewIdentity(ctx);
+    if (identity) {
+      state.agentName = identity.name;
+      state.explicitName = true;
+      state.isCrewWorker = true;
+    }
+    if (!state.registered) {
+      mesh.close();
+      mesh = createMesh({
+        config,
+        base: baseDir,
+        state,
+        deliver: deliverMessage,
+        onStatusChange: () => {
+          if (latestCtx) updateStatus(latestCtx);
+        },
+      });
+    }
     state.scopeToFolder = config.scopeToFolder;
     nameTheme.theme = config.nameTheme;
     nameTheme.customWords = config.nameWords;
@@ -859,7 +912,7 @@ Usage (action-based API - preferred):
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
 
-    const shouldAutoRegister = config.autoRegister || 
+    const shouldAutoRegister = state.isCrewWorker || config.autoRegister ||
       matchesAutoRegisterPath(state.cwd, config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
@@ -867,9 +920,8 @@ Usage (action-based API - preferred):
       return;
     }
 
-    if (store.register(state, dirs, ctx, nameTheme)) {
+    if (await mesh.join(ctx, { nameTheme })) {
       const cwd = state.cwd;
-      store.startWatcher(state, dirs, deliverMessage);
       updateStatus(ctx);
       pruneFeed(cwd, config.feedRetention);
       logFeedEvent(cwd, state.agentName, "join");
@@ -881,13 +933,6 @@ Usage (action-based API - preferred):
 
     maybeAutoOpenCrewOverlay(ctx);
   });
-
-  function recoverWatcherIfNeeded(): void {
-    if (state.registered && !state.watcher && !state.watcherRetryTimer) {
-      state.watcherRetries = 0;
-      store.startWatcher(state, dirs, deliverMessage);
-    }
-  }
 
   function maybeAutoOpenCrewOverlay(ctx: ExtensionContext): void {
     const cwd = ctx.cwd;
@@ -930,7 +975,7 @@ Usage (action-based API - preferred):
     ctx.ui.custom<string | undefined>(
       (tui, theme, _keybindings, done) => {
         overlayTui = tui;
-        return new MessengerOverlay(tui, theme, state, dirs, done, callbacks, ctx.cwd);
+        return new MessengerOverlay(tui, theme, state, mesh, done, callbacks, ctx.cwd);
       },
       {
         overlay: true,
@@ -976,20 +1021,8 @@ Usage (action-based API - preferred):
 
   pi.on("turn_end", async (event, ctx) => {
     captureStatusContext(ctx);
-    store.processAllPendingMessages(state, dirs, deliverMessage);
-    const lobbyId = process.env.PI_LOBBY_ID;
-    if (lobbyId) {
-      const cwd = ctx.cwd;
-      const aliveFile = join(cwd, ".pi", "messenger", "crew", `lobby-${lobbyId}.alive`);
-      if (fs.existsSync(aliveFile)) {
-        pi.sendMessage({
-          customType: "lobby_keepalive",
-          content: "[Keep-alive] Planning in progress. No task assigned yet. Acknowledge with a single period.",
-          display: false,
-        }, { triggerTurn: true, deliverAs: "steer" });
-      }
-    }
-    recoverWatcherIfNeeded();
+    mesh.drainInbox();
+    mesh.recoverInbox();
     updateStatus(ctx);
 
     if (state.registered) {
@@ -1012,7 +1045,7 @@ Usage (action-based API - preferred):
   // ===========================================================================
 
   pi.on("agent_end", async (_event, ctx) => {
-    if (process.env.PI_CREW_WORKER === "1" || process.env.PI_LOBBY_ID) {
+    if (state.isCrewWorker) {
       return;
     }
 
@@ -1034,7 +1067,7 @@ Usage (action-based API - preferred):
       const cwd = autoWork.cwd;
       const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
       const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-      const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(t));
+      const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(cwd, t));
       if (startableTasks.length > 0) {
         const plan = crewStore.getPlan(cwd);
         const label = plan ? crewStore.getPlanLabel(plan) : "plan";
@@ -1046,8 +1079,8 @@ Usage (action-based API - preferred):
         return;
       }
       if (readyTasks.length > 0) {
-        const rejected = readyTasks.filter(teamStore.taskNeedsRevision);
-        const pending = readyTasks.filter(teamStore.taskPendingApproval);
+        const rejected = readyTasks.filter(t => teamStore.taskNeedsRevision(cwd, t));
+        const pending = readyTasks.filter(t => teamStore.taskPendingApproval(cwd, t));
         pi.sendMessage({
           customType: rejected.length > 0 ? "crew_auto_work_needs_revision" : "crew_auto_work_needs_approval",
           content: rejected.length > 0
@@ -1088,18 +1121,16 @@ Usage (action-based API - preferred):
 
     // Check for ready tasks
     const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(t));
+    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(cwd, t));
 
     if (startableTasks.length === 0) {
       // No ready tasks - check if all done or blocked
       const allTasks = crewStore.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
-      const needsApproval = readyTasks.filter(teamStore.taskPendingApproval);
-      const rejected = readyTasks.filter(teamStore.taskNeedsRevision);
+      const needsApproval = readyTasks.filter(t => teamStore.taskPendingApproval(cwd, t));
+      const rejected = readyTasks.filter(t => teamStore.taskNeedsRevision(cwd, t));
 
       stopAutonomous(allDone ? "completed" : "blocked");
-      pi.appendEntry("crew-state", autonomousState);
-      resetAutonomousContinueGuard();
 
       const plan = crewStore.getPlan(cwd);
       if (ctx.hasUI) {
@@ -1152,10 +1183,12 @@ Usage (action-based API - preferred):
   pi.on("session_shutdown", async (_event, ctx) => {
     latestCtx = null;
     const cwd = ctx.cwd || state.cwd;
-    if (cwd) {
-      shutdownLobbyWorkers(cwd);
+    if (!state.isCrewWorker) {
+      if (cwd) {
+        shutdownLobbyWorkers(cwd);
+      }
+      shutdownAllWorkers();
     }
-    shutdownAllWorkers();
     stopStatusHeartbeat();
     overlayOpening = false;
     overlayHandle = null;
@@ -1177,13 +1210,8 @@ Usage (action-based API - preferred):
     if (recentCommitTimer) { clearTimeout(recentCommitTimer); recentCommitTimer = null; }
     if (recentTestTimer) { clearTimeout(recentTestTimer); recentTestTimer = null; }
     if (recentEditTimer) { clearTimeout(recentEditTimer); recentEditTimer = null; }
-    store.stopWatcher(state);
-    try {
-      store.unregister(state, dirs);
-    } catch {
-      // Safe to ignore during shutdown: the process is exiting, so any leftover
-      // registration will be cleaned up as stale on the next registry read.
-    }
+    mesh.close();
+    try { await mesh.leave(); } catch {}
   });
 
   // ===========================================================================
@@ -1197,7 +1225,7 @@ Usage (action-based API - preferred):
     const filePath = typeof input.path === "string" ? input.path : null;
     if (!filePath) return;
 
-    const conflicts = store.getConflictsWithOtherAgents(filePath, state, dirs);
+    const conflicts = findReservationConflicts(filePath, mesh.peers());
     if (conflicts.length === 0) return;
 
     const c = conflicts[0];

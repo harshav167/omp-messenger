@@ -42,7 +42,7 @@ function createMockPi() {
   };
 }
 
-function createEventContext(cwd: string) {
+function createEventContext(cwd: string, sessionFile?: string) {
   return {
     cwd,
     hasUI: false,
@@ -55,6 +55,7 @@ function createEventContext(cwd: string) {
     sessionManager: {
       getEntries: () => [],
       getSessionId: () => "test-session",
+      getSessionFile: () => sessionFile,
     },
     model: { id: "test-model" },
   } as any;
@@ -115,16 +116,21 @@ describe("agent_end autonomous continuation guards", () => {
 
   it("skips autonomous continuation handling inside worker sessions", async () => {
     const { cwd } = createTempCrewDirs();
-    const ctx = createEventContext(cwd);
+    const workerSessionFile = path.join(cwd, ".pi", "messenger", "crew", "artifacts", "OakBear.jsonl");
+    const ctx = createEventContext(cwd, workerSessionFile);
     const pi = createMockPi();
     const { default: piMessengerExtension } = await import("../../index.ts");
     piMessengerExtension(pi as any);
 
+    const sessionStartHandler = pi.handlers.get("session_start")?.[0];
     const agentEndHandler = pi.handlers.get("agent_end")?.[0];
+    expect(sessionStartHandler).toBeTruthy();
     expect(agentEndHandler).toBeTruthy();
 
+    await sessionStartHandler?.({ type: "session_start" }, ctx);
+    pi.sendMessage.mockClear();
+    pi.appendEntry.mockClear();
     startAutonomous(cwd, 2);
-    vi.stubEnv("PI_CREW_WORKER", "1");
 
     await agentEndHandler?.({}, ctx);
 

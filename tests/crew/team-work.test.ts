@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Dirs } from "../../lib.ts";
+import type { Mesh } from "../../mesh/types.ts";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 import { createMockContext } from "../helpers/mock-context.ts";
 
@@ -16,7 +16,7 @@ describe("work with Team approval", () => {
   let store: typeof import("../../crew/store.ts");
   let teamStore: typeof import("../../crew/team/store.ts");
   let cwd: string;
-  let dirs: Dirs;
+  let mesh: Mesh;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -27,13 +27,11 @@ describe("work with Team approval", () => {
 
     cwd = createTempCrewDirs().cwd;
     process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
-    dirs = {
-      base: path.join(cwd, ".pi", "messenger"),
-      registry: path.join(cwd, ".pi", "messenger", "registry"),
-      inbox: path.join(cwd, ".pi", "messenger", "inbox"),
-    };
-    fs.mkdirSync(dirs.registry, { recursive: true });
-    fs.mkdirSync(dirs.inbox, { recursive: true });
+    mesh = {
+      peers: () => [],
+      evict: vi.fn(),
+      send: vi.fn(async () => ({ ok: true })),
+    } as unknown as Mesh;
     const agentPath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
     fs.mkdirSync(path.dirname(agentPath), { recursive: true });
     fs.writeFileSync(agentPath, "---\nname: crew-worker\ndescription: Worker\n---\nWorker");
@@ -51,7 +49,7 @@ describe("work with Team approval", () => {
       approval: { required: true, status: "pending" },
     });
 
-    const response = await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(agents.spawnAgents).not.toHaveBeenCalled();
     expect(response.content[0].text).toContain("need lead approval");
@@ -69,7 +67,7 @@ describe("work with Team approval", () => {
     });
     store.updateTask(cwd, gated.id, { attempt_count: 1 });
 
-    const response = await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(store.getTask(cwd, gated.id)?.status).toBe("todo");
     expect(response.details.needsApproval).toEqual([
@@ -84,7 +82,7 @@ describe("work with Team approval", () => {
     store.createTask(cwd, "Normal work", "Do work", [], { role: "worker" });
     vi.mocked(agents.spawnAgents).mockResolvedValue([{ exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: "task-1" }]);
 
-    await workHandler.execute({ model: "request-model" }, dirs, createMockContext(cwd), vi.fn());
+    await workHandler.execute({ model: "request-model" }, mesh, createMockContext(cwd), vi.fn());
 
     expect(agents.spawnAgents).toHaveBeenCalledTimes(1);
     const task = vi.mocked(agents.spawnAgents).mock.calls[0][0][0];
@@ -98,7 +96,7 @@ describe("work with Team approval", () => {
     store.createTask(cwd, "Scout work", "Inspect", [], { role: "Scout" });
     vi.mocked(agents.spawnAgents).mockResolvedValue([{ exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: "task-1" }]);
 
-    await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(agents.spawnAgents).toHaveBeenCalledTimes(1);
     const task = vi.mocked(agents.spawnAgents).mock.calls[0][0][0];
@@ -110,7 +108,7 @@ describe("work with Team approval", () => {
     store.createTask(cwd, "Normal work", "Do work");
     vi.mocked(agents.spawnAgents).mockResolvedValue([{ exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: "task-1" }]);
 
-    await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn(), undefined, "session-model");
+    await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn(), undefined, "session-model");
 
     expect(agents.spawnAgents).toHaveBeenCalledTimes(1);
     const task = vi.mocked(agents.spawnAgents).mock.calls[0][0][0];
@@ -123,7 +121,7 @@ describe("work with Team approval", () => {
       approval: { required: true, status: "rejected", feedback: "needs rollback tests" },
     });
 
-    const response = await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(response.details.needsApproval).toEqual([]);
     expect(response.details.rejected).toEqual([
@@ -148,7 +146,7 @@ describe("work with Team approval", () => {
       return [{ exitCode: 0, output: "done", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: first.id }];
     });
 
-    const response = await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(response.details.needsApproval).toEqual([
       { id: gated.id, title: gated.title, approval: { required: true, status: "pending" } },

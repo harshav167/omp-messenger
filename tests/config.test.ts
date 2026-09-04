@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTempCrewDirs, type TempCrewDirs } from "./helpers/temp-dirs.ts";
 
 const homedirMock = vi.hoisted(() => vi.fn());
@@ -69,4 +69,71 @@ describe("config autoOverlayPlanning", () => {
     expect(cfg.stuckWakeAgent).toBe("project-manager");
   });
 
+});
+
+describe("mesh config", () => {
+  const originalMeshUrl = process.env.PI_MESSENGER_MESH_URL;
+  const originalMeshToken = process.env.PI_MESSENGER_MESH_TOKEN;
+  const originalX = process.env.X;
+  let dirs: TempCrewDirs;
+
+  beforeEach(() => {
+    dirs = createTempCrewDirs();
+    homedirMock.mockReset();
+    homedirMock.mockReturnValue(path.join(dirs.root, ".pi-home"));
+    delete process.env.PI_MESSENGER_MESH_URL;
+    delete process.env.PI_MESSENGER_MESH_TOKEN;
+    delete process.env.X;
+  });
+
+  afterEach(() => {
+    if (originalMeshUrl === undefined) delete process.env.PI_MESSENGER_MESH_URL;
+    else process.env.PI_MESSENGER_MESH_URL = originalMeshUrl;
+    if (originalMeshToken === undefined) delete process.env.PI_MESSENGER_MESH_TOKEN;
+    else process.env.PI_MESSENGER_MESH_TOKEN = originalMeshToken;
+    if (originalX === undefined) delete process.env.X;
+    else process.env.X = originalX;
+  });
+
+  it("uses filesystem defaults when mesh config is absent", async () => {
+    const { loadConfig } = await loadConfigModule();
+    expect(loadConfig(dirs.cwd).mesh).toEqual({
+      url: null,
+      token: "",
+      channel: "main",
+    });
+  });
+
+  it("resolves an environment-indirected token", async () => {
+    process.env.X = "abc";
+    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+      mesh: { url: "ws://h:1", token: "$X", channel: "repo-a" },
+    });
+
+    const { loadConfig } = await loadConfigModule();
+    expect(loadConfig(dirs.cwd).mesh).toEqual({
+      url: "ws://h:1",
+      token: "abc",
+      channel: "repo-a",
+    });
+  });
+
+  it("prefers the mesh URL environment variable", async () => {
+    process.env.PI_MESSENGER_MESH_URL = "ws://env:2";
+    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+      mesh: { url: "ws://file:1", token: "t", channel: "main" },
+    });
+
+    const { loadConfig } = await loadConfigModule();
+    expect(loadConfig(dirs.cwd).mesh.url).toBe("ws://env:2");
+  });
+
+  it("falls back to main for an invalid channel", async () => {
+    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+      mesh: { channel: "Bad Name" },
+    });
+
+    const { loadConfig } = await loadConfigModule();
+    expect(loadConfig(dirs.cwd).mesh.channel).toBe("main");
+  });
 });

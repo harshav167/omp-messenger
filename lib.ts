@@ -3,7 +3,11 @@
  */
 
 import type * as fs from "node:fs";
+import { hostname } from "node:os";
 import { basename, isAbsolute, resolve, relative } from "node:path";
+
+/** Stable identity of this machine inside a mesh (registrations carry it as `hostId`). */
+export const LOCAL_HOST_ID = hostname();
 
 // =============================================================================
 // Types
@@ -30,6 +34,8 @@ export interface AgentActivity {
 export interface AgentRegistration {
   name: string;
   pid: number;
+  /** Hostname of the machine that owns this registration. */
+  hostId: string;
   sessionId: string;
   cwd: string;
   model: string;
@@ -50,6 +56,8 @@ export interface AgentMailMessage {
   text: string;
   timestamp: string;
   replyTo: string | null;
+  /** Interrupting delivery (steer) on the receiver; absent/false → non-interrupting aside. */
+  urgent?: boolean;
 }
 
 interface AgentMailMessageInput {
@@ -61,6 +69,7 @@ interface AgentMailMessageInput {
   timestamp?: unknown;
   ts?: unknown;
   replyTo?: unknown;
+  urgent?: unknown;
 }
 
 function stringField(value: unknown, fallback: string): string {
@@ -82,6 +91,7 @@ export function normalizeAgentMailMessage(
     text: stringField(raw.text, stringField(raw.message, "")),
     timestamp: stringField(raw.timestamp, stringField(raw.ts, defaults.timestamp)),
     replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
+    ...(raw.urgent === true ? { urgent: true } : {}),
   };
 }
 
@@ -95,7 +105,15 @@ export interface ReservationConflict {
 
 export interface MessengerState {
   agentName: string;
+  /** Name came from PI_AGENT_NAME or a crew identity: never auto-suffixed on conflict. */
+  explicitName: boolean;
   registered: boolean;
+  /** Mesh channel this session lives in (default "main"). */
+  channel: string;
+  /** This session is an in-process crew worker (omp subagent spawned by the orchestrator). */
+  isCrewWorker: boolean;
+  /** Messages sent this session (budget accounting). */
+  messagesSent: number;
   watcher: fs.FSWatcher | null;
   watcherRetries: number;
   watcherRetryTimer: ReturnType<typeof setTimeout> | null;
@@ -344,6 +362,11 @@ export function isValidAgentName(name: string): boolean {
   return /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/.test(name);
 }
 
+/** Channel names: lowercase alphanumerics, `_`, `-`; 1–48 chars; must start alphanumeric. */
+export function isValidChannelName(name: unknown): name is string {
+  return typeof name === "string" && /^[a-z0-9][a-z0-9_-]{0,47}$/.test(name);
+}
+
 export function formatRelativeTime(timestamp: string): string {
   const diff = Date.now() - new Date(timestamp).getTime();
   const seconds = Math.floor(diff / 1000);
@@ -421,6 +444,7 @@ export function buildSelfRegistration(state: MessengerState): AgentRegistration 
   return {
     name: state.agentName,
     pid: process.pid,
+    hostId: LOCAL_HOST_ID,
     sessionId: "",
     model: state.model,
     cwd: state.cwd,
@@ -433,6 +457,41 @@ export function buildSelfRegistration(state: MessengerState): AgentRegistration 
     reservations: state.reservations.length > 0 ? state.reservations : undefined,
     statusMessage: state.statusMessage,
   };
+}
+
+/** Reservation conflicts for `filePath` among `peers` (pure; callers supply `mesh.peers()`). */
+export function findReservationConflicts(filePath: string, peers: AgentRegistration[]): ReservationConflict[] {
+  const conflicts: ReservationConflict[] = [];
+  for (const agent of peers) {
+    if (!agent.reservations) continue;
+    for (const res of agent.reservations) {
+      if (pathMatchesReservation(filePath, res.pattern)) {
+        conflicts.push({
+          path: filePath,
+          agent: agent.name,
+          pattern: res.pattern,
+          reason: res.reason,
+          registration: agent,
+        });
+      }
+    }
+  }
+  return conflicts;
+}
+
+/** The single active swarm claim held by `agent`, if any (pure; callers supply `mesh.claims()`). */
+export function findAgentClaim(
+  claims: AllClaims,
+  agent: string
+): { spec: string; taskId: string; reason?: string } | null {
+  for (const [spec, tasks] of Object.entries(claims)) {
+    for (const [taskId, claim] of Object.entries(tasks)) {
+      if (claim.agent === agent) {
+        return { spec, taskId, reason: claim.reason };
+      }
+    }
+  }
+  return null;
 }
 
 export function agentHasTask(

@@ -308,7 +308,7 @@ export async function execute(
   const maxPasses = Math.max(1, config.planning.maxPasses);
   const hasReviewer = availableAgents.some(a => a.name === "crew-reviewer");
   const skills = discoverCrewSkills(cwd);
-  const activeTeam = teamStore.getActiveTeam(cwd);
+  const activeTeam = config.team.enabled ? teamStore.getActiveTeam(cwd) : null;
   const activeProfile = activeTeam ? teamStore.loadActiveProfile(cwd) : null;
   const teamRoles = activeTeam ? teamStore.resolveRoles(cwd) : {};
   const approvalLabels = activeTeam ? teamStore.activeApprovalLabels(cwd) : [];
@@ -464,9 +464,9 @@ export async function execute(
     const titleKey = task.title.toLowerCase();
     let taskId = titleToId.get(titleKey) ?? existingByTitle.get(titleKey);
     if (!taskId) {
-      const role = teamStore.canonicalRoleForTask(cwd, task.role);
-      const riskLabels = teamStore.normalizeRiskLabels(task.riskLabels);
-      const approval = teamStore.approvalForTask(cwd, role, riskLabels);
+      const role = config.team.enabled ? teamStore.canonicalRoleForTask(cwd, task.role) : undefined;
+      const riskLabels = config.team.enabled ? teamStore.normalizeRiskLabels(task.riskLabels) : undefined;
+      const approval = config.team.enabled ? teamStore.approvalForTask(cwd, role, riskLabels) : undefined;
       const created = store.createTask(cwd, task.title, task.description, undefined, {
         ...(role ? { role } : {}),
         ...(riskLabels && riskLabels.length > 0 ? { risk_labels: riskLabels } : {}),
@@ -543,8 +543,8 @@ export async function execute(
 - Autonomous: \`pi_messenger({ action: "work", autonomous: true })\``;
   if (shouldAutoWork) {
     const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-    const startable = ready.filter(t => !teamStore.taskNeedsApproval(t));
-    const needsApproval = ready.filter(teamStore.taskNeedsApproval);
+    const startable = ready.filter(t => !teamStore.taskNeedsApproval(cwd, t));
+    const needsApproval = ready.filter(t => teamStore.taskNeedsApproval(cwd, t));
     nextSteps = startable.length > 0
       ? `Workers will start automatically.`
       : needsApproval.length > 0

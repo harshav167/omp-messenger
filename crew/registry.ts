@@ -1,18 +1,22 @@
 /**
  * Crew - Unified Worker Registry
  *
- * Single registry for both regular workers and lobby workers.
- * Replaces the separate maps in agents.ts and lobby.ts.
+ * Single registry for both regular workers and lobby workers. Workers are
+ * in-process omp subagent runs; an entry owns the AbortController that ends
+ * the run and the promise of its result.
  */
 
-import type { ChildProcess } from "node:child_process";
 import type { CoordinationLevel } from "./utils/config.ts";
+import type { AgentResult } from "./types.ts";
+import { getSdk } from "./sdk.ts";
 
 interface BaseWorkerEntry {
-  proc: ChildProcess;
   name: string;
   cwd: string;
   taskId: string;
+  abort: AbortController;
+  run: Promise<AgentResult> | null;
+  settled: boolean;
 }
 
 export interface RegularWorker extends BaseWorkerEntry {
@@ -25,8 +29,6 @@ export interface LobbyWorkerEntry extends BaseWorkerEntry {
   assignedTaskId: string | null;
   coordination: CoordinationLevel;
   startedAt: number;
-  promptTmpDir: string | null;
-  aliveFile: string | null;
 }
 
 export type WorkerEntry = RegularWorker | LobbyWorkerEntry;
@@ -35,6 +37,12 @@ const workers = new Map<string, WorkerEntry>();
 
 function makeKey(cwd: string, taskId: string): string {
   return `${cwd}::${taskId}`;
+}
+
+/** A subagent id still known to omp's registry and not hard-aborted. */
+export function registryAlive(name: string): boolean {
+  const ref = getSdk().AgentRegistry.global().get(name);
+  return ref !== undefined && ref.status !== "aborted";
 }
 
 export function registerWorker(entry: WorkerEntry): void {
@@ -57,31 +65,21 @@ export function findWorkerByTask(cwd: string, taskId: string): WorkerEntry | nul
 
 export function hasActiveWorker(cwd: string, taskId: string): boolean {
   const entry = findWorkerByTask(cwd, taskId);
-  if (!entry) return false;
-  return entry.proc.exitCode === null && !entry.proc.killed;
+  return entry !== null && !entry.settled;
 }
 
+/** Abort the run for `taskId`; true when it was still unsettled. */
 export function killWorkerByTask(cwd: string, taskId: string): boolean {
   const entry = findWorkerByTask(cwd, taskId);
-  if (!entry) return false;
-  if (entry.proc.exitCode === null && !entry.proc.killed) {
-    entry.proc.kill("SIGTERM");
-    const ref = entry.proc;
-    const timer = setTimeout(() => {
-      if (ref.exitCode === null) ref.kill("SIGKILL");
-    }, 5000);
-    timer.unref();
-    return true;
-  }
-  return false;
+  if (!entry || entry.settled) return false;
+  entry.abort.abort();
+  return true;
 }
 
 export function killAll(cwd?: string): void {
   for (const [key, entry] of workers.entries()) {
     if (cwd && entry.cwd !== cwd) continue;
-    if (entry.proc.exitCode === null && !entry.proc.killed) {
-      entry.proc.kill("SIGTERM");
-    }
+    if (!entry.settled) entry.abort.abort();
     workers.delete(key);
   }
 }
@@ -98,17 +96,13 @@ export function getAvailableLobbyWorkers(cwd: string): LobbyWorkerEntry[] {
   const result: LobbyWorkerEntry[] = [];
   for (const entry of workers.values()) {
     if (entry.cwd !== cwd || entry.type !== "lobby") continue;
-    if (entry.assignedTaskId) continue;
-    if (entry.proc.exitCode !== null) continue;
+    if (entry.assignedTaskId || entry.settled) continue;
+    if (!registryAlive(entry.name)) continue;
     result.push(entry);
   }
   return result;
 }
 
 export function getLobbyWorkerCount(cwd: string): number {
-  let count = 0;
-  for (const entry of workers.values()) {
-    if (entry.cwd === cwd && entry.type === "lobby" && !entry.assignedTaskId && entry.proc.exitCode === null) count++;
-  }
-  return count;
+  return getAvailableLobbyWorkers(cwd).length;
 }

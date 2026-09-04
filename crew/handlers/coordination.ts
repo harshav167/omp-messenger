@@ -8,7 +8,7 @@
  */
 
 import type { Task } from "../types.ts";
-import type { CrewConfig } from "../utils/config.ts";
+import { isTeamEnabled, type CrewConfig } from "../utils/config.ts";
 import { readFeedEvents, type FeedEvent } from "../../feed.ts";
 import * as store from "../store.ts";
 import * as teamStore from "../team/store.ts";
@@ -172,9 +172,10 @@ These tasks are being worked on by other workers in this wave. Discover their ag
     const concurrentIds = new Set(concurrentTasks.map(t => t.id));
     const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" })
       .filter(t => t.id !== task.id && !concurrentIds.has(t.id));
-    const claimable = ready.filter(t => !teamStore.taskNeedsApproval(t));
-    const needsApproval = ready.filter(teamStore.taskPendingApproval);
-    const rejected = ready.filter(teamStore.taskNeedsRevision);
+    const claimable = ready.filter(t => !teamStore.taskNeedsApproval(cwd, t));
+    const teamEnabled = isTeamEnabled(cwd);
+    const needsApproval = teamEnabled ? ready.filter(t => teamStore.taskPendingApproval(cwd, t)) : [];
+    const rejected = teamEnabled ? ready.filter(t => teamStore.taskNeedsRevision(cwd, t)) : [];
     if (claimable.length > 0) {
       out += `## Ready Tasks
 

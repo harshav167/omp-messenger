@@ -282,8 +282,7 @@ Full config reference (all fields optional — only set what you want to change)
 | `planning.maxPasses` | Max planner/reviewer refinement passes | `1` |
 | `work.maxAttemptsPerTask` | Auto-block after N failures | `5` |
 | `work.maxWaves` | Max autonomous waves | `50` |
-| `work.shutdownGracePeriodMs` | Grace period before SIGTERM on abort | `30000` |
-| `work.env` | Environment variables passed to spawned workers | `{}` |
+| `work.shutdownGracePeriodMs` | Grace period before a worker is aborted on shutdown | `30000` |
 | `artifacts.enabled` | Write compact Crew debug artifacts | `true` |
 | `artifacts.cleanupDays` | Retention setting for Crew artifacts | `7` |
 

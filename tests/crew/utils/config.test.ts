@@ -154,11 +154,10 @@ describe("crew/utils/config", () => {
     writeJson(userConfigPath, {
       crew: {
         work: {
-          env: {
-            OPENAI_API_BASE: "https://example.test",
-            OPENAI_API_KEY: "redacted",
-          },
           shutdownGracePeriodMs: 45000,
+        },
+        thinking: {
+          worker: "high",
         },
         models: {
           worker: "model-a",
@@ -169,7 +168,7 @@ describe("crew/utils/config", () => {
     const { loadCrewConfig } = await loadConfigModule();
     const cfg = loadCrewConfig(dirs.crewDir);
 
-    expect(cfg.work.env?.OPENAI_API_BASE).toBe("https://example.test");
+    expect(cfg.thinking?.worker).toBe("high");
     expect(cfg.work.shutdownGracePeriodMs).toBe(45000);
     expect(cfg.models?.worker).toBe("model-a");
     expect(cfg.concurrency.workers).toBe(2);

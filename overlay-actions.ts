@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { matchesKey, type TUI } from "@oh-my-pi/pi-tui";
-import type { AgentMailMessage, Dirs, MessengerState } from "./lib.ts";
+import type { AgentMailMessage, MessengerState } from "./lib.ts";
 import { MAX_CHAT_HISTORY } from "./lib.ts";
-import { sendMessageToAgent, getActiveAgents } from "./store.ts";
+import type { Mesh } from "./mesh/types.ts";
 import { logFeedEvent } from "./feed.ts";
 import * as crewStore from "./crew/store.ts";
 import { executeTaskAction as runTaskAction } from "./crew/task-actions.ts";
@@ -269,13 +269,13 @@ function resetMessageInput(viewState: CrewViewState): void {
 function collectMentionCandidates(
   prefix: string,
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
 ): string[] {
   const seen = new Set<string>();
   const names: string[] = [];
 
-  for (const agent of getActiveAgents(state, dirs)) {
+  for (const agent of mesh.peers()) {
     if (agent.name === state.agentName) continue;
     if (!seen.has(agent.name)) {
       seen.add(agent.name);
@@ -299,70 +299,62 @@ function collectMentionCandidates(
 
 function sendDirectMessage(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   target: string,
   text: string,
   tui: TUI,
   viewState: CrewViewState,
 ): void {
-  try {
-    const msg = sendMessageToAgent(state, dirs, target, text);
-    addToChatHistory(state, target, msg);
-    logFeedEvent(cwd, state.agentName, "message", target, previewText(text));
-    resetMessageInput(viewState);
-    setNotification(viewState, tui, true, `Sent to ${target}`);
+  void mesh.send(target, text).then(result => {
+    if (result.ok === true) {
+      addToChatHistory(state, target, result.message);
+      logFeedEvent(cwd, state.agentName, "message", target, previewText(text));
+      resetMessageInput(viewState);
+      setNotification(viewState, tui, true, `Sent to ${target}`);
+    } else {
+      setNotification(viewState, tui, false, `Failed: ${result.error}`);
+    }
     tui.requestRender();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown error";
-    setNotification(viewState, tui, false, `Failed to send to ${target}: ${msg}`);
-    tui.requestRender();
-  }
+  });
 }
 
 function sendBroadcastMessage(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   text: string,
   tui: TUI,
   viewState: CrewViewState,
 ): void {
-  const peers = getActiveAgents(state, dirs);
+  const peers = mesh.peers();
   if (peers.length === 0) {
     setNotification(viewState, tui, false, "No peers available for @all");
     tui.requestRender();
     return;
   }
 
-  let sentCount = 0;
-  for (const peer of peers) {
-    try {
-      sendMessageToAgent(state, dirs, peer.name, text);
-      sentCount++;
-    } catch {
-      // Ignore per-recipient failures
+  void Promise.all(peers.map(peer => mesh.send(peer.name, text))).then(results => {
+    const sentCount = results.filter(result => result.ok).length;
+    if (sentCount === 0) {
+      setNotification(viewState, tui, false, "Broadcast failed");
+      tui.requestRender();
+      return;
     }
-  }
 
-  if (sentCount === 0) {
-    setNotification(viewState, tui, false, "Broadcast failed");
+    addToBroadcastHistory(state, text);
+    logFeedEvent(cwd, state.agentName, "message", undefined, previewText(text));
+    resetMessageInput(viewState);
+    setNotification(viewState, tui, true, `Broadcast to ${sentCount} peer${sentCount === 1 ? "" : "s"}`);
     tui.requestRender();
-    return;
-  }
-
-  addToBroadcastHistory(state, text);
-  logFeedEvent(cwd, state.agentName, "message", undefined, previewText(text));
-  resetMessageInput(viewState);
-  setNotification(viewState, tui, true, `Broadcast to ${sentCount} peer${sentCount === 1 ? "" : "s"}`);
-  tui.requestRender();
+  });
 }
 
 export function handleMessageInput(
   data: string,
   viewState: CrewViewState,
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   tui: TUI,
 ): void {
@@ -381,7 +373,7 @@ export function handleMessageInput(
 
     if (!cycling) {
       const prefix = input.slice(1);
-      viewState.mentionCandidates = collectMentionCandidates(prefix, state, dirs, cwd);
+      viewState.mentionCandidates = collectMentionCandidates(prefix, state, mesh, cwd);
       if (viewState.mentionCandidates.length === 0) return;
       viewState.mentionIndex = 0;
     } else {
@@ -401,7 +393,7 @@ export function handleMessageInput(
     if (raw.startsWith("@all ")) {
       const text = raw.slice(5).trim();
       if (!text) return;
-      sendBroadcastMessage(state, dirs, cwd, text, tui, viewState);
+      sendBroadcastMessage(state, mesh, cwd, text, tui, viewState);
       return;
     }
 
@@ -421,11 +413,11 @@ export function handleMessageInput(
         return;
       }
 
-      sendDirectMessage(state, dirs, cwd, target, text, tui, viewState);
+      sendDirectMessage(state, mesh, cwd, target, text, tui, viewState);
       return;
     }
 
-    sendBroadcastMessage(state, dirs, cwd, raw, tui, viewState);
+    sendBroadcastMessage(state, mesh, cwd, raw, tui, viewState);
     return;
   }
 

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Dirs } from "../../lib.ts";
+import type { Mesh } from "../../mesh/types.ts";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 import { createMockContext } from "../helpers/mock-context.ts";
 
@@ -20,7 +20,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
   let reviewHandler: typeof import("../../crew/handlers/review.ts");
   let store: typeof import("../../crew/store.ts");
   let cwd: string;
-  let dirs: Dirs;
+  let mesh: Mesh;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -30,13 +30,11 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     store = await import("../../crew/store.ts");
 
     cwd = createTempCrewDirs().cwd;
-    dirs = {
-      base: path.join(cwd, ".pi", "messenger"),
-      registry: path.join(cwd, ".pi", "messenger", "registry"),
-      inbox: path.join(cwd, ".pi", "messenger", "inbox"),
-    };
-    fs.mkdirSync(dirs.registry, { recursive: true });
-    fs.mkdirSync(dirs.inbox, { recursive: true });
+    mesh = {
+      peers: () => [],
+      evict: vi.fn(),
+      send: vi.fn(async () => ({ ok: true })),
+    } as unknown as Mesh;
     const agentsDir = path.join(cwd, ".pi", "messenger", "crew", "agents");
     fs.mkdirSync(agentsDir, { recursive: true });
     for (const name of ["crew-worker", "crew-reviewer"]) {
@@ -78,7 +76,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
       return [workerResult(task.id)];
     });
 
-    const response = await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(reviewHandler.reviewImplementation).not.toHaveBeenCalled();
     expect(response.details.succeeded).toEqual([]);
@@ -104,7 +102,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
       store.updateTask(cwd, task.id, { status: "done", completed_at: new Date().toISOString(), summary: "Done", base_commit: "abc123" });
       return [workerResult(task.id)];
     });
-    const responsePromise = workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const responsePromise = workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
     // Block as duplicate right before the dispatch loop reads it again
     const origGetTask = store.getTask.bind(store);
     let calls = 0;
@@ -132,7 +130,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
       return [workerResult(task.id)];
     });
 
-    const response = await workHandler.execute({}, dirs, createMockContext(cwd), vi.fn());
+    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
     expect(reviewHandler.reviewImplementation).toHaveBeenCalledWith(cwd, task.id, undefined);
     expect(response.details.succeeded).toContain(task.id);

@@ -6,12 +6,14 @@
  */
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "../lib.ts";
+import type { MessengerState, AgentMailMessage, NameThemeConfig } from "../lib.ts";
+import type { Mesh } from "../mesh/types.ts";
 import * as handlers from "../handlers.ts";
 import type { CrewParams, AppendEntryFn } from "./types.ts";
 import { result } from "./utils/result.ts";
 import { isPlanningForCwd, cancelPlanningRun, autonomousState, isAutonomousForCwd, stopAutonomous } from "./state.ts";
 import { logFeedEvent } from "../feed.ts";
+import { isTeamEnabled } from "./utils/config.ts";
 
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
@@ -32,7 +34,7 @@ export async function executeCrewAction(
   action: string,
   params: CrewParams,
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   deliverMessage: DeliverFn,
   updateStatus: UpdateStatusFn,
@@ -52,7 +54,7 @@ export async function executeCrewAction(
 
   // join - this is how you register
   if (group === 'join') {
-    return handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention);
+    return handlers.executeJoin(state, mesh, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention, params.channel);
   }
 
   // autoRegisterPath - config management, not agent operation
@@ -76,23 +78,26 @@ export async function executeCrewAction(
     // Coordination actions (delegate to existing handlers)
     // ═══════════════════════════════════════════════════════════════════════
     case 'status':
-      return handlers.executeStatus(state, dirs, ctx.cwd);
+      return handlers.executeStatus(state, mesh, ctx.cwd);
+
+    case 'channels':
+      return handlers.executeChannels(mesh);
 
     case 'leave':
-      return handlers.executeLeave(state, dirs, ctx);
+      return handlers.executeLeave(state, mesh, ctx);
 
     case 'list':
-      return handlers.executeList(state, dirs, ctx.cwd, { stuckThreshold: config?.stuckThreshold });
+      return handlers.executeList(state, mesh, ctx.cwd, { stuckThreshold: config?.stuckThreshold });
 
     case 'whois': {
       if (!params.name) {
         return result("Error: name required for whois action.", { mode: "whois", error: "missing_name" });
       }
-      return handlers.executeWhois(state, dirs, ctx.cwd, params.name, { stuckThreshold: config?.stuckThreshold });
+      return handlers.executeWhois(state, mesh, ctx.cwd, params.name, { stuckThreshold: config?.stuckThreshold });
     }
 
     case 'set_status': {
-      return handlers.executeSetStatus(state, dirs, ctx, params.message);
+      return handlers.executeSetStatus(state, mesh, ctx, params.message);
     }
 
     case 'feed': {
@@ -103,49 +108,49 @@ export async function executeCrewAction(
       if (!params.spec) {
         return result("Error: spec path required.", { mode: "spec", error: "missing_spec" });
       }
-      return handlers.executeSetSpec(state, dirs, ctx, params.spec);
+      return handlers.executeSetSpec(state, mesh, ctx, params.spec);
 
     case 'send':
-      return handlers.executeSend(state, dirs, ctx.cwd, params.to, false, params.message, params.replyTo);
+      return handlers.executeSend(state, mesh, ctx.cwd, params.to, false, params.message, params.replyTo);
 
     case 'broadcast':
-      return handlers.executeSend(state, dirs, ctx.cwd, undefined, true, params.message, params.replyTo);
+      return handlers.executeSend(state, mesh, ctx.cwd, undefined, true, params.message, params.replyTo);
 
     case 'reserve':
       if (!params.paths || params.paths.length === 0) {
         return result("Error: paths required for reserve action.", { mode: "reserve", error: "missing_paths" });
       }
-      return handlers.executeReserve(state, dirs, ctx, params.paths, params.reason);
+      return handlers.executeReserve(state, mesh, ctx, params.paths, params.reason);
 
     case 'release':
-      return handlers.executeRelease(state, dirs, ctx, params.paths ?? true);
+      return handlers.executeRelease(state, mesh, ctx, params.paths ?? true);
 
     case 'rename':
       if (!params.name) {
         return result("Error: name required for rename action.", { mode: "rename", error: "missing_name" });
       }
-      return handlers.executeRename(state, dirs, ctx, params.name, deliverMessage, updateStatus);
+      return handlers.executeRename(state, mesh, ctx, params.name, deliverMessage, updateStatus);
 
     case 'swarm':
-      return handlers.executeSwarm(state, dirs, ctx.cwd, params.spec);
+      return handlers.executeSwarm(state, mesh, ctx.cwd, params.spec);
 
     case 'claim':
       if (!params.taskId) {
         return result("Error: taskId required for claim action.", { mode: "claim", error: "missing_taskId" });
       }
-      return handlers.executeClaim(state, dirs, ctx, params.taskId, params.spec, params.reason);
+      return handlers.executeClaim(state, mesh, ctx, params.taskId, params.spec, params.reason);
 
     case 'unclaim':
       if (!params.taskId) {
         return result("Error: taskId required for unclaim action.", { mode: "unclaim", error: "missing_taskId" });
       }
-      return handlers.executeUnclaim(state, dirs, ctx.cwd, params.taskId, params.spec);
+      return handlers.executeUnclaim(state, mesh, ctx.cwd, params.taskId, params.spec);
 
     case 'complete':
       if (!params.taskId) {
         return result("Error: taskId required for complete action.", { mode: "complete", error: "missing_taskId" });
       }
-      return handlers.executeComplete(state, dirs, ctx.cwd, params.taskId, params.notes, params.spec);
+      return handlers.executeComplete(state, mesh, ctx.cwd, params.taskId, params.notes, params.spec);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Crew actions - Simplified PRD-based workflow
@@ -154,6 +159,9 @@ export async function executeCrewAction(
       if (!op) {
         return result("Error: team action requires operation (e.g., 'team.status', 'team.profile.list').",
           { mode: "team", error: "missing_operation" });
+      }
+      if (!isTeamEnabled(ctx.cwd)) {
+        return result("Team is disabled (crew.team.enabled=false).", { mode: "team", error: "team_disabled" });
       }
       try {
         const teamHandlers = await import("./handlers/team.ts");
@@ -210,7 +218,7 @@ export async function executeCrewAction(
 
       try {
         const workHandler = await import("./handlers/work.ts");
-        return workHandler.execute(params, dirs, ctx, appendEntry, signal, sessionModel);
+        return workHandler.execute(params, mesh, ctx, appendEntry, signal, sessionModel);
       } catch (e) {
         return result(`Error: work handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
           { mode: "work", error: "handler_error" });

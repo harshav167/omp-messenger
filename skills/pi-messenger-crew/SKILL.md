@@ -312,8 +312,7 @@ Project-level (`.pi/messenger/crew/config.json`):
 | `work.maxWaves` | Max autonomous waves | `50` |
 | `work.maxAttemptsPerTask` | Max attempts before auto-blocking a task | `5` |
 | `work.stopOnBlock` | Stop autonomous mode when any task blocks | `false` |
-| `work.shutdownGracePeriodMs` | Grace period before SIGTERM on abort | `30000` |
-| `work.env` | Environment variables passed to spawned workers | `{}` |
+| `work.shutdownGracePeriodMs` | Grace period before a worker is aborted on shutdown | `30000` |
 
 ### Coordination Levels
 

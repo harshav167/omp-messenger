@@ -6,7 +6,6 @@ import { existsSync } from "node:fs";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
   type MessengerState,
-  type Dirs,
   type AgentMailMessage,
   type AgentRegistration,
   type NameThemeConfig,
@@ -21,15 +20,34 @@ import {
   formatDuration,
   buildSelfRegistration,
   agentHasTask,
+  findAgentClaim,
+  LOCAL_HOST_ID,
 } from "./lib.ts";
-import * as store from "./store.ts";
+import {
+  type Mesh,
+  type SendError,
+  isClaimSuccess,
+  isClaimAlreadyHaveClaim,
+  isUnclaimSuccess,
+  isUnclaimNotYours,
+  isCompleteSuccess,
+  isCompleteAlreadyCompleted,
+  isCompleteNotYours,
+} from "./mesh/types.ts";
 import * as crewStore from "./crew/store.ts";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.ts";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.ts";
 import { isAutonomousForCwd, isPlanningForCwd } from "./crew/state.ts";
 import { loadCrewConfig } from "./crew/utils/config.ts";
 
-let messagesSentThisSession = 0;
+const SEND_ERROR_TEXT: Record<SendError, string> = {
+  invalid_name: "invalid name",
+  not_found: "not found",
+  not_active: "no longer active",
+  invalid_registration: "invalid registration",
+  write_failed: "write failed",
+  unreachable: "mesh unreachable",
+};
 
 // =============================================================================
 // Tool Result Helper
@@ -57,35 +75,41 @@ export function notRegisteredError() {
 // Tool Execute Functions
 // =============================================================================
 
-export function executeJoin(
+export async function executeJoin(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   deliverFn: (msg: AgentMailMessage) => void,
   updateStatusFn: (ctx: ExtensionContext) => void,
   specPath?: string,
   nameTheme?: NameThemeConfig,
-  feedRetention?: number
+  feedRetention?: number,
+  channel?: string
 ) {
   if (state.registered) {
-    const agents = store.getActiveAgents(state, dirs);
+    const agents = mesh.peers();
     return result(
-      `Already joined as ${state.agentName}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`,
-      { mode: "join", alreadyJoined: true, name: state.agentName, peerCount: agents.length }
+      `Already joined as ${state.agentName}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.\nChannel: ${mesh.channel()}`,
+      {
+        mode: "join",
+        alreadyJoined: true,
+        name: state.agentName,
+        peerCount: agents.length,
+        channel: mesh.channel(),
+      }
     );
   }
 
   state.isHuman = ctx.hasUI;
   const cwd = ctx.cwd;
 
-  if (!store.register(state, dirs, ctx, nameTheme)) {
+  if (!await mesh.join(ctx, { channel, nameTheme })) {
     return result(
       "Failed to join the agent mesh. Check logs for details.",
       { mode: "join", error: "registration_failed" }
     );
   }
 
-  store.startWatcher(state, dirs, deliverFn);
   updateStatusFn(ctx);
   pruneFeed(cwd, feedRetention ?? 50);
   logFeedEvent(cwd, state.agentName, "join");
@@ -93,17 +117,18 @@ export function executeJoin(
   let specWarning = "";
   if (specPath) {
     state.spec = resolveSpecPath(specPath, cwd);
-    store.updateRegistration(state, dirs, ctx);
+    mesh.publish(ctx);
     if (!existsSync(state.spec)) {
       specWarning = `\n\nWarning: Spec file not found at ${displaySpecPath(state.spec, cwd)}.`;
     }
   }
 
-  const agents = store.getActiveAgents(state, dirs);
+  const agents = mesh.peers();
   const folder = extractFolder(cwd);
   const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
 
   let text = `Joined as ${state.agentName} in ${locationPart}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`;
+  text += `\nChannel: ${mesh.channel()}`;
 
   if (state.spec) {
     text += `\nSpec: ${displaySpecPath(state.spec, cwd)}`;
@@ -124,13 +149,14 @@ export function executeJoin(
     location: locationPart,
     peerCount: agents.length,
     peers: agents.map(a => a.name),
-    spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined
+    spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined,
+    channel: mesh.channel(),
   });
 }
 
 export async function executeLeave(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
 ) {
   if (!state.registered) {
@@ -165,20 +191,20 @@ export async function executeLeave(
     );
   }
 
-  const activeClaim = store.getAgentCurrentClaim(dirs, state.agentName);
+  const activeClaim = findAgentClaim(mesh.claims(), state.agentName);
   let releasedClaim: { spec: string; taskId: string; reason?: string } | undefined;
   if (activeClaim) {
     const claimDisplay = displaySpecPath(activeClaim.spec, cwd);
     try {
-      const unclaimResult = await store.unclaimTask(dirs, activeClaim.spec, activeClaim.taskId, state.agentName);
-      if (!store.isUnclaimSuccess(unclaimResult)) {
+      const unclaimResult = await mesh.unclaim(activeClaim.spec, activeClaim.taskId);
+      if (!isUnclaimSuccess(unclaimResult)) {
         return result(
           `Cannot leave because the active swarm claim ${activeClaim.taskId} in ${claimDisplay} could not be released. Resolve it first and retry.`,
           {
             mode: "leave",
             error: unclaimResult.error,
             activeClaim: { ...activeClaim, spec: claimDisplay },
-            ...(store.isUnclaimNotYours(unclaimResult) ? { claimedBy: unclaimResult.claimedBy } : {}),
+            ...(isUnclaimNotYours(unclaimResult) ? { claimedBy: unclaimResult.claimedBy } : {}),
           }
         );
       }
@@ -199,13 +225,13 @@ export async function executeLeave(
 
   const releasedReservations = state.reservations.map(r => r.pattern);
   state.reservations = [];
-  store.updateRegistration(state, dirs, ctx);
+  mesh.publish(ctx);
   for (const pattern of releasedReservations) {
     logFeedEvent(cwd, state.agentName, "release", pattern);
   }
 
   try {
-    store.unregister(state, dirs);
+    await mesh.leave();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return result(
@@ -215,7 +241,7 @@ export async function executeLeave(
   }
 
   logFeedEvent(cwd, state.agentName, "leave");
-  store.stopWatcher(state);
+  mesh.close();
 
   if (ctx.hasUI) {
     ctx.ui.setStatus("messenger", undefined);
@@ -240,15 +266,15 @@ export async function executeLeave(
   );
 }
 
-export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string) {
+export function executeStatus(state: MessengerState, mesh: Mesh, cwd: string) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
-  const agents = store.getActiveAgents(state, dirs);
+  const agents = mesh.peers();
   const folder = extractFolder(cwd);
   const location = state.gitBranch ? `${folder} (${state.gitBranch})` : folder;
-  const myClaim = store.getAgentCurrentClaim(dirs, state.agentName);
+  const myClaim = findAgentClaim(mesh.claims(), state.agentName);
 
   let text = `You: ${state.agentName}\n`;
   text += `Location: ${location}\n`;
@@ -286,13 +312,22 @@ export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string) {
   });
 }
 
-export function executeList(state: MessengerState, dirs: Dirs, cwd: string, config?: { stuckThreshold?: number }) {
+export async function executeChannels(mesh: Mesh) {
+  const channels = await mesh.channels();
+  const lines = channels.map(channel => {
+    const marker = channel.name === mesh.channel() ? " (current)" : "";
+    return `  ${channel.name}${marker}  ${channel.members} member(s)  created ${channel.createdAt}`;
+  });
+  return result(`Channels:\n${lines.join("\n")}`, { mode: "channels", channels });
+}
+
+export function executeList(state: MessengerState, mesh: Mesh, cwd: string, config?: { stuckThreshold?: number }) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
   const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
-  const peers = store.getActiveAgents(state, dirs);
+  const peers = mesh.peers();
   const folder = extractFolder(cwd);
   const totalCount = peers.length + 1;
 
@@ -346,7 +381,7 @@ export function executeList(state: MessengerState, dirs: Dirs, cwd: string, conf
     return parts.join(" - ");
   }
 
-  const allClaims = store.getClaims(dirs);
+  const allClaims = mesh.claims();
 
   lines.push(formatAgentLine(buildSelfRegistration(state), true, agentHasTask(state.agentName, allClaims, crewStore.getTasks(cwd))));
 
@@ -368,9 +403,9 @@ export function executeList(state: MessengerState, dirs: Dirs, cwd: string, conf
   );
 }
 
-export function executeSend(
+export async function executeSend(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   to: string | string[] | undefined,
   broadcast: boolean | undefined,
@@ -391,27 +426,26 @@ export function executeSend(
   const crewDir = crewStore.getCrewDir(cwd);
   const crewConfig = loadCrewConfig(crewDir);
   const budget = crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10;
-  if (messagesSentThisSession >= budget) {
+  if (state.messagesSent >= budget) {
     return result(
-      `Message budget reached (${messagesSentThisSession}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
+      `Message budget reached (${state.messagesSent}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
       { mode: "send", error: "budget_exceeded" }
     );
   }
 
   let recipients: string[];
   if (broadcast) {
-    if (process.env.PI_CREW_WORKER) {
-      messagesSentThisSession++;
+    if (state.isCrewWorker) {
+      state.messagesSent++;
       const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
       logFeedEvent(cwd, state.agentName, "message", undefined, preview);
-      const remaining = budget - messagesSentThisSession;
+      const remaining = budget - state.messagesSent;
       return result(
         `Broadcast logged. (${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
         { mode: "send", sent: ["feed"], failed: [] }
       );
     }
-    const agents = store.getActiveAgents(state, dirs);
-    recipients = agents.map(a => a.name);
+    recipients = mesh.peers().map(agent => agent.name);
     if (recipients.length === 0) {
       return result(
         "No active agents to broadcast to.",
@@ -442,25 +476,11 @@ export function executeSend(
       continue;
     }
 
-    const validation = store.validateTargetAgent(recipient, dirs);
-    if (!validation.valid) {
-      const errorMap: Record<string, string> = {
-        invalid_name: "invalid name",
-        not_found: "not found",
-        not_active: "no longer active",
-        invalid_registration: "invalid registration",
-      };
-      const errKey = (validation as { valid: false; error: string }).error;
-      failed.push({ name: recipient, error: errorMap[errKey] });
-      continue;
-    }
-
-    try {
-      store.sendMessageToAgent(state, dirs, recipient, message, replyTo);
+    const sendResult = await mesh.send(recipient, message, { replyTo });
+    if (sendResult.ok === true) {
       sent.push(recipient);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "write failed";
-      failed.push({ name: recipient, error: msg });
+    } else {
+      failed.push({ name: recipient, error: SEND_ERROR_TEXT[sendResult.error] });
     }
   }
 
@@ -472,7 +492,7 @@ export function executeSend(
     );
   }
 
-  messagesSentThisSession++;
+  state.messagesSent++;
 
   const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
   if (broadcast) {
@@ -483,7 +503,7 @@ export function executeSend(
     }
   }
 
-  const remaining = budget - messagesSentThisSession;
+  const remaining = budget - state.messagesSent;
   let text = `Message sent to ${sent.join(", ")}. (${remaining} message${remaining === 1 ? "" : "s"} remaining)`;
   if (failed.length > 0) {
     const failedStr = failed.map(f => `${f.name} (${f.error})`).join(", ");
@@ -495,7 +515,7 @@ export function executeSend(
 
 export function executeReserve(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   patterns: string[],
   reason?: string
@@ -518,7 +538,7 @@ export function executeReserve(
     state.reservations.push({ pattern, reason, since: now });
   }
 
-  store.updateRegistration(state, dirs, ctx);
+  mesh.publish(ctx);
 
   for (const pattern of patterns) {
     logFeedEvent(ctx.cwd, state.agentName, "reserve", pattern, reason);
@@ -529,7 +549,7 @@ export function executeReserve(
 
 export function executeRelease(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   release: string[] | true
 ) {
@@ -540,7 +560,7 @@ export function executeRelease(
   if (release === true) {
     const released = state.reservations.map(r => r.pattern);
     state.reservations = [];
-    store.updateRegistration(state, dirs, ctx);
+    mesh.publish(ctx);
     for (const pattern of released) {
       logFeedEvent(ctx.cwd, state.agentName, "release", pattern);
     }
@@ -554,7 +574,7 @@ export function executeRelease(
   const releasedPatterns = state.reservations.filter(r => patterns.includes(r.pattern)).map(r => r.pattern);
   state.reservations = state.reservations.filter(r => !patterns.includes(r.pattern));
 
-  store.updateRegistration(state, dirs, ctx);
+  mesh.publish(ctx);
   for (const pattern of releasedPatterns) {
     logFeedEvent(ctx.cwd, state.agentName, "release", pattern);
   }
@@ -562,23 +582,19 @@ export function executeRelease(
   return result(`Released ${releasedPatterns.length} reservation(s).`, { mode: "release", released: releasedPatterns });
 }
 
-export function executeRename(
+export async function executeRename(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   newName: string,
   deliverFn: (msg: AgentMailMessage) => void,
   updateStatusFn: (ctx: ExtensionContext) => void
 ) {
-  store.stopWatcher(state);
+  const renameResult = await mesh.rename(ctx, newName);
 
-  const renameResult = store.renameAgent(state, dirs, ctx, newName, deliverFn);
-
-  if (!renameResult.success) {
-    store.startWatcher(state, dirs, deliverFn);
-    
-    const errCode = (renameResult as { success: false; error: string }).error;
-    const errorMessages: Record<string, string> = {
+  if (renameResult.success === false) {
+    const errCode = renameResult.error;
+    const errorMessages: Record<typeof errCode, string> = {
       not_registered: "Cannot rename - not registered.",
       invalid_name: `Invalid name "${newName}" - use only letters, numbers, underscore, hyphen.`,
       name_taken: `Name "${newName}" is already in use by another agent.`,
@@ -591,8 +607,6 @@ export function executeRename(
     );
   }
 
-  state.watcherRetries = 0;
-  store.startWatcher(state, dirs, deliverFn);
   updateStatusFn(ctx);
 
   return result(
@@ -603,14 +617,14 @@ export function executeRename(
 
 export function executeSetSpec(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   specPath: string
 ) {
   const cwd = ctx.cwd;
   const absPath = resolveSpecPath(specPath, cwd);
   state.spec = absPath;
-  store.updateRegistration(state, dirs, ctx);
+  mesh.publish(ctx);
   const display = displaySpecPath(absPath, cwd);
   const warning = existsSync(absPath) ? "" : `\n\nWarning: Spec file not found at ${display}.`;
   return result(`Spec set to ${display}${warning}`, { mode: "spec", spec: display });
@@ -618,7 +632,7 @@ export function executeSetSpec(
 
 export async function executeClaim(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   taskId: string,
   specPath?: string,
@@ -637,18 +651,10 @@ export async function executeClaim(
     ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
     : "";
 
-  const claimResult = await store.claimTask(
-    dirs,
-    spec,
-    taskId,
-    state.agentName,
-    ctx.sessionManager.getSessionId(),
-    process.pid,
-    reason
-  );
+  const claimResult = await mesh.claim(ctx, spec, taskId, reason);
 
   const display = displaySpecPath(spec, cwd);
-  if (store.isClaimSuccess(claimResult)) {
+  if (isClaimSuccess(claimResult)) {
     return result(`Claimed ${taskId} in ${display}${warning}`, {
       mode: "claim",
       spec: display,
@@ -658,7 +664,7 @@ export async function executeClaim(
     });
   }
 
-  if (store.isClaimAlreadyHaveClaim(claimResult)) {
+  if (isClaimAlreadyHaveClaim(claimResult)) {
     const existingDisplay = displaySpecPath(claimResult.existing.spec, cwd);
     return result(
       `Error: You already have a claim on ${claimResult.existing.taskId} in ${existingDisplay}. Complete or unclaim it first.${warning}`,
@@ -679,7 +685,7 @@ export async function executeClaim(
 
 export async function executeUnclaim(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   taskId: string,
   specPath?: string
@@ -693,14 +699,14 @@ export async function executeUnclaim(
     ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
     : "";
 
-  const unclaimResult = await store.unclaimTask(dirs, spec, taskId, state.agentName);
+  const unclaimResult = await mesh.unclaim(spec, taskId);
   const display = displaySpecPath(spec, cwd);
 
-  if (store.isUnclaimSuccess(unclaimResult)) {
+  if (isUnclaimSuccess(unclaimResult)) {
     return result(`Released claim on ${taskId}${warning}`, { mode: "unclaim", spec: display, taskId });
   }
 
-  if (store.isUnclaimNotYours(unclaimResult)) {
+  if (isUnclaimNotYours(unclaimResult)) {
     return result(
       `Error: ${taskId} is claimed by ${unclaimResult.claimedBy}, not you.${warning}`,
       { mode: "unclaim", error: "not_your_claim", taskId, claimedBy: unclaimResult.claimedBy }
@@ -713,7 +719,7 @@ export async function executeUnclaim(
 
 export async function executeComplete(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   taskId: string,
   notes?: string,
@@ -728,10 +734,10 @@ export async function executeComplete(
     ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
     : "";
 
-  const completeResult = await store.completeTask(dirs, spec, taskId, state.agentName, notes);
+  const completeResult = await mesh.complete(spec, taskId, notes);
   const display = displaySpecPath(spec, cwd);
 
-  if (store.isCompleteSuccess(completeResult)) {
+  if (isCompleteSuccess(completeResult)) {
     return result(`Completed ${taskId} in ${display}${warning}`, {
       mode: "complete",
       spec: display,
@@ -740,14 +746,14 @@ export async function executeComplete(
     });
   }
 
-  if (store.isCompleteAlreadyCompleted(completeResult)) {
+  if (isCompleteAlreadyCompleted(completeResult)) {
     return result(
       `Error: ${taskId} was already completed by ${completeResult.completion.completedBy}.${warning}`,
       { mode: "complete", error: "already_completed", taskId, completion: completeResult.completion }
     );
   }
 
-  if (store.isCompleteNotYours(completeResult)) {
+  if (isCompleteNotYours(completeResult)) {
     return result(
       `Error: ${taskId} is claimed by ${completeResult.claimedBy}, not you.${warning}`,
       { mode: "complete", error: "not_your_claim", taskId, claimedBy: completeResult.claimedBy }
@@ -760,13 +766,13 @@ export async function executeComplete(
 
 export function executeSwarm(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   specPath?: string
 ) {
-  const claims = store.getClaims(dirs);
-  const completions = store.getCompletions(dirs);
-  const agents = store.getActiveAgents(state, dirs);
+  const claims = mesh.claims();
+  const completions = mesh.completions();
+  const agents = mesh.peers();
 
   const absByDisplay = new Map<string, string>();
   const addAbs = (abs: string) => {
@@ -793,7 +799,7 @@ export function executeSwarm(
     specAgents[display].push(agent.name);
   }
 
-  const myClaim = store.getAgentCurrentClaim(dirs, state.agentName);
+  const myClaim = findAgentClaim(claims, state.agentName);
   const mySpec = state.spec ? displaySpecPath(state.spec, cwd) : undefined;
 
   if (specPath) {
@@ -871,7 +877,7 @@ export function executeSwarm(
 
 export function executeSetStatus(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   message?: string
 ) {
@@ -882,7 +888,7 @@ export function executeSetStatus(
   if (!message || message.trim() === "") {
     state.statusMessage = undefined;
     state.customStatus = false;
-    store.updateRegistration(state, dirs, ctx);
+    mesh.publish(ctx);
     return result(
       "Custom status cleared. Auto-status will resume.",
       { mode: "set_status", cleared: true }
@@ -891,7 +897,7 @@ export function executeSetStatus(
 
   state.statusMessage = message.trim();
   state.customStatus = true;
-  store.updateRegistration(state, dirs, ctx);
+  mesh.publish(ctx);
   return result(
     `Status set to: ${state.statusMessage}`,
     { mode: "set_status", message: state.statusMessage }
@@ -930,7 +936,7 @@ export function executeFeed(
 
 export function executeWhois(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   name: string,
   config?: { stuckThreshold?: number }
@@ -941,11 +947,11 @@ export function executeWhois(
 
   const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
 
-  const agents = store.getActiveAgents(state, dirs);
+  const agents = mesh.peers();
   const agent = agents.find(a => a.name === name);
   if (!agent) {
     if (name === state.agentName) {
-      return executeWhoisSelf(state, dirs, cwd, thresholdMs);
+      return executeWhoisSelf(state, mesh, cwd, thresholdMs);
     }
     return result(
       `Agent "${name}" not found or not active.`,
@@ -953,27 +959,29 @@ export function executeWhois(
     );
   }
 
-  return formatWhoisOutput(agent, false, dirs, cwd, thresholdMs);
+  return formatWhoisOutput(agent, false, mesh, cwd, thresholdMs);
 }
 
 function executeWhoisSelf(
   state: MessengerState,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   thresholdMs: number
 ) {
-  return formatWhoisOutput(buildSelfRegistration(state), true, dirs, cwd, thresholdMs);
+  return formatWhoisOutput(buildSelfRegistration(state), true, mesh, cwd, thresholdMs);
 }
 
 function formatWhoisOutput(
   agent: AgentRegistration,
   isSelf: boolean,
-  dirs: Dirs,
+  mesh: Mesh,
   cwd: string,
   thresholdMs: number
 ) {
-  const allClaims = store.getClaims(dirs);
-  const hasTask = agentHasTask(agent.name, allClaims, crewStore.getTasks(agent.cwd));
+  const allClaims = mesh.claims();
+  const canReadLocalFiles = isSelf || agent.hostId === LOCAL_HOST_ID;
+  const tasks = canReadLocalFiles ? crewStore.getTasks(agent.cwd) : [];
+  const hasTask = agentHasTask(agent.name, allClaims, tasks);
 
   const computed = computeStatus(
     agent.activity?.lastActivityAt ?? agent.startedAt,
@@ -1015,8 +1023,9 @@ function formatWhoisOutput(
     }
   }
 
-  const feedCwd = isSelf ? cwd : agent.cwd;
-  const allFeedEvents = readFeedEvents(feedCwd, 100);
+  const allFeedEvents = canReadLocalFiles
+    ? readFeedEvents(isSelf ? cwd : agent.cwd, 100)
+    : [];
   const agentEvents = allFeedEvents.filter(e => e.agent === agent.name).slice(-10);
   if (agentEvents.length > 0) {
     lines.push("", "## Recent Activity");

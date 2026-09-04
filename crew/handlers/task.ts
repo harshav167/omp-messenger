@@ -9,7 +9,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { MessengerState } from "../../lib.ts";
 import type { CrewParams, Task, TaskEvidence } from "../types.ts";
 import { result } from "../utils/result.ts";
-import { loadCrewConfig } from "../utils/config.ts";
+import { isTeamEnabled, loadCrewConfig } from "../utils/config.ts";
 import * as store from "../store.ts";
 import * as teamStore from "../team/store.ts";
 import { logFeedEvent } from "../../feed.ts";
@@ -75,9 +75,9 @@ export async function execute(
 // task.create
 // =============================================================================
 
-function taskActionHint(task: Task): string {
-  if (teamStore.taskNeedsRevision(task)) return `Revise first: \`${revisionHint(task)}\``;
-  return teamStore.taskNeedsApproval(task)
+function taskActionHint(cwd: string, task: Task): string {
+  if (teamStore.taskNeedsRevision(cwd, task)) return `Revise first: \`${revisionHint(task)}\``;
+  return teamStore.taskNeedsApproval(cwd, task)
     ? `Approve first: \`pi_messenger({ action: "task.approve", id: "${task.id}" })\``
     : `Start with: \`pi_messenger({ action: "task.start", id: "${task.id}" })\``;
 }
@@ -105,13 +105,14 @@ function taskCreate(cwd: string, params: CrewParams) {
     }
   }
 
-  const role = teamStore.canonicalRoleForTask(cwd, params.role);
-  if (params.role?.trim() && teamStore.getActiveTeam(cwd) && !role) {
+  const teamEnabled = isTeamEnabled(cwd);
+  const role = teamEnabled ? teamStore.canonicalRoleForTask(cwd, params.role) : undefined;
+  if (teamEnabled && params.role?.trim() && teamStore.getActiveTeam(cwd) && !role) {
     return result(`Error: unknown Team role: ${params.role.trim()}`, { mode: "task.create", error: "invalid_role", role: params.role.trim() });
   }
 
-  const riskLabels = teamStore.normalizeRiskLabels(params.riskLabels);
-  const approval = params.approval ?? teamStore.approvalForTask(cwd, role, riskLabels);
+  const riskLabels = teamEnabled ? teamStore.normalizeRiskLabels(params.riskLabels) : undefined;
+  const approval = teamEnabled ? params.approval ?? teamStore.approvalForTask(cwd, role, riskLabels) : undefined;
   const task = store.createTask(cwd, params.title, params.content, params.dependsOn, {
     ...(role ? { role } : {}),
     ...(riskLabels && riskLabels.length > 0 ? { risk_labels: riskLabels } : {}),
@@ -128,7 +129,7 @@ function taskCreate(cwd: string, params: CrewParams) {
 **Title:** ${task.title}
 **Status:** ${task.status}${depsText}${teamText}
 
-${taskActionHint(task)}`;
+${taskActionHint(cwd, task)}`;
 
   return result(text, {
     mode: "task.create",
@@ -227,14 +228,17 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
     }
   }
 
+  const teamEnabled = isTeamEnabled(cwd);
   const created: Task[] = [];
   for (const sub of subtasks) {
-    const approval: Task["approval"] = task.approval?.required
-      ? { required: true, status: task.approval.status === "approved" ? "approved" : "pending" }
-      : teamStore.approvalForTask(cwd, task.role, task.risk_labels);
+    const approval: Task["approval"] = teamEnabled
+      ? task.approval?.required
+        ? { required: true, status: task.approval.status === "approved" ? "approved" : "pending" }
+        : teamStore.approvalForTask(cwd, task.role, task.risk_labels)
+      : undefined;
     const newTask = store.createTask(cwd, sub.title, sub.content, [...task.depends_on], {
-      ...(task.role ? { role: task.role } : {}),
-      ...(task.risk_labels?.length ? { risk_labels: task.risk_labels } : {}),
+      ...(teamEnabled && task.role ? { role: task.role } : {}),
+      ...(teamEnabled && task.risk_labels?.length ? { risk_labels: task.risk_labels } : {}),
       ...(approval ? { approval } : {}),
     });
     created.push(newTask);
@@ -426,13 +430,13 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
   }
 
   const task = store.getTask(cwd, id);
-  if (task && teamStore.taskNeedsApproval(task)) {
-    const message = teamStore.taskNeedsRevision(task)
+  if (task && teamStore.taskNeedsApproval(cwd, task)) {
+    const message = teamStore.taskNeedsRevision(cwd, task)
       ? `Error: Task ${id} was rejected and needs revision before it can be started.`
       : `Error: Task ${id} needs lead approval before it can be started.`;
     return result(message, {
       mode: "task.start",
-      error: teamStore.taskNeedsRevision(task) ? "needs_revision" : "needs_approval",
+      error: teamStore.taskNeedsRevision(cwd, task) ? "needs_revision" : "needs_approval",
       id,
       approval: task.approval,
     });
@@ -519,9 +523,9 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
   } else {
     const config = loadCrewConfig(store.getCrewDir(cwd));
     const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-    const actionable = ready.filter(t => !teamStore.taskNeedsApproval(t));
-    const rejected = ready.filter(teamStore.taskNeedsRevision);
-    const needsApproval = ready.filter(t => teamStore.taskPendingApproval(t));
+    const actionable = ready.filter(t => !teamStore.taskNeedsApproval(cwd, t));
+    const rejected = ready.filter(t => teamStore.taskNeedsRevision(cwd, t));
+    const needsApproval = ready.filter(t => teamStore.taskPendingApproval(cwd, t));
     if (actionable.length > 0) {
       nextSteps = `\n\n**Ready tasks:** ${actionable.map(t => t.id).join(", ")}`;
     }
@@ -612,7 +616,7 @@ function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
   }
 
   const unblocked = actionResult.task;
-  const text = `⬜ Unblocked task **${id}**\n\n${taskActionHint(unblocked)}`;
+  const text = `⬜ Unblocked task **${id}**\n\n${taskActionHint(cwd, unblocked)}`;
 
   return result(text, {
     mode: "task.unblock",
@@ -642,8 +646,8 @@ function taskReady(cwd: string) {
   const needsApproval: typeof allReady = [];
   const rejected: typeof allReady = [];
   for (const task of allReady) {
-    if (teamStore.taskNeedsRevision(task)) rejected.push(task);
-    else if (teamStore.taskPendingApproval(task)) needsApproval.push(task);
+    if (teamStore.taskNeedsRevision(cwd, task)) rejected.push(task);
+    else if (teamStore.taskPendingApproval(cwd, task)) needsApproval.push(task);
     else ready.push(task);
   }
 
@@ -714,6 +718,9 @@ function taskApproval(cwd: string, params: CrewParams, state: MessengerState, st
   const action = status === "approved" ? "approve" : "reject";
   const mode = `task.${action}`;
   const actor = state.agentName || "unknown";
+  if (!isTeamEnabled(cwd)) {
+    return result("Team is disabled (crew.team.enabled=false).", { mode, error: "team_disabled" });
+  }
 
   if (!id) {
     return result(`Error: id required for ${mode}`, { mode, error: "missing_id" });
@@ -782,7 +789,7 @@ function taskReset(cwd: string, params: CrewParams, state: MessengerState) {
     : `🔄 Reset task **${id}**`;
 
   const resetTask = store.getTask(cwd, id);
-  const hint = resetTask ? taskActionHint(resetTask) : `Start with: \`pi_messenger({ action: "task.start", id: "${id}" })\``;
+  const hint = resetTask ? taskActionHint(cwd, resetTask) : `Start with: \`pi_messenger({ action: "task.start", id: "${id}" })\``;
 
   return result(`${text}\n\n${hint}`, {
     mode: "task.reset",

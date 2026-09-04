@@ -1,51 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { MessengerState, Dirs } from "../../lib.ts";
+import { findAgentClaim } from "../../lib.ts";
 import { executeCrewAction } from "../../crew/index.ts";
-import * as store from "../../store.ts";
+import { createTestMesh } from "../helpers/mesh.ts";
 import * as crewStore from "../../crew/store.ts";
 import { readFeedEvents } from "../../feed.ts";
 import { autonomousState, planningState, startAutonomous, startPlanningRun, clearPlanningState } from "../../crew/state.ts";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 import { createMockContext } from "../helpers/mock-context.ts";
 
-function createTestState(agentName: string): MessengerState {
-  return {
-    agentName,
-    registered: false,
-    watcher: null,
-    watcherRetries: 0,
-    watcherRetryTimer: null,
-    watcherDebounceTimer: null,
-    reservations: [],
-    chatHistory: new Map(),
-    unreadCounts: new Map(),
-    broadcastHistory: [],
-    seenSenders: new Map(),
-    model: "test-model",
-    cwd: process.cwd(),
-    gitBranch: undefined,
-    spec: undefined,
-    scopeToFolder: false,
-    isHuman: false,
-    session: { toolCalls: 0, tokens: 0, filesModified: [] },
-    activity: { lastActivityAt: new Date().toISOString() },
-    statusMessage: undefined,
-    customStatus: false,
-    registryFlushTimer: null,
-    sessionStartedAt: new Date().toISOString(),
-  };
-}
-
-function createDirs(cwd: string): Dirs {
-  const base = path.join(cwd, ".pi", "messenger");
-  const registry = path.join(base, "registry");
-  const inbox = path.join(base, "inbox");
-  fs.mkdirSync(registry, { recursive: true });
-  fs.mkdirSync(inbox, { recursive: true });
-  return { base, registry, inbox };
-}
 
 function resetAutonomousState(): void {
   autonomousState.active = false;
@@ -71,9 +35,6 @@ function resetPlanningState(): void {
   planningState.pid = null;
 }
 
-function joinState(state: MessengerState, dirs: Dirs, ctx: ReturnType<typeof createMockContext>): void {
-  expect(store.register(state, dirs, ctx)).toBe(true);
-}
 
 describe("pi_messenger leave action", () => {
   beforeEach(() => {
@@ -83,34 +44,25 @@ describe("pi_messenger leave action", () => {
 
   it("leaves the mesh, releases reservations, and unclaims the active swarm claim", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state, base } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
 
     state.reservations = [{ pattern: "src/index.ts", reason: "editing", since: new Date().toISOString() }];
     state.spec = path.join(cwd, "docs", "SPEC.md");
     fs.mkdirSync(path.dirname(state.spec), { recursive: true });
     fs.writeFileSync(state.spec, "# Spec\n");
-    store.updateRegistration(state, dirs, ctx);
+    mesh.publish(ctx);
 
-    const claim = await store.claimTask(
-      dirs,
-      state.spec,
-      "TASK-1",
-      state.agentName,
-      ctx.sessionManager.getSessionId(),
-      process.pid,
-      "working"
-    );
-    expect(store.isClaimSuccess(claim)).toBe(true);
+    const claim = await mesh.claim(ctx, state.spec, "TASK-1", "working");
+    expect(claim.success).toBe(true);
 
     const response = await executeCrewAction(
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -123,8 +75,8 @@ describe("pi_messenger leave action", () => {
     expect(response.content[0].text).toContain("Released claim: TASK-1");
     expect(state.registered).toBe(false);
     expect(state.reservations).toEqual([]);
-    expect(fs.existsSync(path.join(dirs.registry, `${state.agentName}.json`))).toBe(false);
-    expect(store.getAgentCurrentClaim(dirs, state.agentName)).toBeNull();
+    expect(fs.existsSync(path.join(base, "registry", `${state.agentName}.json`))).toBe(false);
+    expect(findAgentClaim(mesh.claims(), state.agentName)).toBeNull();
     expect((ctx.ui.setStatus as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("messenger", undefined);
 
     const events = readFeedEvents(cwd, 10);
@@ -134,18 +86,17 @@ describe("pi_messenger leave action", () => {
 
   it("refuses to leave while project planning is active", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
     startPlanningRun(cwd, 1);
 
     const response = await executeCrewAction(
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -162,18 +113,17 @@ describe("pi_messenger leave action", () => {
 
   it("refuses to leave while autonomous Crew work is active", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
     startAutonomous(cwd, 2);
 
     const response = await executeCrewAction(
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -188,11 +138,10 @@ describe("pi_messenger leave action", () => {
 
   it("refuses to leave while this session still owns in-progress Crew tasks", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
     crewStore.createPlan(cwd, "docs/PRD.md");
     const task = crewStore.createTask(cwd, "Implement auth", "Build auth flow");
     crewStore.startTask(cwd, task.id, state.agentName);
@@ -201,7 +150,7 @@ describe("pi_messenger leave action", () => {
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -216,35 +165,27 @@ describe("pi_messenger leave action", () => {
 
   it("does not partially leave when active claim release throws", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state, base } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
     const reservation = { pattern: "src/index.ts", since: new Date().toISOString() };
     state.reservations = [reservation];
     state.spec = path.join(cwd, "docs", "SPEC.md");
     fs.mkdirSync(path.dirname(state.spec), { recursive: true });
     fs.writeFileSync(state.spec, "# Spec\n");
-    store.updateRegistration(state, dirs, ctx);
+    mesh.publish(ctx);
 
-    const claim = await store.claimTask(
-      dirs,
-      state.spec,
-      "TASK-1",
-      state.agentName,
-      ctx.sessionManager.getSessionId(),
-      process.pid,
-    );
-    expect(store.isClaimSuccess(claim)).toBe(true);
+    const claim = await mesh.claim(ctx, state.spec, "TASK-1");
+    expect(claim.success).toBe(true);
 
-    const unclaimSpy = vi.spyOn(store, "unclaimTask").mockRejectedValue(new Error("lock busy"));
+    const unclaimSpy = vi.spyOn(mesh, "unclaim").mockRejectedValue(new Error("lock busy"));
 
     const response = await executeCrewAction(
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -256,29 +197,26 @@ describe("pi_messenger leave action", () => {
     expect(response.content[0].text).toContain("could not be released: lock busy");
     expect(state.registered).toBe(true);
     expect(state.reservations).toEqual([reservation]);
-    expect(store.getAgentCurrentClaim(dirs, state.agentName)?.taskId).toBe("TASK-1");
-    expect(fs.existsSync(path.join(dirs.registry, `${state.agentName}.json`))).toBe(true);
+    expect(findAgentClaim(mesh.claims(), state.agentName)?.taskId).toBe("TASK-1");
+    expect(fs.existsSync(path.join(base, "registry", `${state.agentName}.json`))).toBe(true);
 
     unclaimSpy.mockRestore();
   });
 
   it("returns an error when unregister fails instead of reporting a successful leave", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
 
-    const unregisterSpy = vi.spyOn(store, "unregister").mockImplementation(() => {
-      throw new Error("disk busy");
-    });
+    const unregisterSpy = vi.spyOn(mesh, "leave").mockRejectedValue(new Error("disk busy"));
 
     const response = await executeCrewAction(
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -295,17 +233,16 @@ describe("pi_messenger leave action", () => {
 
   it("can rejoin later from the same session after leaving", async () => {
     const { cwd } = createTempCrewDirs();
-    const state = createTestState("AgentOne");
-    const dirs = createDirs(cwd);
+    const { mesh, state, base } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
-    joinState(state, dirs, ctx);
+    await mesh.join(ctx);
 
     const leaveResponse = await executeCrewAction(
       "leave",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -318,7 +255,7 @@ describe("pi_messenger leave action", () => {
       "join",
       {},
       state,
-      dirs,
+      mesh,
       ctx,
       () => {},
       () => {},
@@ -328,6 +265,6 @@ describe("pi_messenger leave action", () => {
     expect(joinResponse.details.mode).toBe("join");
     expect(state.registered).toBe(true);
     expect(state.agentName).toBe("AgentOne");
-    expect(fs.existsSync(path.join(dirs.registry, `${state.agentName}.json`))).toBe(true);
+    expect(fs.existsSync(path.join(base, "registry", `${state.agentName}.json`))).toBe(true);
   });
 });

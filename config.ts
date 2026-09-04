@@ -11,6 +11,16 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isValidChannelName } from "./lib.ts";
+
+export interface MeshConfig {
+  /** ws:// or wss:// URL of a pi-messenger-mesh server; null → filesystem mesh. */
+  url: string | null;
+  /** Shared secret sent in the hello frame. */
+  token: string;
+  /** Channel joined by default (explicit `join { channel }` wins). */
+  channel: string;
+}
 
 export interface MessengerConfig {
   autoRegister: boolean;
@@ -30,6 +40,7 @@ export interface MessengerConfig {
   autoOverlay: boolean;
   autoOverlayPlanning: boolean;
   crewEventsInFeed: boolean;
+  mesh: MeshConfig;
 }
 
 const DEFAULT_CONFIG: MessengerConfig = {
@@ -49,7 +60,36 @@ const DEFAULT_CONFIG: MessengerConfig = {
   autoOverlay: true,
   autoOverlayPlanning: true,
   crewEventsInFeed: true,
+  mesh: { url: null, token: "", channel: "main" },
 };
+
+/**
+ * Env wins over file config. `token` may be `$NAME` (env indirection); an empty
+ * token falls back to `~/.pi/agent/messenger/mesh.token`.
+ */
+function resolveMeshConfig(raw: unknown): MeshConfig {
+  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const fileUrl = typeof obj.url === "string" && obj.url.length > 0 ? obj.url : null;
+  const url = process.env.PI_MESSENGER_MESH_URL || fileUrl;
+
+  let token = process.env.PI_MESSENGER_MESH_TOKEN || (typeof obj.token === "string" ? obj.token : "");
+  if (token.startsWith("$")) {
+    token = process.env[token.slice(1)] ?? "";
+  }
+  if (!token) {
+    const tokenFile = join(homedir(), ".pi", "agent", "messenger", "mesh.token");
+    if (existsSync(tokenFile)) {
+      try {
+        token = readFileSync(tokenFile, "utf-8").trim();
+      } catch {
+        token = "";
+      }
+    }
+  }
+
+  const channel = isValidChannelName(obj.channel) ? obj.channel : "main";
+  return { url, token, channel };
+}
 
 function readJsonFile(path: string): Record<string, unknown> | null {
   if (!existsSync(path)) return null;
@@ -164,6 +204,7 @@ function buildConfig(projectConfig?: Partial<MessengerConfig> | null): Messenger
     autoOverlay: merged.autoOverlay !== false,
     autoOverlayPlanning: merged.autoOverlayPlanning !== false,
     crewEventsInFeed: merged.crewEventsInFeed !== false,
+    mesh: resolveMeshConfig((merged as Record<string, unknown>).mesh),
   };
 
   if (merged.contextMode === "none") {

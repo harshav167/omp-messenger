@@ -5,6 +5,7 @@ import type { Task } from "../types.ts";
 import { getTasks } from "../store.ts";
 import { discoverSubagentRoles } from "./subagent-roles.ts";
 import { normalizeRiskLabels } from "../utils/risk-labels.ts";
+import { isTeamEnabled } from "../utils/config.ts";
 import { canonicalPackagedTeamRole, isNonEditingTeamRole, isValidTeamName } from "../utils/team-roles.ts";
 import { TEAM_MEMORY_TYPES, type TeamMemoryEntry, type TeamMemoryType, type TeamProfile, type TeamPromptContext, type TeamRoleDefinition, type TeamState } from "./types.ts";
 
@@ -233,6 +234,7 @@ export function defaultTeamProfile(name: string): TeamProfile {
 }
 
 export function getActiveTeam(cwd: string): TeamState | null {
+  if (!isTeamEnabled(cwd)) return null;
   return readJson<TeamState>(teamPath(cwd, "team.json"));
 }
 
@@ -370,6 +372,7 @@ export function memoryCounts(cwd: string): Record<TeamMemoryType, number> {
 }
 
 export function resolveRoles(cwd: string, options?: { homeDir?: string }): Record<string, TeamRoleDefinition> {
+  if (!isTeamEnabled(cwd)) return {};
   const roles: Record<string, TeamRoleDefinition> = {};
   for (const [name, role] of Object.entries(BUILTIN_ROLES)) roles[name] = { ...role };
 
@@ -389,6 +392,7 @@ export function resolveRoles(cwd: string, options?: { homeDir?: string }): Recor
 export { normalizeRiskLabels };
 
 export function resolveRoleName(cwd: string, role: string | undefined): string | undefined {
+  if (!isTeamEnabled(cwd)) return undefined;
   const trimmed = role?.trim();
   if (!trimmed) return undefined;
 
@@ -419,6 +423,7 @@ export function activeApprovalLabels(cwd: string): string[] {
 }
 
 export function approvalForTask(cwd: string, role: string | undefined, riskLabels: string[] | undefined): Task["approval"] | undefined {
+  if (!isTeamEnabled(cwd)) return undefined;
   const labels = activeApprovalLabels(cwd);
   const taskLabels = normalizeRiskLabels(riskLabels);
   if (labels.length === 0 || !taskLabels || taskLabels.length === 0) return undefined;
@@ -429,24 +434,24 @@ export function approvalForTask(cwd: string, role: string | undefined, riskLabel
   return { required: true, status: "pending" };
 }
 
-export function taskNeedsApproval(task: Task): boolean {
-  return task.approval?.required === true && task.approval.status !== "approved";
+export function taskNeedsApproval(cwd: string, task: Task): boolean {
+  return isTeamEnabled(cwd) && task.approval?.required === true && task.approval.status !== "approved";
 }
 
-export function taskPendingApproval(task: Task): boolean {
-  return task.approval?.required === true && task.approval.status === "pending";
+export function taskPendingApproval(cwd: string, task: Task): boolean {
+  return isTeamEnabled(cwd) && task.approval?.required === true && task.approval.status === "pending";
 }
 
-export function taskNeedsRevision(task: Task): boolean {
-  return task.approval?.required === true && task.approval.status === "rejected";
+export function taskNeedsRevision(cwd: string, task: Task): boolean {
+  return isTeamEnabled(cwd) && task.approval?.required === true && task.approval.status === "rejected";
 }
 
 export function needsLeadTasks(cwd: string): Task[] {
-  return getTasks(cwd).filter(taskPendingApproval);
+  return getTasks(cwd).filter(task => taskPendingApproval(cwd, task));
 }
 
 export function rejectedTasks(cwd: string): Task[] {
-  return getTasks(cwd).filter(taskNeedsRevision);
+  return getTasks(cwd).filter(task => taskNeedsRevision(cwd, task));
 }
 
 export function buildTeamPromptContext(cwd: string, task: Task): TeamPromptContext | undefined {

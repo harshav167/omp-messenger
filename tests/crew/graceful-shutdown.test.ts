@@ -1,9 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { EventEmitter } from "node:events";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SingleResult as SdkSingleResult } from "@oh-my-pi/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { raceTimeout, spawnAgents } from "../../crew/agents.ts";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.ts";
 import { createMockContext } from "../helpers/mock-context.ts";
+import { setSdk } from "../../crew/sdk.ts";
+import { createTestMesh } from "../helpers/mesh.ts";
+import { createFakeSdk } from "../helpers/sdk.ts";
 
 function writeWorkerAgent(cwd: string): void {
   const filePath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
@@ -17,15 +21,6 @@ You are a worker.
 `);
 }
 
-function createDirs(cwd: string) {
-  const base = path.join(cwd, ".pi", "messenger");
-  const registry = path.join(base, "registry");
-  const inbox = path.join(base, "inbox");
-  fs.mkdirSync(registry, { recursive: true });
-  fs.mkdirSync(inbox, { recursive: true });
-  return { base, registry, inbox };
-}
-
 describe("crew/graceful shutdown", () => {
   let dirs: TempCrewDirs;
 
@@ -34,66 +29,86 @@ describe("crew/graceful shutdown", () => {
     vi.restoreAllMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("raceTimeout returns true when promise resolves before timeout and false on timeout", async () => {
-    const { raceTimeout } = await import("../../crew/agents.ts");
-
-    const fast = raceTimeout(new Promise<void>(resolve => {
-      setTimeout(resolve, 5);
-    }), 100);
-    const slow = raceTimeout(new Promise<void>(() => {}), 5);
-
+    vi.useFakeTimers();
+    const fastRun = Promise.withResolvers<void>();
+    const fast = raceTimeout(fastRun.promise, 100);
+    fastRun.resolve();
     await expect(fast).resolves.toBe(true);
+
+    const slowRun = Promise.withResolvers<void>();
+    const slow = raceTimeout(slowRun.promise, 5);
+    await vi.advanceTimersByTimeAsync(5);
     await expect(slow).resolves.toBe(false);
   });
 
-  it("abort signal writes shutdown inbox message and marks wasGracefullyShutdown", async () => {
-    vi.resetModules();
-
-    const spawnMock = vi.fn(() => {
-      const proc = new EventEmitter() as EventEmitter & {
-        pid: number;
-        stdout: EventEmitter;
-        stderr: EventEmitter;
-        killed: boolean;
-        exitCode: number | null;
-        kill: (signal?: NodeJS.Signals) => boolean;
-      };
-      proc.pid = 4242;
-      proc.stdout = new EventEmitter();
-      proc.stderr = new EventEmitter();
-      proc.killed = false;
-      proc.exitCode = null;
-      proc.kill = (signal?: NodeJS.Signals) => {
-        proc.killed = true;
-        proc.exitCode = signal === "SIGKILL" ? 137 : 143;
-        queueMicrotask(() => {
-          proc.emit("exit", proc.exitCode);
-          proc.emit("close", proc.exitCode);
-        });
-        return true;
-      };
-      return proc;
-    });
-
-    vi.doMock("node:child_process", () => ({ spawn: spawnMock }));
-
-    const { spawnAgents } = await import("../../crew/agents.ts");
-
+  it("sends an urgent shutdown message and evicts the settled worker", async () => {
+    const fake = createFakeSdk();
+    setSdk(fake.sdk);
     writeWorkerAgent(dirs.cwd);
 
-    fs.writeFileSync(path.join(dirs.crewDir, "config.json"), JSON.stringify({
-      work: {
-        shutdownGracePeriodMs: 1,
-      },
-    }, null, 2));
+    const testMesh = createTestMesh(dirs.cwd);
+    const registryDir = path.join(testMesh.base, "registry");
+    fs.mkdirSync(registryDir, { recursive: true });
+    let finishRun: ((result: SdkSingleResult) => void) | undefined;
+    let workerName = "";
 
-    const messengerDirs = createDirs(dirs.cwd);
-    const workerName = "worker-test";
-    fs.mkdirSync(path.join(messengerDirs.inbox, workerName), { recursive: true });
-    fs.writeFileSync(path.join(messengerDirs.registry, `${workerName}.json`), JSON.stringify({
-      name: workerName,
-      pid: 4242,
-    }, null, 2));
+    fake.runSubprocess.mockImplementation(options => {
+      const run = Promise.withResolvers<SdkSingleResult>();
+      workerName = options.id;
+      fs.writeFileSync(path.join(registryDir, `${workerName}.json`), "{}");
+      const finish = (aborted: boolean): void => run.resolve({
+        index: options.index,
+        id: options.id,
+        agent: options.agent.name,
+        agentSource: "user",
+        task: options.task,
+        exitCode: aborted ? 143 : 0,
+        output: "",
+        stderr: "",
+        truncated: false,
+        durationMs: 1,
+        tokens: 0,
+        requests: 1,
+        aborted,
+      });
+      finishRun = run.resolve;
+      options.signal?.addEventListener("abort", () => finish(true), { once: true });
+      return run.promise;
+    });
+
+    const sendSpy = vi.spyOn(testMesh.mesh, "send").mockImplementation(async (to, text, options) => {
+      finishRun?.({
+        index: 0,
+        id: to,
+        agent: "crew-worker",
+        agentSource: "user",
+        task: "execute task",
+        exitCode: 0,
+        output: "",
+        stderr: "",
+        truncated: false,
+        durationMs: 1,
+        tokens: 0,
+        requests: 1,
+      });
+      return {
+        ok: true,
+        message: {
+          id: "shutdown",
+          from: options?.from ?? "crew-orchestrator",
+          to,
+          text,
+          timestamp: new Date().toISOString(),
+          replyTo: null,
+          urgent: options?.urgent,
+        },
+      };
+    });
 
     const controller = new AbortController();
     const resultPromise = spawnAgents([{
@@ -102,28 +117,18 @@ describe("crew/graceful shutdown", () => {
       taskId: "task-1",
     }], dirs.cwd, {
       signal: controller.signal,
-      messengerDirs: { registry: messengerDirs.registry, inbox: messengerDirs.inbox },
+      mesh: testMesh.mesh,
     });
-
     controller.abort();
-    const results = await resultPromise;
+    const [result] = await resultPromise;
 
-    expect(results).toHaveLength(1);
-    expect(results[0].taskId).toBe("task-1");
-    expect(results[0].wasGracefullyShutdown).toBe(true);
-    expect(results[0].exitCode).toBe(143);
-
-    const inboxFiles = fs.readdirSync(path.join(messengerDirs.inbox, workerName));
-    expect(inboxFiles.some(f => f.endsWith("-shutdown.json"))).toBe(true);
-
-    const shutdownFile = inboxFiles.find(f => f.endsWith("-shutdown.json"))!;
-    const shutdownPayload = JSON.parse(
-      fs.readFileSync(path.join(messengerDirs.inbox, workerName, shutdownFile), "utf-8")
+    expect(sendSpy).toHaveBeenCalledWith(
+      workerName,
+      expect.stringContaining("SHUTDOWN REQUESTED"),
+      { from: "crew-orchestrator", urgent: true },
     );
-    expect(shutdownPayload.text).toContain("SHUTDOWN REQUESTED");
-    expect(shutdownPayload.from).toBe("crew-orchestrator");
-
-    expect(fs.existsSync(path.join(messengerDirs.registry, `${workerName}.json`))).toBe(false);
+    expect(result?.wasGracefullyShutdown).toBe(true);
+    expect(fs.existsSync(path.join(registryDir, `${workerName}.json`))).toBe(false);
   });
 
   it("result processing uses taskId and graceful shutdown branches correctly", async () => {
@@ -157,7 +162,7 @@ describe("crew/graceful shutdown", () => {
 
     const response = await workHandler.execute(
       { action: "work" },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -225,7 +230,7 @@ describe("crew/graceful shutdown", () => {
 
     const first = await workHandler.execute(
       { action: "work", concurrency: 1 },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -233,7 +238,7 @@ describe("crew/graceful shutdown", () => {
 
     const second = await workHandler.execute(
       { action: "work", autonomous: true, concurrency: 1 },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -288,7 +293,7 @@ describe("crew/graceful shutdown", () => {
     const appendEntry = vi.fn();
     const response = await workHandler.execute(
       { action: "work", autonomous: true, concurrency: 1 },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       appendEntry,
       controller.signal,
@@ -316,7 +321,7 @@ describe("crew/graceful shutdown", () => {
 
     await workHandler.execute(
       { action: "work", concurrency: 1.8 },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -346,7 +351,7 @@ describe("crew/graceful shutdown", () => {
 
     const response = await workHandler.execute(
       { action: "work" },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -390,7 +395,7 @@ describe("crew/graceful shutdown", () => {
 
     const response = await workHandler.execute(
       { action: "work", concurrency: 2 },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -415,7 +420,7 @@ describe("crew/graceful shutdown", () => {
 
     const response = await workHandler.execute(
       { action: "work" },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -459,7 +464,7 @@ describe("crew/graceful shutdown", () => {
 
     const response = await workHandler.execute(
       { action: "work" },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );
@@ -504,7 +509,7 @@ describe("crew/graceful shutdown", () => {
 
     const response = await workHandler.execute(
       { action: "work" },
-      createDirs(dirs.cwd),
+      createTestMesh(dirs.cwd).mesh,
       createMockContext(dirs.cwd),
       () => {},
     );

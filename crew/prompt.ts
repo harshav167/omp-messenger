@@ -24,7 +24,7 @@ export function buildWorkerPrompt(
 ): string {
   const taskSpec = store.getTaskSpec(cwd, task.id);
   const planSpec = store.getPlanSpec(cwd);
-  const isNonEditingRole = isNonEditingTeamRole(teamContext?.role?.name ?? task.role);
+  const isNonEditingRole = isNonEditingTeamRole(teamContext?.role?.name);
   const mission = isNonEditingRole
     ? `Inspect this task as a read-only Team role. This overrides generic implementation protocol for this assignment:
 1. Join the mesh

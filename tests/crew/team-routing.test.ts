@@ -1,34 +1,24 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Dirs, MessengerState } from "../../lib.ts";
+import type { MessengerState } from "../../lib.ts";
+import type { Mesh } from "../../mesh/types.ts";
 import { executeCrewAction } from "../../crew/index.ts";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 import { createMockContext } from "../helpers/mock-context.ts";
+import { createTestMesh } from "../helpers/mesh.ts";
 
-function createState(): MessengerState {
-  return { agentName: "AgentOne", registered: true } as MessengerState;
-}
-
-function createDirs(cwd: string): Dirs {
-  const base = path.join(cwd, ".pi", "messenger");
-  const registry = path.join(base, "registry");
-  const inbox = path.join(base, "inbox");
-  fs.mkdirSync(registry, { recursive: true });
-  fs.mkdirSync(inbox, { recursive: true });
-  return { base, registry, inbox };
-}
 
 describe("team command routing", () => {
   let cwd: string;
-  let dirs: Dirs;
+  let mesh: Mesh;
   let state: MessengerState;
 
   beforeEach(() => {
     cwd = createTempCrewDirs().cwd;
     process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
-    dirs = createDirs(cwd);
-    state = createState();
+    ({ mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd }));
+    state.registered = true;
   });
 
   afterEach(() => {
@@ -36,7 +26,7 @@ describe("team command routing", () => {
   });
 
   async function run(action: string, params: Record<string, unknown> = {}) {
-    return executeCrewAction(action, { action, ...params }, state, dirs, createMockContext(cwd), () => {}, () => {}, vi.fn());
+    return executeCrewAction(action, { action, ...params }, state, mesh, createMockContext(cwd), () => {}, () => {}, vi.fn());
   }
 
   it("sets up a profile and starter charter in one command", async () => {

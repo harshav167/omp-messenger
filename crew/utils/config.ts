@@ -66,12 +66,13 @@ export interface CrewConfig {
     maxAttemptsPerTask: number;
     maxWaves: number;
     stopOnBlock: boolean;
-    env?: Record<string, string>;
     shutdownGracePeriodMs?: number;
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
   messageBudgets: Record<CoordinationLevel, number>;
+  /** Team layer (roles, per-role models, approval gates, team memory). */
+  team: { enabled: boolean };
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -94,6 +95,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+  team: { enabled: true },
 };
 
 function loadJson(filePath: string): Record<string, unknown> {
@@ -143,6 +145,11 @@ export function loadCrewConfig(crewDir: string): CrewConfig {
     merged.coordination = coordinationOverride;
   }
   return merged;
+}
+
+/** Whether the Team layer is active for `cwd` (`crew.team.enabled`, default true). */
+export function isTeamEnabled(cwd: string): boolean {
+  return loadCrewConfig(path.join(cwd, ".pi", "messenger", "crew")).team.enabled;
 }
 
 export function getTruncationForRole(config: CrewConfig, role: string): MaxOutputConfig {

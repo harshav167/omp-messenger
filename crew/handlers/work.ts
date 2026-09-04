@@ -4,9 +4,10 @@
  * Spawns workers for ready tasks with concurrency control.
  * Simplified: works on current plan's tasks
  */
+// allow: SIZE_OK — this handler owns one complete crew work wave and its result accounting.
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { Dirs } from "../../lib.ts";
+import type { Mesh } from "../../mesh/types.ts";
 import type { CrewParams, AppendEntryFn } from "../types.ts";
 import { result } from "../utils/result.ts";
 import { resolveModel, spawnAgents } from "../agents.ts";
@@ -18,7 +19,7 @@ import { reviewImplementation } from "./review.ts";
 import * as store from "../store.ts";
 import { getCrewDir } from "../store.ts";
 import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.ts";
-import { getAvailableLobbyWorkers, assignTaskToLobbyWorker, cleanupUnassignedAliveFiles } from "../lobby.ts";
+import { getAvailableLobbyWorkers, assignTaskToLobbyWorker } from "../lobby.ts";
 import { logFeedEvent } from "../../feed.ts";
 import { approvalTaskSummaries } from "../utils/task-format.ts";
 
@@ -33,7 +34,7 @@ function rejectedTasksText(tasks: { id: string; title: string; approval?: { feed
 
 export async function execute(
   params: CrewParams,
-  dirs: Dirs,
+  mesh: Mesh,
   ctx: ExtensionContext,
   appendEntry: AppendEntryFn,
   signal?: AbortSignal,
@@ -71,9 +72,9 @@ export async function execute(
   const needsApproval: typeof allReady = [];
   const rejected: typeof allReady = [];
   for (const task of allReady) {
-    if (teamStore.taskNeedsRevision(task)) {
+    if (teamStore.taskNeedsRevision(cwd, task)) {
       rejected.push(task);
-    } else if (teamStore.taskPendingApproval(task)) {
+    } else if (teamStore.taskPendingApproval(cwd, task)) {
       needsApproval.push(task);
     } else if (task.attempt_count >= config.work.maxAttemptsPerTask) {
       store.updateTask(cwd, task.id, {
@@ -159,7 +160,7 @@ export async function execute(
       assigned_to: lobbyWorker.name,
       attempt_count: task.attempt_count + 1,
     });
-    if (!assignTaskToLobbyWorker(lobbyWorker, task.id, prompt, dirs.inbox)) {
+    if (!await assignTaskToLobbyWorker(lobbyWorker, task.id, prompt, mesh)) {
       store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
       continue;
     }
@@ -167,7 +168,6 @@ export async function execute(
     logFeedEvent(cwd, lobbyWorker.name, "task.start", task.id, task.title);
     lobbyAssigned.add(task.id);
   }
-  cleanupUnassignedAliveFiles(cwd);
 
   // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
   const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
@@ -199,8 +199,9 @@ export async function execute(
     cwd,
     {
       signal,
-      messengerDirs: { registry: dirs.registry, inbox: dirs.inbox },
-    }
+      mesh,
+      localProtocolOptions: ctx.localProtocolOptions,
+    },
   );
 
   // Process results
@@ -328,7 +329,7 @@ export async function execute(
       stopAutonomous("manual");
       appendEntry("crew-state", autonomousState);
     } else {
-      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" }).filter(t => !teamStore.taskNeedsApproval(t));
+      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" }).filter(t => !teamStore.taskNeedsApproval(cwd, t));
       const allTasks = store.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
       const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
@@ -368,9 +369,9 @@ export async function execute(
     : "unknown";
 
   const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-  const actionableNextReady = nextReady.filter(t => !teamStore.taskNeedsApproval(t));
-  const finalNeedsApproval = nextReady.filter(teamStore.taskPendingApproval);
-  const finalRejected = nextReady.filter(teamStore.taskNeedsRevision);
+  const actionableNextReady = nextReady.filter(t => !teamStore.taskNeedsApproval(cwd, t));
+  const finalNeedsApproval = nextReady.filter(t => teamStore.taskPendingApproval(cwd, t));
+  const finalRejected = nextReady.filter(t => teamStore.taskNeedsRevision(cwd, t));
 
   let statusText = "";
   if (succeeded.length > 0) statusText += `\n✅ Completed: ${succeeded.join(", ")}`;

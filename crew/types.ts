@@ -88,6 +88,9 @@ export interface CrewParams {
   // Action
   action?: string;
 
+  // Mesh channel (join)
+  channel?: string;
+
   // Plan
   prd?: string;                  // PRD file path for plan action
 
@@ -179,11 +182,11 @@ export interface AgentResult {
   taskId?: string;
   wasGracefullyShutdown?: boolean;
   error?: string;
+  /** omp writes `<id>.md` (output) and `<id>.jsonl` (transcript); crew writes `<id>_meta.json`. */
   artifactPaths?: {
-    input: string;
-    output: string;
-    jsonl: string;
-    metadata: string;
+    output?: string;
+    transcript: string;
+    meta: string;
   };
 }
 

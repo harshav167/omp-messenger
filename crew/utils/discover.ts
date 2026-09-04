@@ -5,6 +5,7 @@
  * project, and user directories.
  */
 
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,7 +14,7 @@ import type { MaxOutputConfig } from "./truncate.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DEFAULT_EXTENSION_AGENTS_DIR = path.resolve(__dirname, "..", "agents");
+const DEFAULT_EXTENSION_AGENTS_DIR = path.resolve(__dirname, "..", "..", "agents");
 const DEFAULT_EXTENSION_SKILLS_DIR = path.resolve(__dirname, "..", "skills");
 
 export type CrewRole = "planner" | "worker" | "reviewer" | "analyst";
@@ -31,6 +32,22 @@ export interface CrewAgentConfig {
   maxOutput?: MaxOutputConfig;
   parallel?: boolean;
   retryable?: boolean;
+}
+
+export function toAgentDefinition(
+  config: CrewAgentConfig,
+  thinking?: string,
+): AgentDefinition {
+  return {
+    name: config.name,
+    description: config.description,
+    systemPrompt: config.systemPrompt ?? "",
+    tools: config.tools,
+    model: config.model ? [config.model] : undefined,
+    thinkingLevel: thinking as AgentDefinition["thinkingLevel"],
+    source: config.source === "project" ? "project" : "user",
+    filePath: config.filePath,
+  };
 }
 
 function parseFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {

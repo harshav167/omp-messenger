@@ -2,100 +2,75 @@
  * Pi Messenger - File Storage Operations
  */
 
-import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
-import { execSync } from "node:child_process";
+import * as fs from "node:fs";
+import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
-  type AgentRegistration,
   type AgentMailMessage,
-  type ReservationConflict,
-  type MessengerState,
-  type Dirs,
-  type ClaimEntry,
-  type CompletionEntry,
-  type SpecClaims,
-  type SpecCompletions,
+  type AgentRegistration,
   type AllClaims,
   type AllCompletions,
-  type NameThemeConfig,
+  type ClaimEntry,
+  type CompletionEntry,
+  type Dirs,
+  LOCAL_HOST_ID,
   MAX_WATCHER_RETRIES,
-  isProcessAlive,
-  normalizeAgentMailMessage,
+  type MessengerState,
+  type NameThemeConfig,
+  type SpecClaims,
   generateMemorableName,
+  isProcessAlive,
   isValidAgentName,
-  pathMatchesReservation,
-} from "./lib.ts";
-
-// =============================================================================
-// Agents Cache (Fix 1: Reduce disk I/O)
-// =============================================================================
+  normalizeAgentMailMessage,
+} from "../lib.ts";
+import { buildRegistration, normalizeCwd } from "./registration.ts";
+import type {
+  ClaimResult,
+  CompleteResult,
+  DeliverFn,
+  Mesh,
+  RenameResult,
+  SendOptions,
+  UnclaimResult,
+} from "./types.ts";
 
 interface AgentsCache {
   allAgents: AgentRegistration[];
-  filtered: Map<string, AgentRegistration[]>;  // keyed by excluded agent name
+  filtered: Map<string, AgentRegistration[]>;
   timestamp: number;
   registryPath: string;
 }
 
-const AGENTS_CACHE_TTL_MS = 1000;
-let agentsCache: AgentsCache | null = null;
-
-export function invalidateAgentsCache(): void {
-  agentsCache = null;
-}
-
-// =============================================================================
-// Message Processing Guard (Fix 3: Prevent race conditions)
-// =============================================================================
-
-let isProcessingMessages = false;
-let pendingProcessArgs: {
+interface PendingProcessArgs {
   state: MessengerState;
   dirs: Dirs;
-  deliverFn: (msg: AgentMailMessage) => void;
-} | null = null;
+  deliver: DeliverFn;
+}
 
-// =============================================================================
-// File System Helpers
-// =============================================================================
+interface FsRuntime {
+  agentsCache: AgentsCache | null;
+  cacheGeneration: number;
+  isProcessingMessages: boolean;
+  pendingProcessArgs: PendingProcessArgs | null;
+}
+
+const AGENTS_CACHE_TTL_MS = 1000;
+let agentsCacheGeneration = 0;
+
+export function invalidateAgentsCache(): void {
+  agentsCacheGeneration++;
+}
+
+function refreshCacheGeneration(runtime: FsRuntime): void {
+  if (runtime.cacheGeneration === agentsCacheGeneration) return;
+  runtime.agentsCache = null;
+  runtime.cacheGeneration = agentsCacheGeneration;
+}
 
 function ensureDirSync(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-function normalizeCwd(cwd: string): string {
-  try {
-    return fs.realpathSync.native(cwd);
-  } catch {
-    return resolve(cwd);
-  }
-}
-
-function getGitBranch(cwd: string): string | undefined {
-  try {
-    const result = execSync('git branch --show-current', {
-      cwd,
-      encoding: 'utf-8',
-      timeout: 2000,
-      stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
-
-    if (result) return result;
-
-    const sha = execSync('git rev-parse --short HEAD', {
-      cwd,
-      encoding: 'utf-8',
-      timeout: 2000,
-      stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
-
-    return sha ? `@${sha}` : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -161,43 +136,38 @@ async function withSwarmLock<T>(baseDir: string, fn: () => T): Promise<T> {
 // Registry Operations
 // =============================================================================
 
-export function getRegistrationPath(state: MessengerState, dirs: Dirs): string {
+function getRegistrationPath(state: MessengerState, dirs: Dirs): string {
   return join(dirs.registry, `${state.agentName}.json`);
 }
 
-export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistration[] {
+function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime): AgentRegistration[] {
+  refreshCacheGeneration(runtime);
   const now = Date.now();
   const excludeName = state.agentName;
   const myCwd = normalizeCwd(state.cwd);
   const scopeToFolder = state.scopeToFolder;
-
-  // Cache key includes scopeToFolder and cwd for proper cache invalidation
   const cacheKey = scopeToFolder ? `${excludeName}:${myCwd}` : excludeName;
+  const cached = runtime.agentsCache;
 
-  // Return cached if valid (Fix 1)
   if (
-    agentsCache &&
-    agentsCache.registryPath === dirs.registry &&
-    now - agentsCache.timestamp < AGENTS_CACHE_TTL_MS
+    cached &&
+    cached.registryPath === dirs.registry &&
+    now - cached.timestamp < AGENTS_CACHE_TTL_MS
   ) {
-    // Check if we have a cached filtered result for this cache key
-    const cachedFiltered = agentsCache.filtered.get(cacheKey);
+    const cachedFiltered = cached.filtered.get(cacheKey);
     if (cachedFiltered) return cachedFiltered;
 
-    // Create and cache filtered result
-    let filtered = agentsCache.allAgents.filter(a => a.name !== excludeName);
+    let filtered = cached.allAgents.filter(agent => agent.name !== excludeName);
     if (scopeToFolder) {
-      filtered = filtered.filter(a => a.cwd === myCwd);
+      filtered = filtered.filter(agent => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
     }
-    agentsCache.filtered.set(cacheKey, filtered);
+    cached.filtered.set(cacheKey, filtered);
     return filtered;
   }
 
-  // Read from disk
   const allAgents: AgentRegistration[] = [];
-
   if (!fs.existsSync(dirs.registry)) {
-    agentsCache = { allAgents, filtered: new Map(), timestamp: now, registryPath: dirs.registry };
+    runtime.agentsCache = { allAgents, filtered: new Map(), timestamp: now, registryPath: dirs.registry };
     return allAgents;
   }
 
@@ -224,6 +194,7 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
         continue;
       }
 
+      reg.hostId ??= LOCAL_HOST_ID;
       if (reg.session === undefined) {
         reg.session = { toolCalls: 0, tokens: 0, filesModified: [] };
       }
@@ -240,20 +211,18 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
     }
   }
 
-  // Cache the full list and create filtered result
-  let filtered = allAgents.filter(a => a.name !== excludeName);
+  let filtered = allAgents.filter(agent => agent.name !== excludeName);
   if (scopeToFolder) {
-    filtered = filtered.filter(a => a.cwd === myCwd);
+    filtered = filtered.filter(agent => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
   }
   const filteredMap = new Map<string, AgentRegistration[]>();
   filteredMap.set(cacheKey, filtered);
-
-  agentsCache = { allAgents, filtered: filteredMap, timestamp: now, registryPath: dirs.registry };
+  runtime.agentsCache = { allAgents, filtered: filteredMap, timestamp: now, registryPath: dirs.registry };
 
   return filtered;
 }
 
-export function findAvailableName(baseName: string, dirs: Dirs): string | null {
+function findAvailableName(baseName: string, dirs: Dirs): string | null {
   const basePath = join(dirs.registry, `${baseName}.json`);
   if (!fs.existsSync(basePath)) return baseName;
 
@@ -283,7 +252,7 @@ export function findAvailableName(baseName: string, dirs: Dirs): string | null {
   return null;
 }
 
-export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, nameTheme?: NameThemeConfig): boolean {
+function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, nameTheme?: NameThemeConfig): boolean {
   if (state.registered) return true;
 
   ensureDirSync(dirs.registry);
@@ -292,7 +261,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     state.agentName = generateMemorableName(nameTheme);
   }
 
-  const isExplicitName = !!process.env.PI_AGENT_NAME;
+  const isExplicitName = state.explicitName;
   const maxAttempts = isExplicitName ? 1 : 3;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -340,22 +309,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
 
     ensureDirSync(getMyInbox(state, dirs));
 
-    const cwd = normalizeCwd(ctx.cwd);
-    const gitBranch = getGitBranch(cwd);
-    const now = new Date().toISOString();
-    const registration: AgentRegistration = {
-      name: state.agentName,
-      pid: process.pid,
-      sessionId: ctx.sessionManager.getSessionId(),
-      cwd,
-      model: ctx.model?.id ?? "unknown",
-      startedAt: now,
-      gitBranch,
-      spec: state.spec,
-      isHuman: state.isHuman,
-      session: { ...state.session },
-      activity: { lastActivityAt: now },
-    };
+    const registration = buildRegistration(state, ctx, state.agentName);
 
     try {
       fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
@@ -378,10 +332,10 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
 
     if (verified) {
       state.registered = true;
-      state.model = ctx.model?.id ?? "unknown";
-      state.cwd = cwd;
-      state.gitBranch = gitBranch;
-      state.activity.lastActivityAt = now;
+      state.model = registration.model;
+      state.cwd = registration.cwd;
+      state.gitBranch = registration.gitBranch;
+      state.activity.lastActivityAt = registration.startedAt;
       invalidateAgentsCache();
       return true;
     }
@@ -417,7 +371,7 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
   return false;
 }
 
-export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionContext): void {
+function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionContext): void {
   if (!state.registered) return;
 
   const regPath = getRegistrationPath(state, dirs);
@@ -444,28 +398,8 @@ export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: Exten
   }
 }
 
-export function flushActivityToRegistry(state: MessengerState, dirs: Dirs, ctx: ExtensionContext): void {
-  if (!state.registered) return;
 
-  const regPath = getRegistrationPath(state, dirs);
-  if (!fs.existsSync(regPath)) return;
-
-  try {
-    const reg: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
-    const currentModel = ctx.model?.id ?? reg.model;
-    reg.model = currentModel;
-    state.model = currentModel;
-    reg.cwd = state.cwd;
-    reg.session = { ...state.session };
-    reg.activity = { ...state.activity };
-    reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
-  } catch {
-    // Ignore errors
-  }
-}
-
-export function unregister(state: MessengerState, dirs: Dirs): void {
+function unregister(state: MessengerState, dirs: Dirs): void {
   if (!state.registered) return;
 
   const regPath = getRegistrationPath(state, dirs);
@@ -481,16 +415,14 @@ export function unregister(state: MessengerState, dirs: Dirs): void {
   invalidateAgentsCache();
 }
 
-export type RenameResult =
-  | { success: true; oldName: string; newName: string }
-  | { success: false; error: "not_registered" | "invalid_name" | "name_taken" | "same_name" | "race_lost" };
 
-export function renameAgent(
+function renameAgent(
   state: MessengerState,
   dirs: Dirs,
   ctx: ExtensionContext,
   newName: string,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliver: DeliverFn,
+  runtime: FsRuntime,
 ): RenameResult {
   if (!state.registered) {
     return { success: false, error: "not_registered" };
@@ -521,33 +453,16 @@ export function renameAgent(
   const oldInbox = getMyInbox(state, dirs);
   const newInbox = join(dirs.inbox, newName);
 
-  processAllPendingMessages(state, dirs, deliverFn);
+  processAllPendingMessages(state, dirs, deliver, runtime);
 
-  const cwd = normalizeCwd(ctx.cwd);
-  const gitBranch = getGitBranch(cwd);
-  const now = new Date().toISOString();
-  const registration: AgentRegistration = {
-    name: newName,
-    pid: process.pid,
-    sessionId: ctx.sessionManager.getSessionId(),
-    cwd,
-    model: ctx.model?.id ?? "unknown",
-    startedAt: now,
-    reservations: state.reservations.length > 0 ? state.reservations : undefined,
-    gitBranch,
-    spec: state.spec,
-    isHuman: state.isHuman,
-    session: { ...state.session },
-    activity: { lastActivityAt: now },
-    statusMessage: state.statusMessage,
-  };
+  const registration = buildRegistration(state, ctx, newName);
 
   ensureDirSync(dirs.registry);
   
   try {
     fs.writeFileSync(join(dirs.registry, `${newName}.json`), JSON.stringify(registration, null, 2));
-  } catch (err) {
-    return { success: false, error: "invalid_name" as const };
+  } catch {
+    return { success: false, error: "invalid_name" };
   }
 
   // Verify we own the new registration (guards against race condition)
@@ -605,40 +520,15 @@ export function renameAgent(
     // Ignore - might have new messages or not exist
   }
 
-  state.model = ctx.model?.id ?? "unknown";
-  state.cwd = cwd;
-  state.gitBranch = gitBranch;
-  state.sessionStartedAt = now;
-  state.activity.lastActivityAt = now;
+  state.model = registration.model;
+  state.cwd = registration.cwd;
+  state.gitBranch = registration.gitBranch;
+  state.sessionStartedAt = registration.startedAt;
+  state.activity.lastActivityAt = registration.startedAt;
   invalidateAgentsCache();
   return { success: true, oldName, newName };
 }
 
-export function getConflictsWithOtherAgents(
-  filePath: string,
-  state: MessengerState,
-  dirs: Dirs
-): ReservationConflict[] {
-  const conflicts: ReservationConflict[] = [];
-  const agents = getActiveAgents(state, dirs);
-
-  for (const agent of agents) {
-    if (!agent.reservations) continue;
-    for (const res of agent.reservations) {
-      if (pathMatchesReservation(filePath, res.pattern)) {
-        conflicts.push({
-          path: filePath,
-          agent: agent.name,
-          pattern: res.pattern,
-          reason: res.reason,
-          registration: agent
-        });
-      }
-    }
-  }
-
-  return conflicts;
-}
 
 // =============================================================================
 // Swarm Coordination
@@ -746,56 +636,18 @@ function findAgentClaim(claims: AllClaims, agent: string): { spec: string; taskI
   return null;
 }
 
-export function getClaims(dirs: Dirs): AllClaims {
+function getClaims(dirs: Dirs): AllClaims {
   const claims = readClaimsSync(dirs);
   return filterStaleClaims(claims, dirs);
 }
 
-export function getClaimsForSpec(dirs: Dirs, specPath: string): SpecClaims {
-  const claims = getClaims(dirs);
-  return claims[specPath] ?? {};
-}
 
-export function getCompletions(dirs: Dirs): AllCompletions {
+function getCompletions(dirs: Dirs): AllCompletions {
   return readCompletionsSync(dirs);
 }
 
-export function getCompletionsForSpec(dirs: Dirs, specPath: string): SpecCompletions {
-  const completions = getCompletions(dirs);
-  return completions[specPath] ?? {};
-}
 
-export function getAgentCurrentClaim(
-  dirs: Dirs,
-  agent: string
-): { spec: string; taskId: string; reason?: string } | null {
-  const claims = getClaims(dirs);
-  for (const [spec, tasks] of Object.entries(claims)) {
-    for (const [taskId, claim] of Object.entries(tasks)) {
-      if (claim.agent === agent) {
-        return { spec, taskId, reason: claim.reason };
-      }
-    }
-  }
-  return null;
-}
-
-export type ClaimResult =
-  | { success: true; claimedAt: string }
-  | { success: false; error: "already_claimed"; conflict: ClaimEntry }
-  | { success: false; error: "already_have_claim"; existing: { spec: string; taskId: string } };
-
-export function isClaimSuccess(r: ClaimResult): r is { success: true; claimedAt: string } {
-  return r.success === true;
-}
-export function isClaimAlreadyClaimed(r: ClaimResult): r is { success: false; error: "already_claimed"; conflict: ClaimEntry } {
-  return "error" in r && r.error === "already_claimed";
-}
-export function isClaimAlreadyHaveClaim(r: ClaimResult): r is { success: false; error: "already_have_claim"; existing: { spec: string; taskId: string } } {
-  return "error" in r && r.error === "already_have_claim";
-}
-
-export async function claimTask(
+async function claimTask(
   dirs: Dirs,
   specPath: string,
   taskId: string,
@@ -834,19 +686,8 @@ export async function claimTask(
   });
 }
 
-export type UnclaimResult =
-  | { success: true }
-  | { success: false; error: "not_claimed" }
-  | { success: false; error: "not_your_claim"; claimedBy: string };
 
-export function isUnclaimSuccess(r: UnclaimResult): r is { success: true } {
-  return r.success === true;
-}
-export function isUnclaimNotYours(r: UnclaimResult): r is { success: false; error: "not_your_claim"; claimedBy: string } {
-  return "error" in r && r.error === "not_your_claim";
-}
-
-export async function unclaimTask(
+async function unclaimTask(
   dirs: Dirs,
   specPath: string,
   taskId: string,
@@ -875,23 +716,8 @@ export async function unclaimTask(
   });
 }
 
-export type CompleteResult =
-  | { success: true; completedAt: string }
-  | { success: false; error: "not_claimed" }
-  | { success: false; error: "not_your_claim"; claimedBy: string }
-  | { success: false; error: "already_completed"; completion: CompletionEntry };
 
-export function isCompleteSuccess(r: CompleteResult): r is { success: true; completedAt: string } {
-  return r.success === true;
-}
-export function isCompleteAlreadyCompleted(r: CompleteResult): r is { success: false; error: "already_completed"; completion: CompletionEntry } {
-  return "error" in r && r.error === "already_completed";
-}
-export function isCompleteNotYours(r: CompleteResult): r is { success: false; error: "not_your_claim"; claimedBy: string } {
-  return "error" in r && r.error === "not_your_claim";
-}
-
-export async function completeTask(
+async function completeTask(
   dirs: Dirs,
   specPath: string,
   taskId: string,
@@ -944,24 +770,24 @@ export async function completeTask(
 // Messaging Operations
 // =============================================================================
 
-export function getMyInbox(state: MessengerState, dirs: Dirs): string {
+function getMyInbox(state: MessengerState, dirs: Dirs): string {
   return join(dirs.inbox, state.agentName);
 }
 
-export function processAllPendingMessages(
+function processAllPendingMessages(
   state: MessengerState,
   dirs: Dirs,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliver: DeliverFn,
+  runtime: FsRuntime,
 ): void {
   if (!state.registered) return;
 
-  // Fix 3: Prevent concurrent processing
-  if (isProcessingMessages) {
-    pendingProcessArgs = { state, dirs, deliverFn };
+  if (runtime.isProcessingMessages) {
+    runtime.pendingProcessArgs = { state, dirs, deliver };
     return;
   }
 
-  isProcessingMessages = true;
+  runtime.isProcessingMessages = true;
 
   try {
     const inbox = getMyInbox(state, dirs);
@@ -984,7 +810,7 @@ export function processAllPendingMessages(
           to: state.agentName,
           timestamp: new Date().toISOString(),
         });
-        deliverFn(msg);
+        deliver(msg);
         fs.unlinkSync(msgPath);
       } catch {
         // On any failure (read, parse, deliver), delete to avoid infinite retry loops
@@ -996,34 +822,35 @@ export function processAllPendingMessages(
       }
     }
   } finally {
-    isProcessingMessages = false;
+    runtime.isProcessingMessages = false;
 
-    // Re-process if new calls came in while we were processing
-    if (pendingProcessArgs) {
-      const args = pendingProcessArgs;
-      pendingProcessArgs = null;
-      processAllPendingMessages(args.state, args.dirs, args.deliverFn);
+    if (runtime.pendingProcessArgs) {
+      const args = runtime.pendingProcessArgs;
+      runtime.pendingProcessArgs = null;
+      processAllPendingMessages(args.state, args.dirs, args.deliver, runtime);
     }
   }
 }
 
-export function sendMessageToAgent(
-  state: MessengerState,
+function sendMessageToAgent(
   dirs: Dirs,
   to: string,
   text: string,
-  replyTo?: string
+  from: string,
+  replyTo: string | null,
+  urgent: boolean,
 ): AgentMailMessage {
   const targetInbox = join(dirs.inbox, to);
   ensureDirSync(targetInbox);
 
   const msg: AgentMailMessage = {
     id: randomUUID(),
-    from: state.agentName,
+    from,
     to,
     text,
     timestamp: new Date().toISOString(),
-    replyTo: replyTo ?? null
+    replyTo,
+    ...(urgent ? { urgent: true } : {}),
   };
 
   const random = Math.random().toString(36).substring(2, 8);
@@ -1039,10 +866,11 @@ export function sendMessageToAgent(
 
 const WATCHER_DEBOUNCE_MS = 50;
 
-export function startWatcher(
+function startWatcher(
   state: MessengerState,
   dirs: Dirs,
-  deliverFn: (msg: AgentMailMessage) => void
+  deliver: DeliverFn,
+  runtime: FsRuntime,
 ): void {
   if (!state.registered) return;
   if (state.watcher) return;
@@ -1051,7 +879,7 @@ export function startWatcher(
   const inbox = getMyInbox(state, dirs);
   ensureDirSync(inbox);
 
-  processAllPendingMessages(state, dirs, deliverFn);
+  processAllPendingMessages(state, dirs, deliver, runtime);
 
   function scheduleRetry(): void {
     state.watcherRetries++;
@@ -1059,7 +887,7 @@ export function startWatcher(
       const delay = Math.min(1000 * Math.pow(2, state.watcherRetries - 1), 30000);
       state.watcherRetryTimer = setTimeout(() => {
         state.watcherRetryTimer = null;
-        startWatcher(state, dirs, deliverFn);
+        startWatcher(state, dirs, deliver, runtime);
       }, delay);
     }
   }
@@ -1072,7 +900,7 @@ export function startWatcher(
       }
       state.watcherDebounceTimer = setTimeout(() => {
         state.watcherDebounceTimer = null;
-        processAllPendingMessages(state, dirs, deliverFn);
+        processAllPendingMessages(state, dirs, deliver, runtime);
       }, WATCHER_DEBOUNCE_MS);
     });
   } catch {
@@ -1088,7 +916,7 @@ export function startWatcher(
   state.watcherRetries = 0;
 }
 
-export function stopWatcher(state: MessengerState): void {
+function stopWatcher(state: MessengerState): void {
   if (state.watcherDebounceTimer) {
     clearTimeout(state.watcherDebounceTimer);
     state.watcherDebounceTimer = null;
@@ -1107,11 +935,11 @@ export function stopWatcher(state: MessengerState): void {
 // Target Validation
 // =============================================================================
 
-export type TargetValidation =
+type TargetValidation =
   | { valid: true }
   | { valid: false; error: "invalid_name" | "not_found" | "not_active" | "invalid_registration" };
 
-export function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
+function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
   if (!isValidAgentName(to)) {
     return { valid: false, error: "invalid_name" };
   }
@@ -1136,4 +964,176 @@ export function validateTargetAgent(to: string, dirs: Dirs): TargetValidation {
   }
 
   return { valid: true };
+}
+
+function channelDirs(base: string, channel: string): Dirs {
+  const channelBase = channel === "main" ? base : join(base, "channels", channel);
+  return {
+    base: channelBase,
+    registry: join(channelBase, "registry"),
+    inbox: join(channelBase, "inbox"),
+  };
+}
+
+function countAliveMembers(registry: string): number {
+  if (!fs.existsSync(registry)) return 0;
+
+  let members = 0;
+  let files: string[];
+  try {
+    files = fs.readdirSync(registry);
+  } catch {
+    return 0;
+  }
+
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const registration: AgentRegistration = JSON.parse(fs.readFileSync(join(registry, file), "utf-8"));
+      if (isProcessAlive(registration.pid)) members++;
+    } catch {
+      // Ignore malformed registrations.
+    }
+  }
+  return members;
+}
+
+function channelInfo(base: string, name: string): { name: string; members: number; createdAt: string } {
+  const dirs = channelDirs(base, name);
+  let createdAt = new Date(0).toISOString();
+  try {
+    createdAt = fs.statSync(dirs.base).birthtime.toISOString();
+  } catch {
+    // A missing main directory is still listed as an empty channel.
+  }
+  return { name, members: countAliveMembers(dirs.registry), createdAt };
+}
+
+export function createFsMesh(base: string, state: MessengerState, deliver: DeliverFn): Mesh {
+  const runtime: FsRuntime = {
+    agentsCache: null,
+    cacheGeneration: agentsCacheGeneration,
+    isProcessingMessages: false,
+    pendingProcessArgs: null,
+  };
+
+  return {
+    kind: "fs",
+    status: () => "local",
+    channel: () => state.channel,
+    async join(ctx, opts) {
+      if (opts?.channel) state.channel = opts.channel;
+      const dirs = channelDirs(base, state.channel);
+      const joined = register(state, dirs, ctx, opts?.nameTheme);
+      if (joined) startWatcher(state, dirs, deliver, runtime);
+      return joined;
+    },
+    async channels() {
+      const channels = [channelInfo(base, "main")];
+      const channelsDir = join(base, "channels");
+      if (!fs.existsSync(channelsDir)) return channels;
+
+      let names: string[];
+      try {
+        names = fs.readdirSync(channelsDir, { withFileTypes: true })
+          .filter(entry => entry.isDirectory())
+          .map(entry => entry.name)
+          .sort();
+      } catch {
+        return channels;
+      }
+      for (const name of names) channels.push(channelInfo(base, name));
+      return channels;
+    },
+    publish(ctx) {
+      const dirs = channelDirs(base, state.channel);
+      updateRegistration(state, dirs, ctx);
+    },
+    async leave() {
+      const dirs = channelDirs(base, state.channel);
+      unregister(state, dirs);
+    },
+    async rename(ctx, newName) {
+      const dirs = channelDirs(base, state.channel);
+      stopWatcher(state);
+      const result = renameAgent(state, dirs, ctx, newName, deliver, runtime);
+      state.watcherRetries = 0;
+      startWatcher(state, dirs, deliver, runtime);
+      return result;
+    },
+    peers() {
+      const dirs = channelDirs(base, state.channel);
+      return getActiveAgents(state, dirs, runtime);
+    },
+    evict(name) {
+      const dirs = channelDirs(base, state.channel);
+      try {
+        fs.unlinkSync(join(dirs.registry, `${name}.json`));
+      } catch {
+        // The registration is already absent or cannot be removed.
+      }
+      invalidateAgentsCache();
+    },
+    async send(to, text, opts?: SendOptions) {
+      const dirs = channelDirs(base, state.channel);
+      const target = validateTargetAgent(to, dirs);
+      if (target.valid === false) return { ok: false, error: target.error };
+
+      try {
+        const message = sendMessageToAgent(
+          dirs,
+          to,
+          text,
+          opts?.from ?? state.agentName,
+          opts?.replyTo ?? null,
+          opts?.urgent === true,
+        );
+        return { ok: true, message };
+      } catch {
+        return { ok: false, error: "write_failed" };
+      }
+    },
+    recoverInbox() {
+      const dirs = channelDirs(base, state.channel);
+      if (state.registered && !state.watcher && !state.watcherRetryTimer) {
+        state.watcherRetries = 0;
+        startWatcher(state, dirs, deliver, runtime);
+      }
+    },
+    drainInbox() {
+      const dirs = channelDirs(base, state.channel);
+      processAllPendingMessages(state, dirs, deliver, runtime);
+    },
+    claims() {
+      const dirs = channelDirs(base, state.channel);
+      return getClaims(dirs);
+    },
+    completions() {
+      const dirs = channelDirs(base, state.channel);
+      return getCompletions(dirs);
+    },
+    claim(ctx, spec, taskId, reason) {
+      const dirs = channelDirs(base, state.channel);
+      return claimTask(
+        dirs,
+        spec,
+        taskId,
+        state.agentName,
+        ctx.sessionManager.getSessionId(),
+        process.pid,
+        reason,
+      );
+    },
+    unclaim(spec, taskId) {
+      const dirs = channelDirs(base, state.channel);
+      return unclaimTask(dirs, spec, taskId, state.agentName);
+    },
+    complete(spec, taskId, notes) {
+      const dirs = channelDirs(base, state.channel);
+      return completeTask(dirs, spec, taskId, state.agentName, notes);
+    },
+    close() {
+      stopWatcher(state);
+    },
+  };
 }
