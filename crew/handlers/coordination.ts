@@ -216,13 +216,16 @@ export function buildCoordinationInstructions(config: CrewConfig, options: Coord
   const level = config.coordination;
   if (level === "none") return "";
 
-  const budget = config.messageBudgets?.[level] ?? (level === "chatty" ? 10 : 5);
+  const budget = config.messageBudgets[level];
+  const budgetLine = budget === null
+    ? "**No message budget at this level — but every message costs a turn; message when it moves the task forward.**"
+    : `**Message budget: ${budget} messages this session.** The system enforces this${level === "minimal" ? "." : " — sends are rejected after the limit."}`;
 
   if (level === "minimal") {
     if (options.readOnly) {
       return `## Coordination
 
-**Message budget: ${budget} messages this session.** The system enforces this.
+${budgetLine}
 
 Use \`omp_messenger({ action: "list" })\` to see active workers if your investigation overlaps with their work. Message a worker only when you need concrete context or a handoff detail.
 
@@ -231,7 +234,7 @@ Use \`omp_messenger({ action: "list" })\` to see active workers if your investig
 
     return `## Coordination
 
-**Message budget: ${budget} messages this session.** The system enforces this.
+${budgetLine}
 
 Before editing files, check if another worker has reserved them by running:
 
@@ -252,7 +255,7 @@ Do NOT edit files reserved by another worker without coordinating first.
 
   let out = `## Coordination
 
-**Message budget: ${budget} messages this session.** The system enforces this — sends are rejected after the limit.
+${budgetLine}
 
 **Broadcasts go to the team feed — only the user sees them live.** Other workers see your broadcasts in their initial context only. Use DMs for time-sensitive peer coordination.
 

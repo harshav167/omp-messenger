@@ -64,7 +64,7 @@ function makeConfig(level: CoordinationLevel, dependencies: CrewConfig["dependen
     work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000 },
     dependencies,
     coordination: level,
-    messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+    messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: null },
     team: { enabled: true },
   };
 }
@@ -302,7 +302,8 @@ describe("buildCoordinationInstructions", () => {
     expect(result).toContain("### Coordinate with peers");
     expect(result).toContain("### Responding to messages");
     expect(result).toContain("### Claim next task");
-    expect(result).toContain("Message budget:");
+    expect(result).toContain("No message budget at this level");
+    expect(result).not.toContain("Message budget:");
     expect(result).toContain('action: "send"');
     expect(result).toContain('action: "task.ready"');
     expect(result).toContain("task.start");
@@ -332,7 +333,7 @@ describe("config coordination", () => {
     const { loadCrewConfig } = await (async () => { vi.resetModules(); return import("../../crew/utils/config.ts"); })();
     const cfg = loadCrewConfig(dirs.crewDir);
     expect(cfg.coordination).toBe("chatty");
-    expect(cfg.messageBudgets).toEqual({ none: 0, minimal: 2, moderate: 5, chatty: 10 });
+    expect(cfg.messageBudgets).toEqual({ none: 0, minimal: 2, moderate: 5, chatty: null });
   });
 
   it("respects coordination field from project config", async () => {
@@ -481,5 +482,29 @@ describe("executeSend broadcast filtering", () => {
     expect(first.content[0]?.text).toContain("Broadcast logged");
     expect(first.content[0]?.text).toContain("(0 messages remaining)");
     expect(second.content[0]?.text).toContain("Message budget reached (1/1");
+  });
+
+  it("never caps an interactive (non-worker) session, even at a zero budget", async () => {
+    state.isCrewWorker = false;
+    writeJson(path.join(dirs.crewDir, "config.json"), {
+      coordination: "minimal",
+      messageBudgets: { none: 0, minimal: 0, moderate: 0, chatty: 0 },
+    });
+
+    for (let i = 0; i < 25; i++) {
+      const r = await executeSend(state, mesh, dirs.cwd, "OakBear", false, `dm ${i}`);
+      expect(r.content[0]?.text).toBe("Message sent to OakBear.");
+    }
+    expect(state.messagesSent).toBe(25);
+  });
+
+  it("chatty workers are unlimited by default and see no remaining count", async () => {
+    state.isCrewWorker = true;
+
+    for (let i = 0; i < 12; i++) {
+      const r = await executeSend(state, mesh, dirs.cwd, "OakBear", false, `dm ${i}`);
+      expect(r.content[0]?.text).toBe("Message sent to OakBear.");
+      expect(r.details).not.toHaveProperty("error");
+    }
   });
 });

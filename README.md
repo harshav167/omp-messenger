@@ -279,7 +279,7 @@ Full config reference (all fields optional — only set what you want to change)
 | `concurrency.max` | Maximum workers allowed (hard ceiling is 10) | `10` |
 | `dependencies` | Dependency scheduling mode: `advisory` or `strict` | `"advisory"` |
 | `coordination` | Worker coordination level: `none`, `minimal`, `moderate`, `chatty` | `"chatty"` |
-| `messageBudgets` | Max outgoing messages per worker per level (sends rejected after limit) | `{ none: 0, minimal: 2, moderate: 5, chatty: 10 }` |
+| `messageBudgets` | Max outgoing messages per crew worker per level (`null` = unlimited; interactive sessions are never capped) | `{ none: 0, minimal: 2, moderate: 5, chatty: null }` |
 | `models.planner` | Model for planner agent | host session model, then agent frontmatter |
 | `models.worker` | Model for workers (overridden by per-task or per-wave `model` param) | host session model, then agent frontmatter |
 | `models.reviewer` | Model for reviewer agent | host session model, then agent frontmatter |

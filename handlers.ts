@@ -423,15 +423,16 @@ export async function executeSend(
     );
   }
 
-  const crewDir = crewStore.getCrewDir(cwd);
-  const crewConfig = loadCrewConfig(crewDir);
-  const budget = crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10;
-  if (state.messagesSent >= budget) {
+  // Message budgets are worker discipline: interactive sessions are never capped.
+  const crewConfig = state.isCrewWorker ? loadCrewConfig(crewStore.getCrewDir(cwd)) : null;
+  const budget = crewConfig ? crewConfig.messageBudgets[crewConfig.coordination] : null;
+  if (budget !== null && state.messagesSent >= budget) {
     return result(
-      `Message budget reached (${state.messagesSent}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
+      `Message budget reached (${state.messagesSent}/${budget} for ${crewConfig!.coordination} level). Focus on your task.`,
       { mode: "send", error: "budget_exceeded" }
     );
   }
+  const remainingText = () => budget === null ? "" : ` (${budget - state.messagesSent} message${budget - state.messagesSent === 1 ? "" : "s"} remaining)`;
 
   let recipients: string[];
   if (broadcast) {
@@ -439,9 +440,8 @@ export async function executeSend(
       state.messagesSent++;
       const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
       logFeedEvent(cwd, state.agentName, "message", undefined, preview);
-      const remaining = budget - state.messagesSent;
       return result(
-        `Broadcast logged. (${remaining} message${remaining === 1 ? "" : "s"} remaining)`,
+        `Broadcast logged.${remainingText()}`,
         { mode: "send", sent: ["feed"], failed: [] }
       );
     }
@@ -503,8 +503,7 @@ export async function executeSend(
     }
   }
 
-  const remaining = budget - state.messagesSent;
-  let text = `Message sent to ${sent.join(", ")}. (${remaining} message${remaining === 1 ? "" : "s"} remaining)`;
+  let text = `Message sent to ${sent.join(", ")}.${remainingText()}`;
   if (failed.length > 0) {
     const failedStr = failed.map(f => `${f.name} (${f.error})`).join(", ");
     text += ` Failed: ${failedStr}`;

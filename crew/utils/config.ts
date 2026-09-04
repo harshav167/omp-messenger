@@ -70,7 +70,8 @@ export interface CrewConfig {
   };
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
-  messageBudgets: Record<CoordinationLevel, number>;
+  /** Max outgoing messages per worker per coordination level; `null` = unlimited. */
+  messageBudgets: Record<CoordinationLevel, number | null>;
   /** Team layer (roles, per-role models, approval gates, team memory). */
   team: { enabled: boolean };
 }
@@ -94,7 +95,7 @@ const DEFAULT_CONFIG: CrewConfig = {
   work: { maxAttemptsPerTask: 5, maxWaves: 50, stopOnBlock: false, shutdownGracePeriodMs: 30000 },
   dependencies: "advisory",
   coordination: "chatty",
-  messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+  messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: null },
   team: { enabled: true },
 };
 

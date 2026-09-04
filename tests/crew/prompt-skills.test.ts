@@ -28,8 +28,10 @@ function makeConfig(overrides: Partial<CrewConfig> = {}): CrewConfig {
     coordination: "none",
     planning: { maxPasses: 1 },
     review: { enabled: false, maxIterations: 1 },
-    work: { maxAttemptsPerTask: 3, env: {} },
+    work: { maxAttemptsPerTask: 3 },
     artifacts: { enabled: false },
+    messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: null },
+    team: { enabled: true },
     ...overrides,
   } as CrewConfig;
 }

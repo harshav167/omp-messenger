@@ -298,7 +298,7 @@ Project-level (`.omp/messenger/crew/config.json`):
 | `concurrency.max` | Maximum workers allowed via `+` key (hard ceiling: 10) | `10` |
 | `dependencies` | Dependency scheduling mode: `advisory` or `strict` | `"advisory"` |
 | `coordination` | Worker communication level: `none`, `minimal`, `moderate`, `chatty` | `chatty` |
-| `messageBudgets` | Max outgoing messages per worker per level (sends rejected after limit) | `{ none: 0, minimal: 2, moderate: 5, chatty: 10 }` |
+| `messageBudgets` | Max outgoing messages per crew worker per level (`null` = unlimited; interactive sessions are never capped) | `{ none: 0, minimal: 2, moderate: 5, chatty: null }` |
 | `models.worker` | Default model for workers | `anthropic/claude-haiku-4-5` |
 | `models.planner` | Default model for planner | `anthropic/claude-opus-4-6` |
 | `models.reviewer` | Default model for reviewer | `anthropic/claude-opus-4-6` |
