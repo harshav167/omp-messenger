@@ -14,7 +14,6 @@
     "url": "https://github.com/nicobailon/pi-messenger/issues"
   },
   "keywords": [
-    "pi-package",
     "pi",
     "pi-coding-agent",
     "extension",
@@ -26,12 +25,10 @@
     "cli"
   ],
   "bin": {
-    "pi-messenger": "install.mjs",
     "pi-messenger-mesh": "mesh/server.ts"
   },
   "files": [
     "*.ts",
-    "*.mjs",
     "crew/**",
     "mesh/**",
     "agents/**",
@@ -58,14 +55,6 @@
     "vitest": "^2.1.8"
   },
   "omp": {
-    "extensions": [
-      "./index.ts"
-    ],
-    "skills": [
-      "./skills"
-    ]
-  },
-  "pi": {
     "extensions": [
       "./index.ts"
     ],

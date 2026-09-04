@@ -14,7 +14,7 @@ describe("feed", () => {
   it("writes events to the project-scoped feed path", () => {
     logFeedEvent(cwd, "AgentOne", "join");
 
-    const feedFile = path.join(cwd, ".pi", "messenger", "feed.jsonl");
+    const feedFile = path.join(cwd, ".omp", "messenger", "feed.jsonl");
     expect(fs.existsSync(feedFile)).toBe(true);
     expect(readFeedEvents(cwd, 20)).toHaveLength(1);
   });
@@ -34,7 +34,7 @@ describe("feed", () => {
   });
 
   it("reads a bounded tail across chunks and skips malformed records", () => {
-    const feedFile = path.join(cwd, ".pi", "messenger", "feed.jsonl");
+    const feedFile = path.join(cwd, ".omp", "messenger", "feed.jsonl");
     fs.mkdirSync(path.dirname(feedFile), { recursive: true });
     const events = Array.from({ length: 600 }, (_, i) => JSON.stringify({
       ts: new Date(1_700_000_000_000 + i).toISOString(),

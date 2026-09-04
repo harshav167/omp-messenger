@@ -33,7 +33,7 @@ describe("crew/utils/config", () => {
   });
 
   it("loadCrewConfig merges defaults <- user <- project in order", async () => {
-    const userConfigPath = path.join(dirs.root, ".pi", "agent", "pi-messenger.json");
+    const userConfigPath = path.join(dirs.root, ".omp", "agent", "omp-messenger.json");
     writeJson(userConfigPath, {
       crew: {
         concurrency: { workers: 4 },
@@ -77,7 +77,7 @@ describe("crew/utils/config", () => {
     const defaultCfg = loadCrewConfig(dirs.crewDir);
     expect(defaultCfg.dependencies).toBe("advisory");
 
-    const userConfigPath = path.join(dirs.root, ".pi", "agent", "pi-messenger.json");
+    const userConfigPath = path.join(dirs.root, ".omp", "agent", "omp-messenger.json");
     writeJson(userConfigPath, {
       crew: {
         dependencies: "strict",
@@ -150,7 +150,7 @@ describe("crew/utils/config", () => {
   });
 
   it("deep merge handles nested object values with absent keys", async () => {
-    const userConfigPath = path.join(dirs.root, ".pi", "agent", "pi-messenger.json");
+    const userConfigPath = path.join(dirs.root, ".omp", "agent", "omp-messenger.json");
     writeJson(userConfigPath, {
       crew: {
         work: {

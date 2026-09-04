@@ -159,7 +159,7 @@ describe("auto-review store operations", () => {
 
   it("task.review feed event is recognized as crew event", () => {
     const { cwd } = createTempCrewDirs();
-    const feedPath = path.join(cwd, ".pi", "messenger", "feed.jsonl");
+    const feedPath = path.join(cwd, ".omp", "messenger", "feed.jsonl");
     fs.mkdirSync(path.dirname(feedPath), { recursive: true });
 
     const event = {

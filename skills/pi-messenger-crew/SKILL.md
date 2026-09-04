@@ -30,8 +30,7 @@ pi_messenger({ action: "feed" })  // Activity feed
 
 ### 1. Check Crew Agents
 ```typescript
-pi_messenger({ action: "crew.agents" })  // Verify 5 agents
-pi_messenger({ action: "crew.install" }) // Informational: shows discovered sources
+pi_messenger({ action: "crew.agents" })  // List discovered crew agents
 ```
 
 ### 2. Plan from PRD
@@ -200,9 +199,9 @@ pi_messenger({ action: "status" })
 
 ## Data Storage
 
-Crew stores data in `.pi/messenger/crew/`:
+Crew stores data in `.omp/messenger/crew/`:
 ```
-.pi/messenger/crew/
+.omp/messenger/crew/
 ├── config.json              # Project config (concurrency, models, coordination, etc.)
 ├── plan.json                # Plan metadata
 ├── planning-progress.md     # Planner output log (Notes section for steering)
@@ -220,9 +219,9 @@ Crew stores data in `.pi/messenger/crew/`:
 └── artifacts/               # Debug artifacts (agent input/output)
 ```
 
-Team stores active project state in `.pi/messenger/team/`:
+Team stores active project state in `.omp/messenger/team/`:
 ```
-.pi/messenger/team/
+.omp/messenger/team/
 ├── team.json        # Active team/profile
 ├── charter.md       # Project team charter
 ├── memory.jsonl     # Structured memory source of truth
@@ -232,9 +231,9 @@ Team stores active project state in `.pi/messenger/team/`:
 └── handoffs.md
 ```
 
-Reusable profiles are JSON files under `~/.pi/agent/messenger/team-profiles/`.
+Reusable profiles are JSON files under `~/.omp/agent/messenger/team-profiles/`.
 
-The activity feed lives at `.pi/messenger/feed.jsonl` (project-scoped, shared across all agents in the project).
+The activity feed lives at `.omp/messenger/feed.jsonl` (project-scoped, shared across all agents in the project).
 
 Each crew agent ships with a default model:
 
@@ -245,13 +244,13 @@ Each crew agent ships with a default model:
 | `crew-reviewer` | reviewer | `anthropic/claude-opus-4-6` |
 | `crew-plan-sync` | analyst | `anthropic/claude-haiku-4-5` |
 
-Override via `crew.models.<role>` in config. To customize an agent for a project, copy it from `~/.pi/agent/extensions/pi-messenger/crew/agents/` to `.pi/messenger/crew/agents/` and edit the frontmatter — project-level agents override extension defaults by name. Agents support `thinking: <level>` in frontmatter (off, minimal, low, medium, high, xhigh). Config `thinking.<role>` overrides the frontmatter value.
+Override via `crew.models.<role>` in config. To customize an agent for a project, copy the packaged definition from this plugin's `agents/` directory to `.omp/messenger/crew/agents/` and edit the frontmatter. Project-level agents override packaged defaults by name. Agents support `thinking: <level>` in frontmatter (off, minimal, low, medium, high, xhigh). Config `thinking.<role>` overrides the frontmatter value.
 
 ## Configuration
 
-User-level config goes in `~/.pi/agent/pi-messenger.json` under a `crew` key. Project-level config goes in `.pi/messenger/crew/config.json`. Project overrides user, both override defaults.
+User-level config goes in `~/.omp/agent/omp-messenger.json` under a `crew` key. Project-level config goes in `.omp/messenger/crew/config.json`. Project overrides user, both override defaults.
 
-Crew spawns multiple LLM sessions in parallel — start with a cheap worker model and scale up. Add this to `~/.pi/agent/pi-messenger.json`:
+Crew spawns multiple LLM sessions in parallel. Start with a cheap worker model and scale up. Add this to `~/.omp/agent/omp-messenger.json`:
 
 ```json
 { "crew": { "models": { "worker": "claude-haiku-4-5" } } }
@@ -265,7 +264,7 @@ Model strings accept `provider/model` format for explicit provider selection and
 
 The `:level` suffix and the `thinking.<role>` config are independent — if both are set, the suffix takes precedence.
 
-Full example (`~/.pi/agent/pi-messenger.json`):
+Full example (`~/.omp/agent/omp-messenger.json`):
 ```json
 {
   "crew": {
@@ -277,7 +276,7 @@ Full example (`~/.pi/agent/pi-messenger.json`):
 }
 ```
 
-Project-level (`.pi/messenger/crew/config.json`):
+Project-level (`.omp/messenger/crew/config.json`):
 ```json
 {
   "concurrency": { "workers": 4 },

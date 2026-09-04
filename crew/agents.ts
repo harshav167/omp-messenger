@@ -164,7 +164,7 @@ export async function spawnAgents(
   cwd: string,
   options: SpawnOptions = {},
 ): Promise<AgentResult[]> {
-  const crewDir = options.crewDir ?? path.join(cwd, ".pi", "messenger", "crew");
+  const crewDir = options.crewDir ?? path.join(cwd, ".omp", "messenger", "crew");
   const config = loadCrewConfig(crewDir);
   const agents = discoverCrewAgents(cwd);
   const runId = randomUUID().slice(0, 8);

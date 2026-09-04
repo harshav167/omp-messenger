@@ -322,7 +322,7 @@ describe("crew/state", () => {
     expect(planningState.phase).toBe("read-prd");
     expect(planningState.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
-    const filePath = path.join(cwd, ".pi", "messenger", "crew", "planning-state.json");
+    const filePath = path.join(cwd, ".omp", "messenger", "crew", "planning-state.json");
     expect(fs.existsSync(filePath)).toBe(true);
   });
 
@@ -426,7 +426,7 @@ describe("crew/state", () => {
 
   it("restores active planning run and backfills missing runId", () => {
     const cwd = createTempCrewDirs().cwd;
-    const filePath = path.join(cwd, ".pi", "messenger", "crew", "planning-state.json");
+    const filePath = path.join(cwd, ".omp", "messenger", "crew", "planning-state.json");
 
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({
@@ -460,7 +460,7 @@ describe("crew/state", () => {
     expect(planningState.maxPasses).toBe(0);
     expect(planningState.pid).toBeNull();
 
-    const persisted = fs.readFileSync(path.join(cwd, ".pi", "messenger", "crew", "planning-state.json"), "utf-8");
+    const persisted = fs.readFileSync(path.join(cwd, ".omp", "messenger", "crew", "planning-state.json"), "utf-8");
     expect(persisted).toContain('"phase": "idle"');
   });
 
@@ -472,7 +472,7 @@ describe("crew/state", () => {
 
   it("restorePlanningState clears stale state when stored PID is dead", () => {
     const cwd = createTempCrewDirs().cwd;
-    const filePath = path.join(cwd, ".pi", "messenger", "crew", "planning-state.json");
+    const filePath = path.join(cwd, ".omp", "messenger", "crew", "planning-state.json");
 
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({
@@ -508,7 +508,7 @@ describe("crew/state", () => {
 
   it("restorePlanningState clears stale state when PID is missing", () => {
     const cwd = createTempCrewDirs().cwd;
-    const filePath = path.join(cwd, ".pi", "messenger", "crew", "planning-state.json");
+    const filePath = path.join(cwd, ".omp", "messenger", "crew", "planning-state.json");
 
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({

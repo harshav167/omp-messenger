@@ -6,7 +6,7 @@ services:
     ports:
       - "8765:8765"
     environment:
-      PI_MESSENGER_MESH_TOKEN: ${PI_MESSENGER_MESH_TOKEN:?set PI_MESSENGER_MESH_TOKEN}
+      OMP_MESSENGER_MESH_TOKEN: ${OMP_MESSENGER_MESH_TOKEN:?set OMP_MESSENGER_MESH_TOKEN}
     volumes:
       - mesh-data:/data
     restart: unless-stopped

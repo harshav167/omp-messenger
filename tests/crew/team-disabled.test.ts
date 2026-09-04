@@ -57,7 +57,7 @@ describe("disabled Team layer", () => {
     );
 
     expect(response.details.error).toBe("team_disabled");
-    expect(fs.existsSync(path.join(cwd, ".pi", "messenger", "team"))).toBe(false);
+    expect(fs.existsSync(path.join(cwd, ".omp", "messenger", "team"))).toBe(false);
   });
 
   it("ignores pending approval metadata when Team is disabled", () => {
@@ -85,7 +85,7 @@ describe("disabled Team layer", () => {
   });
 
   it("hides stale Team state from the status bar when Team is disabled", () => {
-    const teamDir = path.join(cwd, ".pi", "messenger", "team");
+    const teamDir = path.join(cwd, ".omp", "messenger", "team");
     fs.mkdirSync(teamDir, { recursive: true });
     fs.writeFileSync(path.join(teamDir, "team.json"), JSON.stringify({
       name: "migration-squad",

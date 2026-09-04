@@ -1,3 +1,4 @@
+/** Discovers omp task-agent roles from the user and project agent directories. */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
@@ -70,10 +71,8 @@ function readRoleFile(filePath: string, sourceLabel: string): TeamRoleDefinition
 export function discoverSubagentRoles(cwd: string, options?: DiscoverSubagentRoleOptions): Record<string, TeamRoleDefinition> {
   const home = options?.homeDir ?? homedir();
   const sources = [
-    { dir: path.join(home, ".pi", "agent", "extensions", "subagent", "agents"), label: "subagent:builtin" },
-    { dir: path.join(home, ".pi", "agent", "agents"), label: "subagent:user" },
-    { dir: path.join(cwd, ".pi", "agents"), label: "subagent:project" },
-    { dir: path.join(cwd, ".agents"), label: "subagent:legacy-project" },
+    { dir: path.join(home, ".omp", "agent", "agents"), label: "subagent:user" },
+    { dir: path.join(cwd, ".omp", "agents"), label: "subagent:project" },
   ];
 
   const roles: Record<string, TeamRoleDefinition> = {};

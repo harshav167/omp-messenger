@@ -11,7 +11,7 @@ import type { MaxOutputConfig } from "./truncate.ts";
 
 export type CoordinationLevel = "none" | "minimal" | "moderate" | "chatty";
 
-const USER_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "pi-messenger.json");
+const USER_CONFIG_PATH = path.join(os.homedir(), ".omp", "agent", "omp-messenger.json");
 const PROJECT_CONFIG_FILE = "config.json";
 
 const COORDINATION_LEVELS: CoordinationLevel[] = ["none", "minimal", "moderate", "chatty"];
@@ -132,11 +132,11 @@ function deepMerge<T extends object>(target: T, ...sources: Partial<T>[]): T {
  * Load crew configuration with priority: defaults <- user <- project
  */
 export function loadCrewConfig(crewDir: string): CrewConfig {
-  // User-level config (from ~/.pi/agent/pi-messenger.json -> crew section)
+  // User-level config (from ~/.omp/agent/omp-messenger.json -> crew section)
   const userConfig = loadJson(USER_CONFIG_PATH);
   const userCrewConfig = (userConfig.crew ?? {}) as Partial<CrewConfig>;
 
-  // Project-level config (from .pi/messenger/crew/config.json)
+  // Project-level config (from .omp/messenger/crew/config.json)
   const projectConfig = loadJson(path.join(crewDir, PROJECT_CONFIG_FILE)) as Partial<CrewConfig>;
 
   // Merge: defaults <- user <- project <- runtime override
@@ -149,7 +149,7 @@ export function loadCrewConfig(crewDir: string): CrewConfig {
 
 /** Whether the Team layer is active for `cwd` (`crew.team.enabled`, default true). */
 export function isTeamEnabled(cwd: string): boolean {
-  return loadCrewConfig(path.join(cwd, ".pi", "messenger", "crew")).team.enabled;
+  return loadCrewConfig(path.join(cwd, ".omp", "messenger", "crew")).team.enabled;
 }
 
 export function getTruncationForRole(config: CrewConfig, role: string): MaxOutputConfig {

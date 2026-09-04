@@ -9,7 +9,7 @@ import { createFakeSdk } from "../helpers/sdk.ts";
 import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.ts";
 
 function writeWorkerAgent(cwd: string): void {
-  const filePath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
+  const filePath = path.join(cwd, ".omp", "messenger", "crew", "agents", "crew-worker.md");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `---
 name: crew-worker

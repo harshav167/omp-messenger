@@ -30,40 +30,24 @@ Crew agents ship with the plugin (`agents/*.md`) and are discovered automaticall
 Run the mesh server once on any host (Docker):
 
 ```bash
-echo "PI_MESSENGER_MESH_TOKEN=$(openssl rand -hex 24)" > mesh/.env
+echo "OMP_MESSENGER_MESH_TOKEN=$(openssl rand -hex 24)" > mesh/.env
 docker compose -f mesh/docker-compose.yml --env-file mesh/.env up -d
 curl http://<host>:8765/healthz   # → ok
 ```
 
-Point every machine at it in `~/.pi/agent/pi-messenger.json` (or per repo in `.pi/pi-messenger.json`, which is how a project pins its channel):
+Point every machine at it in `~/.omp/agent/omp-messenger.json` (or per repo in `.omp/omp-messenger.json`, which is how a project pins its channel):
 
 ```json
 { "mesh": { "url": "ws://<host>:8765", "channel": "main" } }
 ```
 
-Put the token in `~/.pi/agent/messenger/mesh.token` (mode 0600), or set `mesh.token` (a literal or `$ENV_NAME`), or export `PI_MESSENGER_MESH_TOKEN`. `PI_MESSENGER_MESH_URL` overrides the file URL. Without `mesh.url` the plugin uses the local filesystem mesh exactly as before.
+Put the token in `~/.omp/agent/messenger/mesh.token` (mode 0600), or set `mesh.token` (a literal or `$ENV_NAME`), or export `OMP_MESSENGER_MESH_TOKEN`. `OMP_MESSENGER_MESH_URL` overrides the file URL. Without `mesh.url` the plugin uses the local filesystem mesh exactly as before.
 
 `pi_messenger({ action: "channels" })` lists channels; `join { channel }` creates or joins one. The status bar shows `⚡<channel>` in mesh mode (`⚡<channel>…` while reconnecting). Set `{ "crew": { "team": { "enabled": false } } }` to switch the Team layer off.
 
-To show available crew agents:
+List available crew agents with `pi_messenger({ action: "crew.agents" })`.
 
-```bash
-npx omp-messenger --crew-install
-```
-
-To customize an agent for one project, copy it to `.pi/messenger/crew/agents/` and edit it.
-
-To remove the extension:
-
-```bash
-npx omp-messenger --remove
-```
-
-To remove stale crew agent copies from the shared legacy directory (`~/.pi/agent/agents/`):
-
-```bash
-npx omp-messenger --crew-uninstall
-```
+To customize an agent for one project, copy it to `.omp/messenger/crew/agents/` and edit it.
 
 ## Quick Start
 
@@ -120,7 +104,7 @@ Chat input supports `@Name msg` for DMs and `@all msg` for broadcasts. Text with
 
 Crew turns a PRD into a dependency graph of tasks, then executes them in parallel waves.
 
-Crew logs are per project, under that project's working directory: `.pi/messenger/crew/`. For example, if you run Crew from `/path/to/my-app`, the planner log lives at `/path/to/my-app/.pi/messenger/crew/planning-progress.md`.
+Crew logs are per project, under that project's working directory: `.omp/messenger/crew/`. For example, if you run Crew from `/path/to/my-app`, the planner log lives at `/path/to/my-app/.omp/messenger/crew/planning-progress.md`.
 
 ### Workflow
 
@@ -159,13 +143,13 @@ Workers follow the same join/read/implement/commit/release protocol regardless o
 
 Skills are discovered from three locations (later sources override earlier by name):
 
-1. **User skills** — `~/.pi/agent/skills/` (pi's standard `dir/SKILL.md` format)
+1. **User skills** — `~/.omp/agent/skills/` (omp's standard `dir/SKILL.md` format)
 2. **Extension skills** — `crew/skills/` within the extension (flat `.md` files)
-3. **Project skills** — `.pi/messenger/crew/skills/` in your project root (flat `.md` files)
+3. **Project skills** — `.omp/messenger/crew/skills/` in your project root (flat `.md` files)
 
 The planner sees a compact index of all discovered skills and can tag tasks with relevant ones. Workers see tagged skills as "Recommended for this task" with the full catalog under "Also available", and load what they need via `read()`. Zero tokens spent until a worker actually needs the knowledge.
 
-To add a project-level skill, drop a `.md` file in `.pi/messenger/crew/skills/`:
+To add a project-level skill, drop a `.md` file in `.omp/messenger/crew/skills/`:
 
 ```markdown
 ---
@@ -179,11 +163,11 @@ Always use Bearer token auth. Paginate with cursor-based `?after=` params.
 Error responses use `{ error: { code, message, details? } }` shape.
 ```
 
-Any skills you already have in `~/.pi/agent/skills/` are automatically available to crew workers — no setup needed.
+Any skills you already have in `~/.omp/agent/skills/` are automatically available to crew workers — no setup needed.
 
 ### Team Layer
 
-Team is an optional layer around Crew. Crew still plans and executes tasks; Team adds project-local roles, a charter, durable memory, reusable JSON profiles, and high-risk approval gates. Active Team state lives in `.pi/messenger/team/`. Reusable profiles live in `~/.pi/agent/messenger/team-profiles/`.
+Team is an optional layer around Crew. Crew still plans and executes tasks; Team adds project-local roles, a charter, durable memory, reusable JSON profiles, and high-risk approval gates. Active Team state lives in `.omp/messenger/team/`. Reusable profiles live in `~/.omp/agent/messenger/team-profiles/`.
 
 Most users should talk to their agent in plain language:
 
@@ -236,7 +220,7 @@ A saved profile looks like this:
 
 ### Crew Configuration
 
-Crew spawns multiple LLM sessions in parallel — it can burn tokens fast. Start with a cheap worker model and scale up once you've seen the workflow. Add this to `~/.pi/agent/pi-messenger.json`:
+Crew spawns multiple LLM sessions in parallel — it can burn tokens fast. Start with a cheap worker model and scale up once you've seen the workflow. Add this to `~/.omp/agent/omp-messenger.json`:
 
 ```json
 { "crew": { "models": { "worker": "claude-haiku-4-5" } } }
@@ -324,7 +308,7 @@ Each crew agent ships with a fallback model in its frontmatter. Override any rol
 | `crew-reviewer` | reviewer | `anthropic/claude-opus-4-6` |
 | `crew-plan-sync` | analyst | `anthropic/claude-haiku-4-5` |
 
-Agent definitions live in `crew/agents/` within the extension. To customize one for a project, copy it to `.pi/messenger/crew/agents/` and edit the frontmatter — project-level agents override extension defaults by name. Agents support `thinking: <level>` in frontmatter (off, minimal, low, medium, high, xhigh). Config `thinking.<role>` overrides the frontmatter value.
+Agent definitions live in `agents/` within the extension. To customize one for a project, copy it to `.omp/messenger/crew/agents/` and edit the frontmatter — project-level agents override extension defaults by name. Agents support `thinking: <level>` in frontmatter (off, minimal, low, medium, high, xhigh). Config `thinking.<role>` overrides the frontmatter value.
 
 ## API Reference
 
@@ -366,8 +350,6 @@ Agent definitions live in `crew/agents/` within the extension. To customize one 
 | `crew.status` | Overall crew status |
 | `crew.validate` | Validate plan dependencies |
 | `crew.agents` | List available crew agents |
-| `crew.install` | Show discovered crew agents and their sources |
-| `crew.uninstall` | Remove stale shared-directory crew agent copies |
 
 ### Team
 
@@ -398,7 +380,7 @@ Approval-gated tasks use the Crew task commands `task.approve` and `task.reject`
 
 ## Configuration
 
-Create `~/.pi/agent/pi-messenger.json`:
+Create `~/.omp/agent/omp-messenger.json`:
 
 ```json
 {
@@ -430,7 +412,7 @@ Create `~/.pi/agent/pi-messenger.json`:
 | `crewEventsInFeed` | Include crew task events in activity feed | `true` |
 | `contextMode` | Context injection level: `full`, `minimal`, `none` | `"full"` |
 
-Config priority: project `.pi/pi-messenger.json` > user `~/.pi/agent/pi-messenger.json` > `~/.pi/agent/settings.json` `"messenger"` key > defaults.
+Config priority: project `.omp/omp-messenger.json` > user `~/.omp/agent/omp-messenger.json` > `~/.omp/agent/settings.json` `"messenger"` key > defaults.
 
 ## How It Works
 
@@ -438,9 +420,9 @@ omp-messenger is an [oh-my-pi](https://github.com/can1357/oh-my-pi) plugin whose
 
 Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerTurn: true` and `deliverAs: "aside"` — a non-interrupting delivery that starts a turn when the agent is idle and otherwise folds in at the next step boundary. Urgent crew notices (shutdown requests) use `deliverAs: "steer"`. File reservations are enforced by returning `{ block: true }` from a `tool_call` hook on write/edit operations. The `/messenger` overlay uses `ctx.ui.custom()` for the chat TUI, and `ctx.ui.setStatus()` keeps the status bar updated with peer count, unread messages, and the mesh channel.
 
-Crew workers run as in-process omp subagents through the SDK injected into the extension (`runSubprocess` / `runSubagentFollowUpTurn`), with the agent's system prompt, model, and tool restrictions from its `.md` definition. A worker's session file lives under `<project>/.pi/messenger/crew/artifacts/<Name>.jsonl`, which is how the worker's own extension instance learns its mesh name and auto-joins. Progress comes from the SDK's `onProgress` callback — the overlay shows each worker's current tool, call count, and token usage in real time — and workers also appear in omp's Agent Hub. Aborting a work run triggers graceful shutdown: each worker receives an urgent mesh message asking it to stop, followed by a grace period before its run is aborted. Lobby workers stay alive as idle subagents and receive task assignments as follow-up turns. The planner and reviewer work the same way, just with different agent definitions.
+Crew workers run as in-process omp subagents through the SDK injected into the extension (`runSubprocess` / `runSubagentFollowUpTurn`), with the agent's system prompt, model, and tool restrictions from its `.md` definition. A worker's session file lives under `<project>/.omp/messenger/crew/artifacts/<Name>.jsonl`, which is how the worker's own extension instance learns its mesh name and auto-joins. Progress comes from the SDK's `onProgress` callback — the overlay shows each worker's current tool, call count, and token usage in real time — and workers also appear in omp's Agent Hub. Aborting a work run triggers graceful shutdown: each worker receives an urgent mesh message asking it to stop, followed by a grace period before its run is aborted. Lobby workers stay alive as idle omp subagents and receive task assignments through follow-up turns.
 
-Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.pi/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to sqlite on a volume), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. Activity feed and crew data stay project-scoped under `.pi/messenger/`.
+Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.omp/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to sqlite on a volume), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. Activity feed and crew data stay project-scoped under `.omp/messenger/`.
 
 ## Credits
 

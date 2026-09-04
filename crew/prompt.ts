@@ -115,7 +115,7 @@ ${taskSpec}
 
   if (planSpec && !planSpec.includes("*Spec pending*")) {
     const truncatedSpec = planSpec.length > 2000
-      ? planSpec.slice(0, 2000) + `\n\n[Spec truncated - read full spec from .pi/messenger/crew/plan.md]`
+      ? planSpec.slice(0, 2000) + `\n\n[Spec truncated - read full spec from .omp/messenger/crew/plan.md]`
       : planSpec;
     prompt += `## Plan Context
 

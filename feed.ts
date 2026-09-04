@@ -1,7 +1,7 @@
 /**
  * Pi Messenger - Activity Feed
  *
- * Append-only JSONL feed stored at <cwd>/.pi/messenger/feed.jsonl
+ * Append-only JSONL feed stored at <cwd>/.omp/messenger/feed.jsonl
  */
 
 import * as fs from "node:fs";
@@ -47,7 +47,7 @@ export interface FeedEvent {
 }
 
 function feedPath(cwd: string): string {
-  return path.join(cwd, ".pi", "messenger", "feed.jsonl");
+  return path.join(cwd, ".omp", "messenger", "feed.jsonl");
 }
 
 function sanitizeInlineText(value?: string): string | undefined {

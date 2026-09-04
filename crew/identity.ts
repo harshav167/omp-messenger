@@ -2,7 +2,7 @@
  * Crew - Worker identity
  *
  * In-process crew workers are omp subagent sessions whose session file lives at
- * `<cwd>/.pi/messenger/crew/artifacts/<name>.jsonl`. The extension instance bound
+ * `<cwd>/.omp/messenger/crew/artifacts/<name>.jsonl`. The extension instance bound
  * to such a session derives its mesh name from that path; no environment
  * variables are involved (they would be process-wide).
  */

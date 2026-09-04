@@ -105,7 +105,7 @@ export interface ReservationConflict {
 
 export interface MessengerState {
   agentName: string;
-  /** Name came from PI_AGENT_NAME or a crew identity: never auto-suffixed on conflict. */
+  /** Name came from OMP_AGENT_NAME or a crew identity: never auto-suffixed on conflict. */
   explicitName: boolean;
   registered: boolean;
   /** Mesh channel this session lives in (default "main"). */

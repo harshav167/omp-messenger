@@ -29,7 +29,7 @@ describe("config autoOverlayPlanning", () => {
   beforeEach(() => {
     dirs = createTempCrewDirs();
     homedirMock.mockReset();
-    homedirMock.mockReturnValue(path.join(dirs.root, ".pi-home"));
+    homedirMock.mockReturnValue(path.join(dirs.root, ".omp-home"));
   });
 
   it("defaults autoOverlayPlanning to true", async () => {
@@ -39,11 +39,11 @@ describe("config autoOverlayPlanning", () => {
   });
 
   it("applies project override for autoOverlayPlanning", async () => {
-    const homeDir = path.join(dirs.root, ".pi-home");
-    writeJson(path.join(homeDir, ".pi", "agent", "pi-messenger.json"), {
+    const homeDir = path.join(dirs.root, ".omp-home");
+    writeJson(path.join(homeDir, ".omp", "agent", "omp-messenger.json"), {
       autoOverlayPlanning: true,
     });
-    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+    writeJson(path.join(dirs.cwd, ".omp", "omp-messenger.json"), {
       autoOverlayPlanning: false,
     });
 
@@ -60,7 +60,7 @@ describe("config autoOverlayPlanning", () => {
   });
 
   it("applies project stuckWakeAgent", async () => {
-    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+    writeJson(path.join(dirs.cwd, ".omp", "omp-messenger.json"), {
       stuckWakeAgent: "project-manager",
     });
 
@@ -72,25 +72,25 @@ describe("config autoOverlayPlanning", () => {
 });
 
 describe("mesh config", () => {
-  const originalMeshUrl = process.env.PI_MESSENGER_MESH_URL;
-  const originalMeshToken = process.env.PI_MESSENGER_MESH_TOKEN;
+  const originalMeshUrl = process.env.OMP_MESSENGER_MESH_URL;
+  const originalMeshToken = process.env.OMP_MESSENGER_MESH_TOKEN;
   const originalX = process.env.X;
   let dirs: TempCrewDirs;
 
   beforeEach(() => {
     dirs = createTempCrewDirs();
     homedirMock.mockReset();
-    homedirMock.mockReturnValue(path.join(dirs.root, ".pi-home"));
-    delete process.env.PI_MESSENGER_MESH_URL;
-    delete process.env.PI_MESSENGER_MESH_TOKEN;
+    homedirMock.mockReturnValue(path.join(dirs.root, ".omp-home"));
+    delete process.env.OMP_MESSENGER_MESH_URL;
+    delete process.env.OMP_MESSENGER_MESH_TOKEN;
     delete process.env.X;
   });
 
   afterEach(() => {
-    if (originalMeshUrl === undefined) delete process.env.PI_MESSENGER_MESH_URL;
-    else process.env.PI_MESSENGER_MESH_URL = originalMeshUrl;
-    if (originalMeshToken === undefined) delete process.env.PI_MESSENGER_MESH_TOKEN;
-    else process.env.PI_MESSENGER_MESH_TOKEN = originalMeshToken;
+    if (originalMeshUrl === undefined) delete process.env.OMP_MESSENGER_MESH_URL;
+    else process.env.OMP_MESSENGER_MESH_URL = originalMeshUrl;
+    if (originalMeshToken === undefined) delete process.env.OMP_MESSENGER_MESH_TOKEN;
+    else process.env.OMP_MESSENGER_MESH_TOKEN = originalMeshToken;
     if (originalX === undefined) delete process.env.X;
     else process.env.X = originalX;
   });
@@ -106,7 +106,7 @@ describe("mesh config", () => {
 
   it("resolves an environment-indirected token", async () => {
     process.env.X = "abc";
-    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+    writeJson(path.join(dirs.cwd, ".omp", "omp-messenger.json"), {
       mesh: { url: "ws://h:1", token: "$X", channel: "repo-a" },
     });
 
@@ -119,8 +119,8 @@ describe("mesh config", () => {
   });
 
   it("prefers the mesh URL environment variable", async () => {
-    process.env.PI_MESSENGER_MESH_URL = "ws://env:2";
-    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+    process.env.OMP_MESSENGER_MESH_URL = "ws://env:2";
+    writeJson(path.join(dirs.cwd, ".omp", "omp-messenger.json"), {
       mesh: { url: "ws://file:1", token: "t", channel: "main" },
     });
 
@@ -129,7 +129,7 @@ describe("mesh config", () => {
   });
 
   it("falls back to main for an invalid channel", async () => {
-    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+    writeJson(path.join(dirs.cwd, ".omp", "omp-messenger.json"), {
       mesh: { channel: "Bad Name" },
     });
 

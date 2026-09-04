@@ -7,7 +7,6 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { result } from "../utils/result.ts";
 import { discoverCrewAgents } from "../utils/discover.ts";
-import { uninstallAgents } from "../utils/install.ts";
 import { loadCrewConfig } from "../utils/config.ts";
 import { formatDuration } from "../../lib.ts";
 import * as store from "../store.ts";
@@ -67,8 +66,8 @@ Create a plan:
     } else {
       text += `\n**Planning health:** active`;
     }
-    text += `\n**Progress log:** .pi/messenger/crew/planning-progress.md`;
-    text += `\n**Outline:** .pi/messenger/crew/planning-outline.md`;
+    text += `\n**Progress log:** .omp/messenger/crew/planning-progress.md`;
+    text += `\n**Outline:** .omp/messenger/crew/planning-outline.md`;
   }
 
   text += `\n\n## Tasks\n`;
@@ -151,7 +150,7 @@ Create a plan:
 
   text += `\n## Next`;
   if (tasks.length === 0 && isPlanningForCwd(cwd)) {
-    text += `\nPlanning is in progress. Check .pi/messenger/crew/planning-progress.md for updates.`;
+    text += `\nPlanning is in progress. Check .omp/messenger/crew/planning-progress.md for updates.`;
   } else if (tasks.length === 0) {
     text += `\nNo tasks yet. Run \`pi_messenger({ action: "plan" })\` to generate tasks from your PRD.`;
   } else if (done.length === tasks.length) {
@@ -191,7 +190,7 @@ Create a plan:
 }
 
 /**
- * Execute crew.* actions (crew.status, crew.agents, crew.install, crew.uninstall)
+ * Execute crew.* actions.
  */
 export async function executeCrew(
   op: string,
@@ -231,29 +230,6 @@ export async function executeCrew(
       });
     }
 
-    case "install": {
-      const agents = discoverCrewAgents(cwd);
-      return result(`Crew agents (${agents.length}): ${agents.map(a => `${a.name} (${a.source})`).join(", ")}`, {
-        mode: "crew.install",
-        agents: agents.map(a => ({ name: a.name, source: a.source })),
-      });
-    }
-
-    case "uninstall": {
-      const agentResult = uninstallAgents();
-      
-      if (agentResult.errors.length > 0) {
-        return result(`⚠️ Removed with ${agentResult.errors.length} error(s):\n${agentResult.errors.join("\n")}`, {
-          mode: "crew.uninstall",
-          removed: agentResult.removed,
-          errors: agentResult.errors
-        });
-      }
-      return result(`✅ Removed ${agentResult.removed.length} agent(s)`, {
-        mode: "crew.uninstall",
-        removed: agentResult.removed,
-      });
-    }
 
     case "validate": {
       const validation = store.validatePlan(cwd);

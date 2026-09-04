@@ -36,8 +36,8 @@ function makeConfig(overrides: Partial<CrewConfig> = {}): CrewConfig {
 
 function makeSkills(): CrewSkillInfo[] {
   return [
-    { name: "react-patterns", description: "React conventions", path: "/home/user/.pi/agent/skills/react-patterns/SKILL.md", source: "user" },
-    { name: "testing", description: "Test setup and patterns", path: "/project/.pi/messenger/crew/skills/testing.md", source: "project" },
+    { name: "react-patterns", description: "React conventions", path: "/home/user/.omp/agent/skills/react-patterns/SKILL.md", source: "user" },
+    { name: "testing", description: "Test setup and patterns", path: "/project/.omp/messenger/crew/skills/testing.md", source: "project" },
     { name: "api-design", description: "REST/GraphQL patterns", path: "/ext/crew/skills/api-design.md", source: "extension" },
   ];
 }
@@ -46,16 +46,16 @@ describe("buildWorkerPrompt - skills section", () => {
   let dirs: TempCrewDirs;
 
   afterEach(() => {
-    delete process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
+    delete process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
   });
 
   function setupStore(task: Task) {
-    const tasksDir = path.join(dirs.cwd, ".pi", "messenger", "crew", "tasks");
+    const tasksDir = path.join(dirs.cwd, ".omp", "messenger", "crew", "tasks");
     fs.mkdirSync(tasksDir, { recursive: true });
     fs.writeFileSync(path.join(tasksDir, `${task.id}.json`), JSON.stringify(task));
     fs.writeFileSync(path.join(tasksDir, `${task.id}.md`), "Task spec content");
 
-    const planDir = path.join(dirs.cwd, ".pi", "messenger", "crew");
+    const planDir = path.join(dirs.cwd, ".omp", "messenger", "crew");
     fs.writeFileSync(path.join(planDir, "plan.json"), JSON.stringify({
       prd: "test.md",
       created_at: new Date().toISOString(),
@@ -67,7 +67,7 @@ describe("buildWorkerPrompt - skills section", () => {
 
   it("injects bounded Team role, charter, memory, and approval context", () => {
     dirs = createTempCrewDirs();
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(dirs.cwd, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(dirs.cwd, "profiles");
     teamStore.useProfile(dirs.cwd, "migration-squad");
     teamStore.writeCharter(dirs.cwd, "migration-squad", "Review risky auth work before edits.");
     teamStore.noteMemory(dirs.cwd, "decision", "Auth middleware owns refresh validation", "AgentOne");
@@ -94,7 +94,7 @@ describe("buildWorkerPrompt - skills section", () => {
 
   it("gives non-editing Team roles a read-only mission", () => {
     dirs = createTempCrewDirs();
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(dirs.cwd, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(dirs.cwd, "profiles");
     teamStore.useProfile(dirs.cwd, "migration-squad");
     const task = makeTask({ role: "scout", depends_on: ["task-0"], skills: ["testing"] });
     setupStore(task);
@@ -180,8 +180,8 @@ describe("buildWorkerPrompt - skills section", () => {
     setupStore(task);
 
     const prompt = buildWorkerPrompt(task, "test.md", dirs.cwd, makeConfig(), [], makeSkills());
-    expect(prompt).toContain("/home/user/.pi/agent/skills/react-patterns/SKILL.md");
-    expect(prompt).toContain("/project/.pi/messenger/crew/skills/testing.md");
+    expect(prompt).toContain("/home/user/.omp/agent/skills/react-patterns/SKILL.md");
+    expect(prompt).toContain("/project/.omp/messenger/crew/skills/testing.md");
   });
 
   it("excludes the orchestrator crew skill from worker prompts", () => {

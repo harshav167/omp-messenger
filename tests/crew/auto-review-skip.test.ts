@@ -35,7 +35,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
       evict: vi.fn(),
       send: vi.fn(async () => ({ ok: true })),
     } as unknown as Mesh;
-    const agentsDir = path.join(cwd, ".pi", "messenger", "crew", "agents");
+    const agentsDir = path.join(cwd, ".omp", "messenger", "crew", "agents");
     fs.mkdirSync(agentsDir, { recursive: true });
     for (const name of ["crew-worker", "crew-reviewer"]) {
       fs.writeFileSync(path.join(agentsDir, `${name}.md`), `---\nname: ${name}\ndescription: Agent\n---\nAgent`);
@@ -48,7 +48,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
   });
 
   afterEach(() => {
-    delete process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
+    delete process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
   });
 
   // Simulates a task blocked (e.g. as a duplicate) after the worker exited 0
@@ -82,7 +82,7 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     expect(response.details.succeeded).toEqual([]);
     expect(response.details.blocked).toContain(task.id);
 
-    const feedPath = path.join(cwd, ".pi", "messenger", "feed.jsonl");
+    const feedPath = path.join(cwd, ".omp", "messenger", "feed.jsonl");
     const events = fs.readFileSync(feedPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
     const skip = events.find(e => e.type === "task.review" && e.target === task.id);
     expect(skip).toBeDefined();

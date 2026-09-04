@@ -22,7 +22,7 @@ function ensureDir(dir: string): void {
 }
 
 export function getCrewDir(cwd: string): string {
-  return path.join(cwd, ".pi", "messenger", "crew");
+  return path.join(cwd, ".omp", "messenger", "crew");
 }
 
 function getTasksDir(cwd: string): string {

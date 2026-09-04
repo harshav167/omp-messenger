@@ -22,7 +22,7 @@ function git(args: string, cwd: string): string {
 
 function initRepo(cwd: string): string {
   git("init -q -b main", cwd);
-  fs.writeFileSync(path.join(cwd, ".gitignore"), ".pi/\n");
+  fs.writeFileSync(path.join(cwd, ".gitignore"), ".omp/\n");
   fs.writeFileSync(path.join(cwd, "README.md"), "# repo\n");
   git("add .", cwd);
   git("commit -qm init", cwd);
@@ -57,7 +57,7 @@ async function createReviewedTask(): Promise<Fixture> {
   });
 
   // crew-reviewer agent so reviewImplementation passes discovery
-  const agentsDir = path.join(cwd, ".pi", "messenger", "crew", "agents");
+  const agentsDir = path.join(cwd, ".omp", "messenger", "crew", "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
   fs.writeFileSync(
     path.join(agentsDir, "crew-reviewer.md"),

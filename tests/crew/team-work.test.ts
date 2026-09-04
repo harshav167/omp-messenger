@@ -26,19 +26,19 @@ describe("work with Team approval", () => {
     teamStore = await import("../../crew/team/store.ts");
 
     cwd = createTempCrewDirs().cwd;
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
     mesh = {
       peers: () => [],
       evict: vi.fn(),
       send: vi.fn(async () => ({ ok: true })),
     } as unknown as Mesh;
-    const agentPath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
+    const agentPath = path.join(cwd, ".omp", "messenger", "crew", "agents", "crew-worker.md");
     fs.mkdirSync(path.dirname(agentPath), { recursive: true });
     fs.writeFileSync(agentPath, "---\nname: crew-worker\ndescription: Worker\n---\nWorker");
   });
 
   afterEach(() => {
-    delete process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
+    delete process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
   });
 
   it("skips approval-gated ready tasks without spawning workers", async () => {
@@ -59,8 +59,8 @@ describe("work with Team approval", () => {
   });
 
   it("does not auto-block approval-gated tasks at max attempts", async () => {
-    fs.mkdirSync(path.join(cwd, ".pi", "messenger", "crew"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".pi", "messenger", "crew", "config.json"), JSON.stringify({ work: { maxAttemptsPerTask: 1 } }));
+    fs.mkdirSync(path.join(cwd, ".omp", "messenger", "crew"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".omp", "messenger", "crew", "config.json"), JSON.stringify({ work: { maxAttemptsPerTask: 1 } }));
     store.createPlan(cwd, "docs/PRD.md");
     const gated = store.createTask(cwd, "High risk", "Edit auth", [], {
       approval: { required: true, status: "pending" },
@@ -132,8 +132,8 @@ describe("work with Team approval", () => {
   });
 
   it("reports approval-gated tasks unlocked after a wave", async () => {
-    fs.mkdirSync(path.join(cwd, ".pi", "messenger", "crew"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".pi", "messenger", "crew", "config.json"), JSON.stringify({ dependencies: "strict" }));
+    fs.mkdirSync(path.join(cwd, ".omp", "messenger", "crew"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".omp", "messenger", "crew", "config.json"), JSON.stringify({ dependencies: "strict" }));
     store.createPlan(cwd, "docs/PRD.md");
     const first = store.createTask(cwd, "Prepare", "Do prep");
     const gated = store.createTask(cwd, "Change auth", "Edit auth", [first.id], {

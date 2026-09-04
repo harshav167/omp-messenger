@@ -132,7 +132,7 @@ function loadAgentsFromDir(dir: string, source: "extension" | "project"): CrewAg
 
 export function discoverCrewAgents(cwd: string, extensionAgentsDir?: string): CrewAgentConfig[] {
   const extDir = extensionAgentsDir ?? DEFAULT_EXTENSION_AGENTS_DIR;
-  const projectAgentsDir = path.join(cwd, ".pi", "messenger", "crew", "agents");
+  const projectAgentsDir = path.join(cwd, ".omp", "messenger", "crew", "agents");
 
   const extensionAgents = loadAgentsFromDir(extDir, "extension");
   const projectAgents = loadAgentsFromDir(projectAgentsDir, "project");
@@ -220,8 +220,8 @@ export function discoverCrewSkills(
   userSkillsDir?: string,
 ): CrewSkillInfo[] {
   const extDir = extensionSkillsDir ?? DEFAULT_EXTENSION_SKILLS_DIR;
-  const projectSkillsDir = path.join(cwd, ".pi", "messenger", "crew", "skills");
-  const userDir = userSkillsDir ?? path.join(os.homedir(), ".pi", "agent", "skills");
+  const projectSkillsDir = path.join(cwd, ".omp", "messenger", "crew", "skills");
+  const userDir = userSkillsDir ?? path.join(os.homedir(), ".omp", "agent", "skills");
 
   const userSkills = loadSkillsFromUserDir(userDir);
   const extensionSkills = loadSkillsFromFlatDir(extDir, "extension");

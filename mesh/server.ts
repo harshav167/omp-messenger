@@ -266,12 +266,12 @@ if (import.meta.main) {
     const index = process.argv.indexOf(name);
     return index >= 0 ? process.argv[index + 1] : undefined;
   };
-  const port = Number(option("--port") ?? process.env.PI_MESSENGER_MESH_PORT ?? "8765");
+  const port = Number(option("--port") ?? process.env.OMP_MESSENGER_MESH_PORT ?? "8765");
   const hostname = option("--host") ?? "0.0.0.0";
-  const token = option("--token") ?? process.env.PI_MESSENGER_MESH_TOKEN;
-  const dataDir = option("--data-dir") ?? process.env.PI_MESSENGER_MESH_DATA_DIR;
+  const token = option("--token") ?? process.env.OMP_MESSENGER_MESH_TOKEN;
+  const dataDir = option("--data-dir") ?? process.env.OMP_MESSENGER_MESH_DATA_DIR;
   if (!token) {
-    console.error("pi-messenger-mesh: --token or PI_MESSENGER_MESH_TOKEN is required");
+    console.error("pi-messenger-mesh: --token or OMP_MESSENGER_MESH_TOKEN is required");
     process.exit(1);
   }
   const running = startMeshServer({ port, hostname, token, ...(dataDir ? { dataDir } : {}) });

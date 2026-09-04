@@ -82,7 +82,7 @@ describe("agent_end autonomous continuation guards", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-home-"));
     tempHomes.push(home);
     vi.stubEnv("HOME", home);
-    vi.stubEnv("PI_MESSENGER_DIR", path.join(home, ".pi", "agent", "messenger"));
+    vi.stubEnv("OMP_MESSENGER_DIR", path.join(home, ".omp", "agent", "messenger"));
   });
 
   afterEach(() => {
@@ -116,7 +116,7 @@ describe("agent_end autonomous continuation guards", () => {
 
   it("skips autonomous continuation handling inside worker sessions", async () => {
     const { cwd } = createTempCrewDirs();
-    const workerSessionFile = path.join(cwd, ".pi", "messenger", "crew", "artifacts", "OakBear.jsonl");
+    const workerSessionFile = path.join(cwd, ".omp", "messenger", "crew", "artifacts", "OakBear.jsonl");
     const ctx = createEventContext(cwd, workerSessionFile);
     const pi = createMockPi();
     const { default: piMessengerExtension } = await import("../../index.ts");

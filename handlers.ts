@@ -1093,7 +1093,7 @@ export function executeAutoRegisterPath(
       const isMatched = matchesAutoRegisterPath(cwd, paths);
       if (isMatched) {
         return result(
-          `Current folder matches a glob pattern but isn't an exact entry.\nManually edit ~/.pi/agent/pi-messenger.json to modify glob patterns.`,
+          `Current folder matches a glob pattern but isn't an exact entry.\nManually edit ~/.omp/agent/omp-messenger.json to modify glob patterns.`,
           { mode: "autoRegisterPath", action: "remove", notExact: true, path: cwd }
         );
       }

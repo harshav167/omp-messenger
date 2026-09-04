@@ -16,13 +16,13 @@ describe("team command routing", () => {
 
   beforeEach(() => {
     cwd = createTempCrewDirs().cwd;
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
     ({ mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd }));
     state.registered = true;
   });
 
   afterEach(() => {
-    delete process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
+    delete process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
   });
 
   async function run(action: string, params: Record<string, unknown> = {}) {
@@ -35,15 +35,15 @@ describe("team command routing", () => {
     expect(setup.details.mode).toBe("team.setup");
     expect(setup.details.charterStatus).toBe("created");
     expect(setup.content[0].text).toContain("Set up Team profile **research-squad**");
-    expect(fs.readFileSync(path.join(cwd, ".pi", "messenger", "team", "charter.md"), "utf-8")).toContain("Use the research-squad Team profile");
+    expect(fs.readFileSync(path.join(cwd, ".omp", "messenger", "team", "charter.md"), "utf-8")).toContain("Use the research-squad Team profile");
 
     const keep = await run("team.setup", { name: "review-squad" });
     expect(keep.details.charterStatus).toBe("kept");
-    expect(fs.readFileSync(path.join(cwd, ".pi", "messenger", "team", "charter.md"), "utf-8")).toContain("Use the research-squad Team profile");
+    expect(fs.readFileSync(path.join(cwd, ".omp", "messenger", "team", "charter.md"), "utf-8")).toContain("Use the research-squad Team profile");
 
     const custom = await run("team.setup", { name: "review-squad", message: "Review first, then apply approved cleanup." });
     expect(custom.details.charterStatus).toBe("updated");
-    expect(fs.readFileSync(path.join(cwd, ".pi", "messenger", "team", "charter.md"), "utf-8")).toContain("Review first, then apply approved cleanup.");
+    expect(fs.readFileSync(path.join(cwd, ".omp", "messenger", "team", "charter.md"), "utf-8")).toContain("Review first, then apply approved cleanup.");
   });
 
   it("routes team commands", async () => {

@@ -81,20 +81,17 @@ import {
 import { loadCrewConfig } from "./crew/utils/config.ts";
 import * as crewStore from "./crew/store.ts";
 import * as teamStore from "./crew/team/store.ts";
-import { runLegacyAgentCleanupMigration } from "./crew/utils/install.ts";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.ts";
 import { shutdownAllWorkers } from "./crew/agents.ts";
 import { shutdownLobbyWorkers } from "./crew/lobby.ts";
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
-  setSdk(pi.pi);
+  const { pi: sdk } = pi;
+  setSdk(sdk);
   let overlayTui: TUI | null = null;
   let overlayHandle: OverlayHandle | null = null;
   let overlayOpening = false;
 
-  // One-time migration: remove stale crew agents from shared ~/.pi/agent/agents/
-  // (crew agents now discovered from extension-local directory)
-  runLegacyAgentCleanupMigration();
 
   // ===========================================================================
   // State & Configuration
@@ -103,8 +100,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   let config: MessengerConfig = loadGlobalConfig();
 
   const state: MessengerState = {
-    agentName: process.env.PI_AGENT_NAME || "",
-    explicitName: !!process.env.PI_AGENT_NAME,
+    agentName: process.env.OMP_AGENT_NAME || "",
+    explicitName: !!process.env.OMP_AGENT_NAME,
     channel: config.mesh.channel,
     isCrewWorker: false,
     messagesSent: 0,
@@ -134,7 +131,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
 
-  const baseDir = process.env.PI_MESSENGER_DIR || join(homedir(), ".pi/agent/messenger");
+  const baseDir = process.env.OMP_MESSENGER_DIR || join(homedir(), ".omp", "agent", "messenger");
 
   // ===========================================================================
   // Message Delivery
@@ -910,7 +907,7 @@ Usage (action-based API - preferred):
     }
 
     state.isHuman = ctx.hasUI;
-    try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
+    try { fs.rmSync(join(state.cwd, ".omp", "messenger", "feed.jsonl"), { force: true }); } catch {}
 
     const shouldAutoRegister = state.isCrewWorker || config.autoRegister ||
       matchesAutoRegisterPath(state.cwd, config.autoRegisterPaths);
@@ -1105,7 +1102,7 @@ Usage (action-based API - preferred):
     }
 
     const cwd = autonomousState.cwd ?? currentCwd;
-    const crewDir = join(cwd, ".pi", "messenger", "crew");
+    const crewDir = join(cwd, ".omp", "messenger", "crew");
     const crewConfig = loadCrewConfig(crewDir);
 
     // Check max waves limit

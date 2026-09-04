@@ -6,7 +6,7 @@ import { executeTaskAction } from "../../crew/task-actions.ts";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 
 function writeCrewDependenciesConfig(cwd: string, dependencies: "advisory" | "strict"): void {
-  const configPath = path.join(cwd, ".pi", "messenger", "crew", "config.json");
+  const configPath = path.join(cwd, ".omp", "messenger", "crew", "config.json");
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify({ dependencies }, null, 2));
 }

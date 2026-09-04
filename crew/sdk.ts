@@ -1,9 +1,9 @@
 /**
  * Crew - omp SDK access
  *
- * The extension receives the root `@oh-my-pi/pi-coding-agent` namespace on
- * `ExtensionAPI.pi`; crew modules reach it through this accessor instead of
- * importing the package (which would create a second module instance).
+ * The extension receives the runtime's root SDK namespace; crew modules reach
+ * it through this accessor instead of importing the package, which would create
+ * a second module instance.
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";

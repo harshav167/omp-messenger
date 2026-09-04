@@ -312,7 +312,7 @@ Before editing files, check if another worker has reserved them via \`pi_messeng
 `;
 
   out += `### Questions about dependencies
-If your task depends on a completed task and something about its implementation is unclear, read the code and the task's progress log at \`.pi/messenger/crew/tasks/<task-id>.progress.md\`. Dependency authors are from previous waves and are no longer in the mesh.
+If your task depends on a completed task and something about its implementation is unclear, read the code and the task's progress log at \`.omp/messenger/crew/tasks/<task-id>.progress.md\`. Dependency authors are from previous waves and are no longer in the mesh.
 
 `;
 

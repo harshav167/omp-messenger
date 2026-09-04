@@ -17,7 +17,7 @@ describe("crew/utils/discover", () => {
   beforeEach(() => {
     dirs = createTempCrewDirs();
     extensionAgentsDir = path.join(dirs.root, "extension-agents");
-    projectAgentsDir = path.join(dirs.cwd, ".pi", "messenger", "crew", "agents");
+    projectAgentsDir = path.join(dirs.cwd, ".omp", "messenger", "crew", "agents");
     fs.mkdirSync(extensionAgentsDir, { recursive: true });
   });
 
@@ -168,7 +168,7 @@ describe("crew/utils/discover - skills", () => {
     dirs = createTempCrewDirs();
     extensionSkillsDir = path.join(dirs.root, "extension-skills");
     userSkillsDir = path.join(dirs.root, "user-skills");
-    projectSkillsDir = path.join(dirs.cwd, ".pi", "messenger", "crew", "skills");
+    projectSkillsDir = path.join(dirs.cwd, ".omp", "messenger", "crew", "skills");
     fs.mkdirSync(extensionSkillsDir, { recursive: true });
     fs.mkdirSync(userSkillsDir, { recursive: true });
   });

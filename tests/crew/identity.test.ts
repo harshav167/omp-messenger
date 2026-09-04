@@ -16,13 +16,13 @@ describe("crew worker identity", () => {
   const cwd = path.join("/tmp", "crew-identity-project");
 
   it("derives the worker name from an artifact transcript", () => {
-    const sessionFile = path.join(cwd, ".pi", "messenger", "crew", "artifacts", "OakBear.jsonl");
+    const sessionFile = path.join(cwd, ".omp", "messenger", "crew", "artifacts", "OakBear.jsonl");
 
     expect(detectCrewIdentity(context(cwd, sessionFile))).toEqual({ name: "OakBear" });
   });
 
   it("ignores a session transcript outside the crew artifacts directory", () => {
-    expect(detectCrewIdentity(context(cwd, path.join(cwd, ".pi", "sessions", "OakBear.jsonl")))).toBeNull();
+    expect(detectCrewIdentity(context(cwd, path.join(cwd, ".omp", "sessions", "OakBear.jsonl")))).toBeNull();
   });
 
   it("ignores sessions without a transcript path", () => {

@@ -427,8 +427,8 @@ export function renderPlanningState(theme: Theme, cwd: string, width: number, he
       }
     }
     lines.push("");
-    lines.push(theme.fg("dim", "  progress: .pi/messenger/crew/planning-progress.md"));
-    lines.push(theme.fg("dim", "  outline: .pi/messenger/crew/planning-outline.md"));
+    lines.push(theme.fg("dim", "  progress: .omp/messenger/crew/planning-progress.md"));
+    lines.push(theme.fg("dim", "  outline: .omp/messenger/crew/planning-outline.md"));
   }
 
   if (lines.length > height) {

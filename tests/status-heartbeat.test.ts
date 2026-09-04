@@ -81,7 +81,7 @@ describe("status heartbeat", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-home-"));
     tempHomes.push(home);
     vi.stubEnv("HOME", home);
-    vi.stubEnv("PI_MESSENGER_DIR", path.join(home, ".pi", "agent", "messenger"));
+    vi.stubEnv("OMP_MESSENGER_DIR", path.join(home, ".omp", "agent", "messenger"));
   });
 
   afterEach(() => {
@@ -142,9 +142,9 @@ describe("status heartbeat", () => {
   it("wakes the configured coordinator once when a peer becomes stuck", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
     tempCwds.push(cwd);
-    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+    fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
     fs.writeFileSync(
-      path.join(cwd, ".pi", "pi-messenger.json"),
+      path.join(cwd, ".omp", "omp-messenger.json"),
       JSON.stringify({
         autoRegister: true,
         stuckNotify: true,
@@ -152,9 +152,9 @@ describe("status heartbeat", () => {
         stuckWakeAgent: "project-manager",
       })
     );
-    vi.stubEnv("PI_AGENT_NAME", "project-manager");
+    vi.stubEnv("OMP_AGENT_NAME", "project-manager");
 
-    const base = process.env.PI_MESSENGER_DIR;
+    const base = process.env.OMP_MESSENGER_DIR;
     expect(base).toBeTruthy();
     const registry = path.join(base ?? "", "registry");
     fs.mkdirSync(registry, { recursive: true });
@@ -201,8 +201,8 @@ describe("status heartbeat", () => {
   it("does not swallow non-stale status update errors", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
     tempCwds.push(cwd);
-    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".pi", "pi-messenger.json"), JSON.stringify({ autoRegister: true }));
+    fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".omp", "omp-messenger.json"), JSON.stringify({ autoRegister: true }));
 
     const pi = await loadExtension();
     const sessionStart = pi.handlers.get("session_start")?.[0];

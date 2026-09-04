@@ -8,7 +8,7 @@ import { createTempCrewDirs, type TempCrewDirs } from "../helpers/temp-dirs.ts";
 
 function writeWorkerAgent(cwd: string, model?: string): void {
   const modelLine = model ? `model: ${model}\n` : "";
-  const filePath = path.join(cwd, ".pi", "messenger", "crew", "agents", "crew-worker.md");
+  const filePath = path.join(cwd, ".omp", "messenger", "crew", "agents", "crew-worker.md");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `---
 name: crew-worker
@@ -20,7 +20,7 @@ You are a test worker.
 }
 
 function writeCrewConfig(cwd: string, model: string, thinking?: string): void {
-  const configPath = path.join(cwd, ".pi", "messenger", "crew", "config.json");
+  const configPath = path.join(cwd, ".omp", "messenger", "crew", "config.json");
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify({
     models: { worker: model },

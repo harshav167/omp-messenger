@@ -12,7 +12,7 @@ import type { DeliverFn, Mesh } from "./types.ts";
 
 export interface CreateMeshOptions {
   config: MessengerConfig;
-  /** Filesystem mesh root (PI_MESSENGER_DIR or ~/.pi/agent/messenger). */
+  /** Filesystem mesh root (OMP_MESSENGER_DIR or ~/.omp/agent/messenger). */
   base: string;
   state: MessengerState;
   deliver: DeliverFn;

@@ -14,7 +14,7 @@ function createState(agentName = "Lead"): MessengerState {
 
 describe("Team task approval gates", () => {
   afterEach(() => {
-    delete process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
+    delete process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
   });
 
   it("blocks manual start and separates approval-gated ready tasks", async () => {
@@ -38,7 +38,7 @@ describe("Team task approval gates", () => {
 
   it("points newly-created approval-gated tasks at approval", async () => {
     const { cwd } = createTempCrewDirs();
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
     teamStore.useProfile(cwd, "migration-squad");
     store.createPlan(cwd, "docs/PRD.md");
 
@@ -55,7 +55,7 @@ describe("Team task approval gates", () => {
 
   it("canonicalizes known Team roles and rejects unknown active-Team roles", async () => {
     const { cwd } = createTempCrewDirs();
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(cwd, "profiles");
     teamStore.useProfile(cwd, "migration-squad");
     store.createPlan(cwd, "docs/PRD.md");
 
@@ -167,8 +167,8 @@ describe("Team task approval gates", () => {
 
   it("reports approval-gated tasks unlocked by task completion", async () => {
     const { cwd } = createTempCrewDirs();
-    fs.mkdirSync(path.join(cwd, ".pi", "messenger", "crew"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".pi", "messenger", "crew", "config.json"), JSON.stringify({ dependencies: "strict" }));
+    fs.mkdirSync(path.join(cwd, ".omp", "messenger", "crew"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".omp", "messenger", "crew", "config.json"), JSON.stringify({ dependencies: "strict" }));
     store.createPlan(cwd, "docs/PRD.md");
     const first = store.createTask(cwd, "Prepare", "");
     const gated = store.createTask(cwd, "Change auth", "", [first.id], {

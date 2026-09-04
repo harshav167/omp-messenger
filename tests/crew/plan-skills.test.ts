@@ -20,7 +20,7 @@ describe("plan with skills", () => {
   }
 
   function writeProjectSkill(name: string, description: string) {
-    const skillsDir = path.join(tmpDir, ".pi", "messenger", "crew", "skills");
+    const skillsDir = path.join(tmpDir, ".omp", "messenger", "crew", "skills");
     fs.mkdirSync(skillsDir, { recursive: true });
     fs.writeFileSync(path.join(skillsDir, `${name}.md`), `---\nname: ${name}\ndescription: ${description}\n---\nSkill content for ${name}.\n`);
   }
@@ -42,7 +42,7 @@ describe("plan with skills", () => {
 
   afterEach(() => {
     if (state.planningState.cwd) state.clearPlanningState(state.planningState.cwd);
-    delete process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
+    delete process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
   });
 
   it("persists planner-tagged skills on created tasks", async () => {
@@ -124,7 +124,7 @@ describe("plan with skills", () => {
   });
 
   it("persists planner-tagged Team role and risk labels with approval", async () => {
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
     const teamStore = await import("../../crew/team/store.ts");
     teamStore.useProfile(tmpDir, "migration-squad");
 
@@ -156,7 +156,7 @@ describe("plan with skills", () => {
   });
 
   it("does not promise auto-start when all ready tasks need approval", async () => {
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
     const teamStore = await import("../../crew/team/store.ts");
     teamStore.useProfile(tmpDir, "migration-squad");
 
@@ -176,7 +176,7 @@ describe("plan with skills", () => {
   });
 
   it("injects Team role catalog into planner prompt when active", async () => {
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
     const teamStore = await import("../../crew/team/store.ts");
     teamStore.useProfile(tmpDir, "migration-squad");
 
@@ -201,7 +201,7 @@ describe("plan with skills", () => {
   });
 
   it("shows default approval labels in planner prompt when profile omits labels", async () => {
-    process.env.PI_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
+    process.env.OMP_MESSENGER_TEAM_PROFILE_DIR = path.join(tmpDir, "profiles");
     const teamStore = await import("../../crew/team/store.ts");
     teamStore.saveProfile({
       name: "default-gates",

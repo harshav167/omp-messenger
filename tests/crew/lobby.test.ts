@@ -68,7 +68,7 @@ describe("lobby workers", () => {
       id: worker.name,
       message: expect.stringMatching(/^# ⚡ TASK ASSIGNMENT/),
     }));
-    expect(readdirSync(join(dirs.cwd, ".pi", "messenger", "inbox"))).toEqual([]);
+    expect(readdirSync(join(dirs.cwd, ".omp", "messenger", "inbox"))).toEqual([]);
   });
 
   it("rejects an already assigned worker", async () => {

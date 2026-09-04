@@ -32,7 +32,7 @@ pi_messenger({ action: "task.show", id: "<TASK_ID>" })
 Read the task spec file for detailed requirements:
 
 ```typescript
-read({ path: ".pi/messenger/crew/tasks/<TASK_ID>.md" })
+read({ path: ".omp/messenger/crew/tasks/<TASK_ID>.md" })
 ```
 
 ## Phase 2.5: Load Relevant Skills

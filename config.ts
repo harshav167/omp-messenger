@@ -2,9 +2,9 @@
  * Pi Messenger - Configuration
  * 
  * Priority (highest to lowest):
- * 1. Project: .pi/pi-messenger.json
- * 2. Extension-specific: ~/.pi/agent/pi-messenger.json
- * 3. Main settings: ~/.pi/agent/settings.json → "messenger" key
+ * 1. Project: .omp/omp-messenger.json
+ * 2. Extension-specific: ~/.omp/agent/omp-messenger.json
+ * 3. Main settings: ~/.omp/agent/settings.json → "messenger" key
  * 4. Defaults
  */
 
@@ -65,19 +65,19 @@ const DEFAULT_CONFIG: MessengerConfig = {
 
 /**
  * Env wins over file config. `token` may be `$NAME` (env indirection); an empty
- * token falls back to `~/.pi/agent/messenger/mesh.token`.
+ * token falls back to `~/.omp/agent/messenger/mesh.token`.
  */
 function resolveMeshConfig(raw: unknown): MeshConfig {
   const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
   const fileUrl = typeof obj.url === "string" && obj.url.length > 0 ? obj.url : null;
-  const url = process.env.PI_MESSENGER_MESH_URL || fileUrl;
+  const url = process.env.OMP_MESSENGER_MESH_URL || fileUrl;
 
-  let token = process.env.PI_MESSENGER_MESH_TOKEN || (typeof obj.token === "string" ? obj.token : "");
+  let token = process.env.OMP_MESSENGER_MESH_TOKEN || (typeof obj.token === "string" ? obj.token : "");
   if (token.startsWith("$")) {
     token = process.env[token.slice(1)] ?? "";
   }
   if (!token) {
-    const tokenFile = join(homedir(), ".pi", "agent", "messenger", "mesh.token");
+    const tokenFile = join(homedir(), ".omp", "agent", "messenger", "mesh.token");
     if (existsSync(tokenFile)) {
       try {
         token = readFileSync(tokenFile, "utf-8").trim();
@@ -137,7 +137,7 @@ export function matchesAutoRegisterPath(cwd: string, paths: string[]): boolean {
 }
 
 export function saveAutoRegisterPaths(paths: string[]): void {
-  const configPath = join(homedir(), ".pi", "agent", "pi-messenger.json");
+  const configPath = join(homedir(), ".omp", "agent", "omp-messenger.json");
   let existing: Record<string, unknown> = {};
   
   if (existsSync(configPath)) {
@@ -150,13 +150,13 @@ export function saveAutoRegisterPaths(paths: string[]): void {
   
   existing.autoRegisterPaths = paths;
   
-  const dir = join(homedir(), ".pi", "agent");
+  const dir = join(homedir(), ".omp", "agent");
   mkdirSync(dir, { recursive: true });
   writeFileSync(configPath, JSON.stringify(existing, null, 2));
 }
 
 export function getAutoRegisterPaths(): string[] {
-  const configPath = join(homedir(), ".pi", "agent", "pi-messenger.json");
+  const configPath = join(homedir(), ".omp", "agent", "omp-messenger.json");
   if (!existsSync(configPath)) return [];
   
   try {
@@ -168,8 +168,8 @@ export function getAutoRegisterPaths(): string[] {
 }
 
 function buildConfig(projectConfig?: Partial<MessengerConfig> | null): MessengerConfig {
-  const extensionGlobalPath = join(homedir(), ".pi", "agent", "pi-messenger.json");
-  const mainSettingsPath = join(homedir(), ".pi", "agent", "settings.json");
+  const extensionGlobalPath = join(homedir(), ".omp", "agent", "omp-messenger.json");
+  const mainSettingsPath = join(homedir(), ".omp", "agent", "settings.json");
 
   // Load from main settings.json (lowest priority of the three sources)
   let settingsConfig: Partial<MessengerConfig> = {};
@@ -250,7 +250,7 @@ export function loadGlobalConfig(): MessengerConfig {
 }
 
 export function loadConfig(cwd: string): MessengerConfig {
-  const projectPath = join(cwd, ".pi", "pi-messenger.json");
+  const projectPath = join(cwd, ".omp", "omp-messenger.json");
   const projectConfig = readJsonFile(projectPath) as Partial<MessengerConfig> | null;
   return buildConfig(projectConfig);
 }

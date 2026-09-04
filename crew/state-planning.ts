@@ -160,7 +160,7 @@ export function resetPlanningCancellation(): void {
 }
 
 function planningStatePath(cwd: string): string {
-  return path.join(cwd, ".pi", "messenger", "crew", "planning-state.json");
+  return path.join(cwd, ".omp", "messenger", "crew", "planning-state.json");
 }
 
 function persistPlanningState(cwd: string): void {

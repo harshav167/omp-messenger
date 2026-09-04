@@ -415,7 +415,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         return false;
       }
       if (!opts.token) {
-        notify(ctx, "Mesh token missing (mesh.token / PI_MESSENGER_MESH_TOKEN)");
+        notify(ctx, "Mesh token missing (mesh.token / OMP_MESSENGER_MESH_TOKEN)");
         return false;
       }
       if (state.explicitName && !isValidAgentName(state.agentName)) {

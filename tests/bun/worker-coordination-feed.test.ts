@@ -28,7 +28,7 @@ function writeTask(tasksDir: string, task: Partial<Task> & { id: string }): void
 }
 
 function writeFeedEvents(cwd: string, events: FeedEvent[]): void {
-  const feedPath = path.join(cwd, ".pi", "messenger", "feed.jsonl");
+  const feedPath = path.join(cwd, ".omp", "messenger", "feed.jsonl");
   fs.mkdirSync(path.dirname(feedPath), { recursive: true });
   const lines = events.map(e => JSON.stringify(e)).join("\n") + "\n";
   fs.writeFileSync(feedPath, lines);

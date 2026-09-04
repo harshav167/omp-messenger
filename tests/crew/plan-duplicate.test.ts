@@ -19,7 +19,7 @@ describe("plan duplicate-run guard", () => {
   const plannerOutput = `## 1. PRD Understanding Summary\nSummary\n## 2. Relevant Code/Docs/Resources Reviewed\nResources\n## 3. Sequential Implementation Steps\nSteps\n## 4. Parallelized Task Graph\nGraph\n\`\`\`tasks-json\n[{"title":"Task A","description":"Do A","dependsOn":[]}]\n\`\`\``;
 
   function planningStatePath(): string {
-    return path.join(tmpDir, ".pi", "messenger", "crew", "planning-state.json");
+    return path.join(tmpDir, ".omp", "messenger", "crew", "planning-state.json");
   }
 
   function writePersistedPlanningState(pid: number): void {

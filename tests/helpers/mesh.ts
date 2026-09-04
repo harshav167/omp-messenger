@@ -18,7 +18,7 @@ export interface TestMesh {
 }
 
 export function createTestMesh(root: string, opts?: TestMeshOptions): TestMesh {
-  const base = join(root, ".pi", "messenger");
+  const base = join(root, ".omp", "messenger");
   fs.mkdirSync(join(base, "registry"), { recursive: true });
   fs.mkdirSync(join(base, "inbox"), { recursive: true });
 

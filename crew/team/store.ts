@@ -103,12 +103,12 @@ function writeText(filePath: string, content: string): void {
 }
 
 export function getTeamDir(cwd: string): string {
-  return path.join(cwd, ".pi", "messenger", "team");
+  return path.join(cwd, ".omp", "messenger", "team");
 }
 
 export function getProfileDir(homeDir = homedir()): string {
-  if (homeDir === homedir() && process.env.PI_MESSENGER_TEAM_PROFILE_DIR) return process.env.PI_MESSENGER_TEAM_PROFILE_DIR;
-  return path.join(homeDir, ".pi", "agent", "messenger", "team-profiles");
+  if (homeDir === homedir() && process.env.OMP_MESSENGER_TEAM_PROFILE_DIR) return process.env.OMP_MESSENGER_TEAM_PROFILE_DIR;
+  return path.join(homeDir, ".omp", "agent", "messenger", "team-profiles");
 }
 
 function teamPath(cwd: string, file: string): string {
