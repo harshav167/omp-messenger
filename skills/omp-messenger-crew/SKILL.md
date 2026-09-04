@@ -1,110 +1,110 @@
 ---
-name: pi-messenger-crew
-description: Orchestrator reference for pi-messenger Crew planning, task management, configuration, and agent coordination. Crew workers already have the pi_messenger actions they need in crew-worker.md.
+name: omp-messenger-crew
+description: Orchestrator reference for omp-messenger Crew planning, task management, configuration, and agent coordination. Crew workers already have the omp_messenger actions they need in crew-worker.md.
 ---
 
-# Pi-Messenger Crew Skill
+# omp-messenger Crew Skill
 
-> Crew workers do not need this skill. `crew-worker.md` already contains every `pi_messenger` action workers need for task execution.
+> Crew workers do not need this skill. `crew-worker.md` already contains every `omp_messenger` action workers need for task execution.
 >
 > Orchestrators and humans can use this as the full reference for planning, task management, configuration, and Crew internals.
 
-Use pi-messenger for multi-agent coordination and Crew task orchestration.
+Use omp-messenger for multi-agent coordination and Crew task orchestration.
 
 ## Quick Reference
 
 ### Join or Leave the Mesh
 ```typescript
-pi_messenger({ action: "join" })
-pi_messenger({ action: "leave" })
+omp_messenger({ action: "join" })
+omp_messenger({ action: "leave" })
 ```
 
 ### Check Status
 ```typescript
-pi_messenger({ action: "status" })
-pi_messenger({ action: "list" })  // See other agents
-pi_messenger({ action: "feed" })  // Activity feed
+omp_messenger({ action: "status" })
+omp_messenger({ action: "list" })  // See other agents
+omp_messenger({ action: "feed" })  // Activity feed
 ```
 
 ## Crew Workflow
 
 ### 1. Check Crew Agents
 ```typescript
-pi_messenger({ action: "crew.agents" })  // List discovered crew agents
+omp_messenger({ action: "crew.agents" })  // List discovered crew agents
 ```
 
 ### 2. Plan from PRD
 ```typescript
 // Auto-discover PRD.md in current directory
-pi_messenger({ action: "plan" })
+omp_messenger({ action: "plan" })
 
 // Or specify path
-pi_messenger({ action: "plan", prd: "path/to/PRD.md" })
+omp_messenger({ action: "plan", prd: "path/to/PRD.md" })
 
 // Or pass an inline prompt (no PRD file needed)
-pi_messenger({ action: "plan", prompt: "Scan the codebase for bugs focusing on error handling" })
+omp_messenger({ action: "plan", prompt: "Scan the codebase for bugs focusing on error handling" })
 
 // Re-plan with a steering prompt (wipes existing tasks, preserves progress notes)
-pi_messenger({ action: "plan", prompt: "Split the auth module into login and registration" })
+omp_messenger({ action: "plan", prompt: "Split the auth module into login and registration" })
 
 // Steer first-time planning (prompt injected into progress notes before planner runs)
-pi_messenger({ action: "plan", prd: "docs/PRD.md", prompt: "focus on backend first" })
+omp_messenger({ action: "plan", prd: "docs/PRD.md", prompt: "focus on backend first" })
 
 // Plan + auto-start autonomous work when planning completes
-pi_messenger({ action: "plan" })  // auto-starts workers (default)
+omp_messenger({ action: "plan" })  // auto-starts workers (default)
 
 // Cancel active or stale planning
-pi_messenger({ action: "plan.cancel" })
+omp_messenger({ action: "plan.cancel" })
 ```
 
 Re-planning rejects if any tasks are `in_progress` — stop or complete them first. The steering prompt is injected into `planning-progress.md`'s Notes section where the planner reads it on every pass.
 
 ### Optional: Activate Team Context
 ```typescript
-pi_messenger({ action: "team.setup", name: "migration-squad" })
-pi_messenger({ action: "team.setup", name: "review-squad" })
-pi_messenger({ action: "team.setup", name: "research-squad", message: "Research first, then plan the implementation." })
-pi_messenger({ action: "team.memory.note", type: "decision", message: "Use cursor pagination for task history" })
-pi_messenger({ action: "team.roles" })
-pi_messenger({ action: "team.status" })
+omp_messenger({ action: "team.setup", name: "migration-squad" })
+omp_messenger({ action: "team.setup", name: "review-squad" })
+omp_messenger({ action: "team.setup", name: "research-squad", message: "Research first, then plan the implementation." })
+omp_messenger({ action: "team.memory.note", type: "decision", message: "Use cursor pagination for task history" })
+omp_messenger({ action: "team.roles" })
+omp_messenger({ action: "team.status" })
 ```
 
-Team is optional. Use `team.setup` for first-run setup: it activates a profile, saves editable JSON if needed, creates a starter charter when missing, and returns next steps. Crew remains the execution engine. Team role names follow the packaged `pi-subagents` vocabulary where possible (`context-builder`, `delegate`, `oracle`, `planner`, `researcher`, `reviewer`, `scout`, `worker`). `pi-messenger` may read subagent markdown metadata from disk when present, but it does not require or invoke subagents. Active Team profiles let the planner tag tasks with `role` and `riskLabels`, then inject role, charter, and memory context into worker prompts. High-risk tasks wait for `task.approve`; `task.reject` records feedback and rejected tasks surface `task.revise` / `task.revise-tree` next steps.
+Team is optional. Use `team.setup` for first-run setup: it activates a profile, saves editable JSON if needed, creates a starter charter when missing, and returns next steps. Crew remains the execution engine. Team role names follow the packaged `pi-subagents` vocabulary where possible (`context-builder`, `delegate`, `oracle`, `planner`, `researcher`, `reviewer`, `scout`, `worker`). `omp-messenger` may read subagent markdown metadata from disk when present, but it does not require or invoke subagents. Active Team profiles let the planner tag tasks with `role` and `riskLabels`, then inject role, charter, and memory context into worker prompts. High-risk tasks wait for `task.approve`; `task.reject` records feedback and rejected tasks surface `task.revise` / `task.revise-tree` next steps.
 
 ### 3. Work on Tasks
 ```typescript
 // Single wave (runs ready tasks once)
-pi_messenger({ action: "work" })
+omp_messenger({ action: "work" })
 
 // Autonomous (keeps running until done/blocked)
-pi_messenger({ action: "work", autonomous: true })
+omp_messenger({ action: "work", autonomous: true })
 
 // Override concurrency or model for this wave
-pi_messenger({ action: "work", autonomous: true, concurrency: 4 })
-pi_messenger({ action: "work", model: "claude-sonnet-4-20250514" })
+omp_messenger({ action: "work", autonomous: true, concurrency: 4 })
+omp_messenger({ action: "work", model: "claude-sonnet-4-20250514" })
 ```
 
 ### 4. Task Management
 ```typescript
-pi_messenger({ action: "task.list" })
-pi_messenger({ action: "task.ready" })  // Tasks with no pending deps
-pi_messenger({ action: "task.show", id: "task-1" })
-pi_messenger({ action: "task.start", id: "task-1" })
-pi_messenger({ action: "task.progress", id: "task-1", message: "Implemented auth middleware" })
-pi_messenger({ action: "task.done", id: "task-1", summary: "What was done" })
-pi_messenger({ action: "task.block", id: "task-1", reason: "Why blocked" })
-pi_messenger({ action: "task.unblock", id: "task-1" })
-pi_messenger({ action: "task.reset", id: "task-1" })
-pi_messenger({ action: "task.reset", id: "task-1", cascade: true })  // Reset dependents too
+omp_messenger({ action: "task.list" })
+omp_messenger({ action: "task.ready" })  // Tasks with no pending deps
+omp_messenger({ action: "task.show", id: "task-1" })
+omp_messenger({ action: "task.start", id: "task-1" })
+omp_messenger({ action: "task.progress", id: "task-1", message: "Implemented auth middleware" })
+omp_messenger({ action: "task.done", id: "task-1", summary: "What was done" })
+omp_messenger({ action: "task.block", id: "task-1", reason: "Why blocked" })
+omp_messenger({ action: "task.unblock", id: "task-1" })
+omp_messenger({ action: "task.reset", id: "task-1" })
+omp_messenger({ action: "task.reset", id: "task-1", cascade: true })  // Reset dependents too
 
 // Create tasks manually
-pi_messenger({ action: "task.create", title: "Implement auth", content: "Detailed spec...", dependsOn: ["task-1"] })
-pi_messenger({ action: "task.create", title: "Change auth API", role: "worker", riskLabels: ["auth", "api-contract"] })
-pi_messenger({ action: "task.approve", id: "task-2" })
+omp_messenger({ action: "task.create", title: "Implement auth", content: "Detailed spec...", dependsOn: ["task-1"] })
+omp_messenger({ action: "task.create", title: "Change auth API", role: "worker", riskLabels: ["auth", "api-contract"] })
+omp_messenger({ action: "task.approve", id: "task-2" })
 
 // Split a task into subtasks (two-phase: inspect then execute)
-pi_messenger({ action: "task.split", id: "task-3" })  // Inspect: shows spec, deps, dependents
-pi_messenger({ action: "task.split", id: "task-3", subtasks: [
+omp_messenger({ action: "task.split", id: "task-3" })  // Inspect: shows spec, deps, dependents
+omp_messenger({ action: "task.split", id: "task-3", subtasks: [
   { title: "Subtask A", content: "..." },
   { title: "Subtask B", content: "..." }
 ] })  // Execute: creates subtasks, parent becomes milestone
@@ -113,11 +113,11 @@ pi_messenger({ action: "task.split", id: "task-3", subtasks: [
 ### 5. Task Revision
 ```typescript
 // Revise a single task's spec (planner rewrites based on your prompt)
-pi_messenger({ action: "task.revise", id: "task-3", prompt: "add error handling for network failures" })
+omp_messenger({ action: "task.revise", id: "task-3", prompt: "add error handling for network failures" })
 
 // Revise a task and all its transitive dependents (subtree revision)
 // Planner sees the full subtree and can add/remove/modify tasks
-pi_messenger({ action: "task.revise-tree", id: "task-3", prompt: "split this into separate API and CLI tasks" })
+omp_messenger({ action: "task.revise-tree", id: "task-3", prompt: "split this into separate API and CLI tasks" })
 ```
 
 Single revision rewrites one task's spec. Tree revision rewrites an entire subtree — the planner can modify existing tasks, add new ones (capped at 2x subtree size), remove pending ones, and rewire dependencies. Done tasks in the subtree are preserved; revisable tasks reset to `todo`.
@@ -127,10 +127,10 @@ Both revisions are mutually exclusive (only one revision at a time).
 ### 6. Review
 ```typescript
 // Review a task implementation
-pi_messenger({ action: "review", target: "task-1" })
+omp_messenger({ action: "review", target: "task-1" })
 
 // Review the overall plan
-pi_messenger({ action: "review", target: "plan", type: "plan" })
+omp_messenger({ action: "review", target: "plan", type: "plan" })
 ```
 
 ## Overlay Keybindings
@@ -157,23 +157,23 @@ The Crew overlay (accessible via `/messenger` then tab to Crew) supports these k
 
 ```typescript
 // Reserve files before editing
-pi_messenger({ action: "reserve", paths: ["src/index.ts", "src/types.ts"], reason: "Working on core" })
+omp_messenger({ action: "reserve", paths: ["src/index.ts", "src/types.ts"], reason: "Working on core" })
 
 // Release when done
-pi_messenger({ action: "release" })
+omp_messenger({ action: "release" })
 ```
 
 ## Agent Communication
 
 ```typescript
 // Rename yourself
-pi_messenger({ action: "rename", name: "MyAgentName" })
+omp_messenger({ action: "rename", name: "MyAgentName" })
 
 // Send message to specific agent
-pi_messenger({ action: "send", to: "OtherAgent", message: "Hello!" })
+omp_messenger({ action: "send", to: "OtherAgent", message: "Hello!" })
 
 // Broadcast to all
-pi_messenger({ action: "broadcast", message: "Announcement" })
+omp_messenger({ action: "broadcast", message: "Announcement" })
 ```
 
 Messages are logged to the feed and visible in the overlay. DMs interrupt only the target agent (delivered as steering); broadcasts interrupt all agents.
@@ -182,19 +182,19 @@ Messages are logged to the feed and visible in the overlay. DMs interrupt only t
 
 ```typescript
 // 1. Join
-pi_messenger({ action: "join" })
+omp_messenger({ action: "join" })
 
 // 2. Plan (spawns planner agent)
-pi_messenger({ action: "plan" })
+omp_messenger({ action: "plan" })
 
 // 3. Check tasks
-pi_messenger({ action: "task.list" })
+omp_messenger({ action: "task.list" })
 
 // 4. Work
-pi_messenger({ action: "work", autonomous: true })
+omp_messenger({ action: "work", autonomous: true })
 
 // 5. Status
-pi_messenger({ action: "status" })
+omp_messenger({ action: "status" })
 ```
 
 ## Data Storage

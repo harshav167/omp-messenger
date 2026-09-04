@@ -24,7 +24,7 @@ import { logFeedEvent } from "../../feed.ts";
 import { approvalTaskSummaries } from "../utils/task-format.ts";
 
 function revisionHint(taskId: string): string {
-  return `pi_messenger({ action: "task.revise", id: "${taskId}", prompt: "Address approval feedback" })`;
+  return `omp_messenger({ action: "task.revise", id: "${taskId}", prompt: "Address approval feedback" })`;
 }
 
 function rejectedTasksText(tasks: { id: string; title: string; approval?: { feedback?: string } }[]): string {
@@ -47,7 +47,7 @@ export async function execute(
   // Verify plan exists
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one first:\n\n  pi_messenger({ action: \"plan\" })\n  pi_messenger({ action: \"plan\", prd: \"path/to/PRD.md\" })", {
+    return result("No plan found. Create one first:\n\n  omp_messenger({ action: \"plan\" })\n  omp_messenger({ action: \"plan\", prd: \"path/to/PRD.md\" })", {
       mode: "work",
       error: "no_plan"
     });

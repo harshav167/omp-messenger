@@ -213,7 +213,7 @@ describe("mesh server", () => {
   });
 
   it("persists completions and channel creation across restarts", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "pi-messenger-mesh-"));
+    const dataDir = mkdtempSync(join(tmpdir(), "omp-messenger-mesh-"));
     tempDirs.push(dataDir);
     const firstServer = start(dataDir);
     const a = connect(firstServer);

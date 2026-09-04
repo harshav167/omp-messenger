@@ -464,7 +464,7 @@ export function handleCrewKeyBinding(
     return;
   }
   if (matchesKey(data, "shift+s") && task.status !== "done" && !task.milestone) {
-    setNotification(viewState, tui, true, `Split: pi_messenger({ action: "task.split", id: "${task.id}" })`);
+    setNotification(viewState, tui, true, `Split: omp_messenger({ action: "task.split", id: "${task.id}" })`);
     tui.requestRender();
     return;
   }

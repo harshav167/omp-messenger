@@ -34,6 +34,6 @@ describe("typebox compatibility", () => {
     const { default: piMessengerExtension } = await import("../index.ts");
     piMessengerExtension(pi as any);
 
-    expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "pi_messenger" }));
+    expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "omp_messenger" }));
   });
 });

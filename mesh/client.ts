@@ -239,7 +239,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   ): Promise<HandshakeOutcome> {
     let socket: WebSocket;
     try {
-      socket = new WebSocket(opts.url, MESH_SUBPROTOCOL);
+      socket = new WebSocket(opts.url, [MESH_SUBPROTOCOL]);
     } catch (error) {
       if (error instanceof Error) return Promise.resolve({ kind: "failure", reason: error.message });
       throw error;
@@ -299,8 +299,12 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       }
       if (settled && accepted) handleServerFrame(frame);
     });
-    socket.addEventListener("error", () => {
-      if (!settled) finish({ kind: "failure", reason: "connection error" });
+    socket.addEventListener("error", (event) => {
+      const detail = (event as { message?: unknown; error?: { message?: unknown } });
+      const message = typeof detail.message === "string" ? detail.message
+        : typeof detail.error?.message === "string" ? detail.error.message
+        : "connection error";
+      if (!settled) finish({ kind: "failure", reason: message });
     });
     socket.addEventListener("close", (event) => {
       if (!settled) {

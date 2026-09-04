@@ -128,7 +128,7 @@ describe("work with Team approval", () => {
       { id: rejected.id, title: rejected.title, approval: { required: true, status: "rejected", feedback: "needs rollback tests" } },
     ]);
     expect(response.content[0].text).toContain("Rejected tasks need revision");
-    expect(response.content[0].text).toContain('pi_messenger({ action: "task.revise", id: "task-1", prompt: "Address approval feedback" })');
+    expect(response.content[0].text).toContain('omp_messenger({ action: "task.revise", id: "task-1", prompt: "Address approval feedback" })');
   });
 
   it("reports approval-gated tasks unlocked after a wave", async () => {

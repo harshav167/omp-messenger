@@ -1,5 +1,5 @@
 /**
- * Pi Messenger Extension
+ * omp-messenger Extension
  *
  * Enables pi agents to discover and communicate with each other across terminal sessions.
  * Uses file-based coordination - no daemon required.
@@ -179,7 +179,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Add reply hint
     const replyHint = config.replyHint
-      ? ` — reply: pi_messenger({ action: "send", to: "${msg.from}", message: "..." })`
+      ? ` — reply: omp_messenger({ action: "send", to: "${msg.from}", message: "..." })`
       : "";
 
     content += `**Message from ${msg.from}**${replyHint}\n\n${msg.text}`;
@@ -411,7 +411,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       : folder;
     pi.sendMessage({
       customType: "messenger_context",
-      content: `You are agent "${state.agentName}" in ${locationPart}. Use pi_messenger({ action: "status" }) to see crew status, pi_messenger({ action: "work" }) to run tasks.`,
+      content: `You are agent "${state.agentName}" in ${locationPart}. Use omp_messenger({ action: "status" }) to see crew status, omp_messenger({ action: "work" }) to run tasks.`,
       display: false
     }, { triggerTurn: false });
   }
@@ -423,59 +423,59 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     ? `
 
   // Team: Optional role-aware layer around Crew
-  pi_messenger({ action: "team.setup", name: "migration-squad" }) → Activate profile, create starter charter, show next steps
-  pi_messenger({ action: "team.profile.list" })                 → List built-in and saved team profiles
-  pi_messenger({ action: "team.profile.use", name: "migration-squad" }) → Activate a team profile
-  pi_messenger({ action: "team.charter.show" })                 → Show project team charter
-  pi_messenger({ action: "team.memory.note", type: "decision", message: "..." })
-  pi_messenger({ action: "team.roles" })                        → Resolve Team roles (packaged pi-subagents vocabulary + optional metadata)
-  pi_messenger({ action: "team.status" })                       → Team summary`
+  omp_messenger({ action: "team.setup", name: "migration-squad" }) → Activate profile, create starter charter, show next steps
+  omp_messenger({ action: "team.profile.list" })                 → List built-in and saved team profiles
+  omp_messenger({ action: "team.profile.use", name: "migration-squad" }) → Activate a team profile
+  omp_messenger({ action: "team.charter.show" })                 → Show project team charter
+  omp_messenger({ action: "team.memory.note", type: "decision", message: "..." })
+  omp_messenger({ action: "team.roles" })                        → Resolve Team roles (packaged pi-subagents vocabulary + optional metadata)
+  omp_messenger({ action: "team.status" })                       → Team summary`
     : "";
 
 
   pi.registerTool({
-    name: "pi_messenger",
-    label: "Pi Messenger",
+    name: "omp_messenger",
+    label: "omp-messenger",
     loadMode: "essential",
     description: `Multi-agent coordination and task orchestration.
 
 Usage (action-based API - preferred):
   // Coordination
-  pi_messenger({ action: "join", channel: "repo-a" })           → Join a mesh channel (channel is optional)
-  pi_messenger({ action: "channels" })                          → List mesh channels
-  pi_messenger({ action: "leave" })                             → Leave mesh for this session
-  pi_messenger({ action: "status" })                            → Get status
-  pi_messenger({ action: "list" })                              → List agents with presence
-  pi_messenger({ action: "feed", limit: 20 })                   → Activity feed
-  pi_messenger({ action: "whois", name: "AgentName" })          → Agent details
-  pi_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
-  pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
-  pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
+  omp_messenger({ action: "join", channel: "repo-a" })           → Join a mesh channel (channel is optional)
+  omp_messenger({ action: "channels" })                          → List mesh channels
+  omp_messenger({ action: "leave" })                             → Leave mesh for this session
+  omp_messenger({ action: "status" })                            → Get status
+  omp_messenger({ action: "list" })                              → List agents with presence
+  omp_messenger({ action: "feed", limit: 20 })                   → Activity feed
+  omp_messenger({ action: "whois", name: "AgentName" })          → Agent details
+  omp_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
+  omp_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
+  omp_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
   
   // Crew: Plan from PRD
-  pi_messenger({ action: "plan" })                              → Auto-discover PRD
-  pi_messenger({ action: "plan", prd: "docs/PRD.md" })          → Explicit PRD path
-  pi_messenger({ action: "plan", prompt: "Scan for bugs" })     → Inline prompt (no PRD)
-  pi_messenger({ action: "plan.cancel" })                       → Cancel active planning
+  omp_messenger({ action: "plan" })                              → Auto-discover PRD
+  omp_messenger({ action: "plan", prd: "docs/PRD.md" })          → Explicit PRD path
+  omp_messenger({ action: "plan", prompt: "Scan for bugs" })     → Inline prompt (no PRD)
+  omp_messenger({ action: "plan.cancel" })                       → Cancel active planning
   
   // Crew: Work through tasks
-  pi_messenger({ action: "work" })                              → Run ready tasks
-  pi_messenger({ action: "work", autonomous: true })            → Run until done/blocked
-  pi_messenger({ action: "work.stop" })                         → Stop autonomous work for this project
+  omp_messenger({ action: "work" })                              → Run ready tasks
+  omp_messenger({ action: "work", autonomous: true })            → Run until done/blocked
+  omp_messenger({ action: "work.stop" })                         → Stop autonomous work for this project
   
   // Crew: Tasks
-  pi_messenger({ action: "task.show", id: "task-1" })           → Show task
-  pi_messenger({ action: "task.list" })                         → List all tasks
-  pi_messenger({ action: "task.split", id: "task-3" })          → Inspect task for splitting
-  pi_messenger({ action: "task.split", id: "task-3", subtasks: [...] }) → Execute split
-  pi_messenger({ action: "task.start", id: "task-1" })          → Start task
-  pi_messenger({ action: "task.approve", id: "task-1" })        → Approve gated task
-  pi_messenger({ action: "task.reject", id: "task-1", reason: "..." }) → Reject gated task and feed revision
-  pi_messenger({ action: "task.done", id: "task-1", summary: "..." })
-  pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
+  omp_messenger({ action: "task.show", id: "task-1" })           → Show task
+  omp_messenger({ action: "task.list" })                         → List all tasks
+  omp_messenger({ action: "task.split", id: "task-3" })          → Inspect task for splitting
+  omp_messenger({ action: "task.split", id: "task-3", subtasks: [...] }) → Execute split
+  omp_messenger({ action: "task.start", id: "task-1" })          → Start task
+  omp_messenger({ action: "task.approve", id: "task-1" })        → Approve gated task
+  omp_messenger({ action: "task.reject", id: "task-1", reason: "..." }) → Reject gated task and feed revision
+  omp_messenger({ action: "task.done", id: "task-1", summary: "..." })
+  omp_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl${teamToolDescription}`,
+  omp_messenger({ action: "review", target: "task-1" })          → Review impl${teamToolDescription}`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -572,27 +572,55 @@ Usage (action-based API - preferred):
   // Commands
   // ===========================================================================
 
+  /** Rebuild the mesh from freshly loaded config; rejoin if this session was joined. */
+  async function applyMeshSettings(ctx: ExtensionContext): Promise<void> {
+    config = loadConfig(state.cwd);
+    const wasRegistered = state.registered;
+    if (wasRegistered) {
+      try { await mesh.leave(); } catch {}
+    }
+    mesh.close();
+    state.channel = config.mesh.channel;
+    mesh = createMesh({ config, base: baseDir, state, deliver: deliverMessage, onStatusChange: () => { if (latestCtx) updateStatus(latestCtx); } });
+    if (wasRegistered) {
+      if (await mesh.join(ctx, { nameTheme })) {
+        ctx.ui.notify(`Rejoined mesh as ${state.agentName} (${mesh.kind === "mesh" ? config.mesh.url : "local"}, #${mesh.channel()})`, "info");
+      } else {
+        ctx.ui.notify("Mesh settings saved, but rejoining failed — check URL/token", "error");
+      }
+    }
+    updateStatus(ctx);
+  }
+
+  async function openConfigOverlay(ctx: ExtensionContext): Promise<void> {
+    let pending: Promise<void> | null = null;
+    await ctx.ui.custom<void>(
+      (tui, theme, _keybindings, done) => {
+        return new MessengerConfigOverlay(tui, theme, done, ctx.cwd, {
+          onMeshSettingsSaved: () => { pending = applyMeshSettings(ctx); },
+        });
+      },
+      { overlay: true }
+    );
+    if (pending) await pending;
+  }
+
   pi.registerCommand("messenger", {
-    description: "Open messenger overlay, or 'config' to manage settings",
+    description: "Open messenger overlay, or 'config' to manage mesh settings",
     handler: async (args, ctx) => {
       captureStatusContext(ctx);
       if (!ctx.hasUI) return;
 
-      // /messenger config - open config overlay
       if (args[0] === "config") {
-        await ctx.ui.custom<void>(
-          (tui, theme, _keybindings, done) => {
-            return new MessengerConfigOverlay(tui, theme, done, ctx.cwd);
-          },
-          { overlay: true }
-        );
+        await openConfigOverlay(ctx);
         return;
       }
 
       // /messenger - open chat overlay (auto-joins if not registered)
       if (!state.registered) {
         if (!(await mesh.join(ctx, { nameTheme }))) {
-          ctx.ui.notify("Failed to join agent mesh", "error");
+          ctx.ui.notify("Failed to join agent mesh — press c in /messenger or run /messenger config", "error");
+          await openConfigOverlay(ctx);
           return;
         }
         updateStatus(ctx);
@@ -605,6 +633,7 @@ Usage (action-based API - preferred):
         return;
       }
 
+      let openConfigAfter = false;
       const callbacks: OverlayCallbacks = {
         onBackground: (snapshotText) => {
           overlayHandle?.setHidden(true);
@@ -614,6 +643,7 @@ Usage (action-based API - preferred):
             display: true,
           }, { triggerTurn: true });
         },
+        onOpenConfig: () => { openConfigAfter = true; },
       };
 
       const snapshot = await ctx.ui.custom<string | undefined>(
@@ -642,6 +672,10 @@ Usage (action-based API - preferred):
       overlayHandle = null;
       overlayTui = null;
       updateStatus(ctx);
+
+      if (openConfigAfter) {
+        await openConfigOverlay(ctx);
+      }
     }
   });
 
@@ -1052,7 +1086,7 @@ Usage (action-based API - preferred):
         pi.appendEntry("crew-state", autonomousState);
         resetAutonomousContinueGuard();
         if (ctx.hasUI) {
-          ctx.ui.notify("Autonomous stopped: this session is not registered in pi-messenger.", "warning");
+          ctx.ui.notify("Autonomous stopped: this session is not registered in omp-messenger.", "warning");
         }
       }
       return;
@@ -1070,7 +1104,7 @@ Usage (action-based API - preferred):
         const label = plan ? crewStore.getPlanLabel(plan) : "plan";
         pi.sendMessage({
           customType: "crew_auto_work",
-          content: `Plan complete — ${startableTasks.length} task(s) ready for ${label}. Starting autonomous work.\n\nCall: pi_messenger({ action: "work", autonomous: true })`,
+          content: `Plan complete — ${startableTasks.length} task(s) ready for ${label}. Starting autonomous work.\n\nCall: omp_messenger({ action: "work", autonomous: true })`,
           display: true,
         }, { triggerTurn: true, deliverAs: "steer" });
         return;
@@ -1153,7 +1187,7 @@ Usage (action-based API - preferred):
       resetAutonomousContinueGuard();
 
       const plan = crewStore.getPlan(cwd);
-      const message = `Autonomous work on ${plan?.prd ?? "plan"} stopped after ${continueRepeatCount} repeated continuation retries without wave progress. Resolve the abort condition, then run pi_messenger({ action: "work", autonomous: true }).`;
+      const message = `Autonomous work on ${plan?.prd ?? "plan"} stopped after ${continueRepeatCount} repeated continuation retries without wave progress. Resolve the abort condition, then run omp_messenger({ action: "work", autonomous: true }).`;
       if (ctx.hasUI) {
         ctx.ui.notify(message, "warning");
       }
@@ -1234,7 +1268,7 @@ Usage (action-based API - preferred):
     const lines = [filePath, `Reserved by: ${c.agent}${locationPart}`];
     if (c.reason) lines.push(`Reason: "${c.reason}"`);
     lines.push("");
-    lines.push(`Coordinate via pi_messenger({ action: "send", to: "${c.agent}", message: "..." })`);
+    lines.push(`Coordinate via omp_messenger({ action: "send", to: "${c.agent}", message: "..." })`);
 
     return { block: true, reason: lines.join("\n") };
   });

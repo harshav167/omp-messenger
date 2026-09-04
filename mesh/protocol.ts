@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Mesh server wire protocol (JSON text frames over WebSocket)
+ * omp-messenger - Mesh server wire protocol (JSON text frames over WebSocket)
  *
  * Shared by mesh/client.ts and mesh/server.ts. Imports only types.
  */
@@ -7,7 +7,7 @@
 import type { AgentMailMessage, AgentRegistration, AllClaims, AllCompletions } from "../lib.ts";
 import type { ChannelInfo, ClaimResult, CompleteResult, RenameResult, SendResult, UnclaimResult } from "./types.ts";
 
-export const MESH_SUBPROTOCOL = "pi-messenger.v1";
+export const MESH_SUBPROTOCOL = "omp-messenger.v1";
 
 export const MESH_CLOSE = {
   HELLO_TIMEOUT: 4001,

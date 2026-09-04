@@ -1,7 +1,7 @@
 ---
 name: crew-reviewer
 description: Reviews task implementations for quality and correctness
-tools: read, bash, pi_messenger
+tools: read, bash, omp_messenger
 model: anthropic/claude-opus-4-6
 crewRole: reviewer
 maxOutput: { bytes: 102400, lines: 2000 }

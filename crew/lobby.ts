@@ -361,7 +361,7 @@ Post updates to the team feed while you wait — the user watches it live. Other
 **Hard limit: send at most 5 messages total (broadcasts + DMs combined).** After that, stop messaging and wait quietly. Save your context for the actual task.
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Hey team! Just joined. Reading the PRD now..." })
+omp_messenger({ action: "broadcast", message: "Hey team! Just joined. Reading the PRD now..." })
 \`\`\`
 
 After sending your messages, wait for a **TASK ASSIGNMENT** message.
@@ -372,7 +372,7 @@ After sending your messages, wait for a **TASK ASSIGNMENT** message.
 Announce yourself, then wait:
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Joined the lobby. Reading the PRD..." })
+omp_messenger({ action: "broadcast", message: "Joined the lobby. Reading the PRD..." })
 \`\`\`
 
 **Hard limit: send at most 2 messages total.** You may reply once if someone DMs you. Then stop messaging and wait.
@@ -385,7 +385,7 @@ Wait for a **TASK ASSIGNMENT** message to begin work.
 Announce your presence with one broadcast, then wait:
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Standing by for task assignment." })
+omp_messenger({ action: "broadcast", message: "Standing by for task assignment." })
 \`\`\`
 
 **Do NOT send any other messages.** Wait for a **TASK ASSIGNMENT** message to begin work.

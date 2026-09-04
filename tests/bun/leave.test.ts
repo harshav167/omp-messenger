@@ -36,7 +36,7 @@ function resetPlanningState(): void {
 }
 
 
-describe("pi_messenger leave action", () => {
+describe("omp_messenger leave action", () => {
   beforeEach(() => {
     resetAutonomousState();
     resetPlanningState();
@@ -70,7 +70,7 @@ describe("pi_messenger leave action", () => {
     );
 
     expect(response.details.mode).toBe("leave");
-    expect(response.content[0].text).toContain("Left pi-messenger.");
+    expect(response.content[0].text).toContain("Left omp-messenger.");
     expect(response.content[0].text).toContain("Released reservations: src/index.ts");
     expect(response.content[0].text).toContain("Released claim: TASK-1");
     expect(state.registered).toBe(false);
@@ -225,7 +225,7 @@ describe("pi_messenger leave action", () => {
 
     expect(response.details.mode).toBe("leave");
     expect(response.details.error).toBe("unregister_failed");
-    expect(response.content[0].text).toContain("Could not leave pi-messenger: disk busy");
+    expect(response.content[0].text).toContain("Could not leave omp-messenger: disk busy");
     expect(state.registered).toBe(true);
 
     unregisterSpy.mockRestore();

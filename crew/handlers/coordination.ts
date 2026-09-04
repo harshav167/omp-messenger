@@ -147,7 +147,7 @@ export function buildCoordinationContext(
   if (concurrentTasks.length > 0) {
     out += `## Concurrent Tasks
 
-These tasks are being worked on by other workers in this wave. Discover their agent names after joining the mesh via \`pi_messenger({ action: "list" })\`.
+These tasks are being worked on by other workers in this wave. Discover their agent names after joining the mesh via \`omp_messenger({ action: "list" })\`.
 
 `;
     for (const t of concurrentTasks) {
@@ -192,7 +192,7 @@ ${options.readOnly ? "After completing your current task, only claim one of thes
 
 These tasks are ready but require lead approval before anyone can claim them:
 `;
-      for (const t of needsApproval) out += `- ${t.id}: ${t.title} — approve with \`pi_messenger({ action: "task.approve", id: "${t.id}" })\`\n`;
+      for (const t of needsApproval) out += `- ${t.id}: ${t.title} — approve with \`omp_messenger({ action: "task.approve", id: "${t.id}" })\`\n`;
       out += "\n";
     }
     if (rejected.length > 0) {
@@ -200,7 +200,7 @@ These tasks are ready but require lead approval before anyone can claim them:
 
 These tasks need revision before they can be approved or claimed:
 `;
-      for (const t of rejected) out += `- ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""} — revise with \`pi_messenger({ action: "task.revise", id: "${t.id}", prompt: "Address approval feedback" })\`\n`;
+      for (const t of rejected) out += `- ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""} — revise with \`omp_messenger({ action: "task.revise", id: "${t.id}", prompt: "Address approval feedback" })\`\n`;
       out += "\n";
     }
   }
@@ -224,7 +224,7 @@ export function buildCoordinationInstructions(config: CrewConfig, options: Coord
 
 **Message budget: ${budget} messages this session.** The system enforces this.
 
-Use \`pi_messenger({ action: "list" })\` to see active workers if your investigation overlaps with their work. Message a worker only when you need concrete context or a handoff detail.
+Use \`omp_messenger({ action: "list" })\` to see active workers if your investigation overlaps with their work. Message a worker only when you need concrete context or a handoff detail.
 
 `;
     }
@@ -236,13 +236,13 @@ Use \`pi_messenger({ action: "list" })\` to see active workers if your investiga
 Before editing files, check if another worker has reserved them by running:
 
 \`\`\`typescript
-pi_messenger({ action: "list" })
+omp_messenger({ action: "list" })
 \`\`\`
 
 If a file you need is reserved by another worker, message them to coordinate:
 
 \`\`\`typescript
-pi_messenger({ action: "send", to: "<their-name>", message: "I need to modify <file> for my task, can we coordinate?" })
+omp_messenger({ action: "send", to: "<their-name>", message: "I need to modify <file> for my task, can we coordinate?" })
 \`\`\`
 
 Do NOT edit files reserved by another worker without coordinating first.
@@ -263,7 +263,7 @@ Do NOT edit files reserved by another worker without coordinating first.
 After joining the mesh and starting your task, announce what you are investigating:
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Starting <task-id> (<title>) — investigating <scope>" })
+omp_messenger({ action: "broadcast", message: "Starting <task-id> (<title>) — investigating <scope>" })
 \`\`\`
 
 `
@@ -271,7 +271,7 @@ pi_messenger({ action: "broadcast", message: "Starting <task-id> (<title>) — i
 After joining the mesh and starting your task, announce what you're working on:
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Starting <task-id> (<title>) — will create <files>" })
+omp_messenger({ action: "broadcast", message: "Starting <task-id> (<title>) — will create <files>" })
 \`\`\`
 
 `;
@@ -281,7 +281,7 @@ pi_messenger({ action: "broadcast", message: "Starting <task-id> (<title>) — w
 If a concurrent task involves files or interfaces related to yours, send a brief DM. Only message when there's a concrete coordination need — shared files, interfaces, or blocking questions.
 
 \`\`\`typescript
-pi_messenger({ action: "send", to: "<peer-name>", message: "I'm exporting FormatOptions from types.ts — will you need it?" })
+omp_messenger({ action: "send", to: "<peer-name>", message: "I'm exporting FormatOptions from types.ts — will you need it?" })
 \`\`\`
 
 ### Responding to messages
@@ -295,7 +295,7 @@ If a peer asks you a direct question, reply briefly. Ignore messages that don't 
 Announce what you found or recommend:
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Completed <task-id>: found <summary>" })
+omp_messenger({ action: "broadcast", message: "Completed <task-id>: found <summary>" })
 \`\`\`
 
 `
@@ -303,11 +303,11 @@ pi_messenger({ action: "broadcast", message: "Completed <task-id>: found <summar
 Announce what you built:
 
 \`\`\`typescript
-pi_messenger({ action: "broadcast", message: "Completed <task-id>: <file> exports <symbols>" })
+omp_messenger({ action: "broadcast", message: "Completed <task-id>: <file> exports <symbols>" })
 \`\`\`
 
 ### Reservations
-Before editing files, check if another worker has reserved them via \`pi_messenger({ action: "list" })\`. If a file you need is reserved, message the owner to coordinate. Do NOT edit reserved files without coordinating first.
+Before editing files, check if another worker has reserved them via \`omp_messenger({ action: "list" })\`. If a file you need is reserved, message the owner to coordinate. Do NOT edit reserved files without coordinating first.
 
 `;
 
@@ -321,7 +321,7 @@ If your task depends on a completed task and something about its implementation 
 After completing your assigned task, check if there are ready tasks you can pick up:
 
 \`\`\`typescript
-pi_messenger({ action: "task.ready" })
+omp_messenger({ action: "task.ready" })
 \`\`\`
 
 If a task is ready, claim it only if it matches your assignment mode. If \`task.start\` fails (another worker claimed it first or the task needs approval), check for other ready tasks. Only claim if your current task completed cleanly and quickly.

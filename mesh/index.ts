@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Mesh factory
+ * omp-messenger - Mesh factory
  *
  * Filesystem mesh by default; mesh-server client when `config.mesh.url` is set.
  */

@@ -28,7 +28,7 @@
     "cli"
   ],
   "bin": {
-    "pi-messenger-mesh": "mesh/server.ts"
+    "omp-messenger-mesh": "mesh/server.ts"
   },
   "files": [
     "*.ts",
@@ -44,7 +44,7 @@
     "test:node": "vitest run",
     "test:bun": "bun test tests/bun",
     "test:watch": "vitest",
-    "build:mesh": "bun build --compile mesh/server.ts --outfile dist/pi-messenger-mesh"
+    "build:mesh": "bun build --compile mesh/server.ts --outfile dist/omp-messenger-mesh"
   },
   "peerDependencies": {
     "@oh-my-pi/pi-ai": ">=18.1.8",

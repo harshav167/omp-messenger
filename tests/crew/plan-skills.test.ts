@@ -172,7 +172,7 @@ describe("plan with skills", () => {
     const response = await planHandler.execute({ action: "plan" }, mockCtx, "agent");
 
     expect(response.content[0].text).not.toContain("Workers will start automatically");
-    expect(response.content[0].text).toContain('pi_messenger({ action: "task.approve", id: "task-1" })');
+    expect(response.content[0].text).toContain('omp_messenger({ action: "task.approve", id: "task-1" })');
   });
 
   it("injects Team role catalog into planner prompt when active", async () => {

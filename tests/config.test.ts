@@ -136,4 +136,23 @@ describe("mesh config", () => {
     const { loadConfig } = await loadConfigModule();
     expect(loadConfig(dirs.cwd).mesh.channel).toBe("main");
   });
+
+  it("round-trips mesh settings through the user config and token file", async () => {
+    const { saveMeshSettings, getStoredMeshSettings, loadConfig } = await loadConfigModule();
+    const home = path.join(dirs.root, ".omp-home");
+
+    saveMeshSettings({ url: "ws://192.168.1.9:8765", token: "secret-1", channel: "repo-a" });
+
+    const stored = JSON.parse(fs.readFileSync(path.join(home, ".omp", "agent", "omp-messenger.json"), "utf-8"));
+    expect(stored.mesh).toEqual({ url: "ws://192.168.1.9:8765", channel: "repo-a" });
+    const tokenPath = path.join(home, ".omp", "agent", "messenger", "mesh.token");
+    expect(fs.readFileSync(tokenPath, "utf-8")).toBe("secret-1\n");
+    expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expect(getStoredMeshSettings()).toEqual({ url: "ws://192.168.1.9:8765", token: "secret-1", channel: "repo-a" });
+    expect(loadConfig(dirs.cwd).mesh).toEqual({ url: "ws://192.168.1.9:8765", token: "secret-1", channel: "repo-a" });
+
+    saveMeshSettings({ url: "", token: "", channel: "main" });
+    expect(fs.existsSync(tokenPath)).toBe(false);
+    expect(loadConfig(dirs.cwd).mesh).toEqual({ url: null, token: "", channel: "main" });
+  });
 });

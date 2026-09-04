@@ -212,7 +212,7 @@ describe("lobby workers", () => {
     const options = fake.runSubprocess.mock.calls[0]?.[0];
 
     expect(options?.id).toBe(worker?.name);
-    expect(options?.task).not.toContain('pi_messenger({ action: "join" })');
+    expect(options?.task).not.toContain('omp_messenger({ action: "join" })');
   });
 
   it("aborts exploration after the coordination token budget", async () => {

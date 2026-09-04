@@ -230,7 +230,7 @@ export async function execute(
       const planRef = existingPlan.prompt
         ? `"${store.getPlanLabel(existingPlan)}"`
         : existingPlan.prd;
-      return result(`A plan already exists for ${planRef}.\n\nTo re-plan with a steering prompt:\n  pi_messenger({ action: "plan", prompt: "focus on..." })`, {
+      return result(`A plan already exists for ${planRef}.\n\nTo re-plan with a steering prompt:\n  omp_messenger({ action: "plan", prompt: "focus on..." })`, {
         mode: "plan",
         error: "plan_exists",
         existingPrd: existingPlan.prd,
@@ -285,7 +285,7 @@ export async function execute(
         prdContent = prdContent.slice(0, MAX_PRD_SIZE) + "\n\n[Content truncated]";
       }
     } else {
-      return result(`No PRD file found. Create one of: ${PRD_PATTERNS.slice(0, 4).join(", ")}\n\nOr:\n  pi_messenger({ action: "plan", prd: "path/to/PRD.md" })\n  pi_messenger({ action: "plan", prompt: "Scan for bugs" })`, {
+      return result(`No PRD file found. Create one of: ${PRD_PATTERNS.slice(0, 4).join(", ")}\n\nOr:\n  omp_messenger({ action: "plan", prd: "path/to/PRD.md" })\n  omp_messenger({ action: "plan", prompt: "Scan for bugs" })`, {
         mode: "plan",
         error: "no_prd",
         searchedPatterns: PRD_PATTERNS
@@ -538,9 +538,9 @@ export async function execute(
   const successLabel = isPromptBased ? `"${runLabel}"` : `**${prdPath}**`;
   const shouldAutoWork = params.autoWork !== false;
   let nextSteps = `**Next steps:**
-- Review tasks: \`pi_messenger({ action: "task.list" })\`
-- Start work: \`pi_messenger({ action: "work" })\`
-- Autonomous: \`pi_messenger({ action: "work", autonomous: true })\``;
+- Review tasks: \`omp_messenger({ action: "task.list" })\`
+- Start work: \`omp_messenger({ action: "work" })\`
+- Autonomous: \`omp_messenger({ action: "work", autonomous: true })\``;
   if (shouldAutoWork) {
     const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
     const startable = ready.filter(t => !teamStore.taskNeedsApproval(cwd, t));
@@ -548,8 +548,8 @@ export async function execute(
     nextSteps = startable.length > 0
       ? `Workers will start automatically.`
       : needsApproval.length > 0
-        ? `Ready tasks need lead approval before workers can start:\n${needsApproval.map(t => `- \`pi_messenger({ action: "task.approve", id: "${t.id}" })\` — ${t.title}`).join("\n")}`
-        : `No tasks are startable yet. Review dependencies with \`pi_messenger({ action: "task.ready" })\`.`;
+        ? `Ready tasks need lead approval before workers can start:\n${needsApproval.map(t => `- \`omp_messenger({ action: "task.approve", id: "${t.id}" })\` — ${t.title}`).join("\n")}`
+        : `No tasks are startable yet. Review dependencies with \`omp_messenger({ action: "task.ready" })\`.`;
   }
 
   const text = `✅ Plan created from ${successLabel}

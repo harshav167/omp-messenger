@@ -79,7 +79,7 @@ describe("agent_end autonomous continuation guards", () => {
 
   beforeEach(() => {
     resetAutonomousState();
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-home-"));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-home-"));
     tempHomes.push(home);
     vi.stubEnv("HOME", home);
     vi.stubEnv("OMP_MESSENGER_DIR", path.join(home, ".omp", "agent", "messenger"));

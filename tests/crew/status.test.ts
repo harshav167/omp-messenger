@@ -98,7 +98,7 @@ describe("crew.status planning health", () => {
     const response = await execute({ cwd } as any);
     const text = response.content[0].text;
 
-    expect(text).toContain("No tasks yet. Run `pi_messenger({ action: \"plan\" })`");
+    expect(text).toContain("No tasks yet. Run `omp_messenger({ action: \"plan\" })`");
     expect(text).not.toContain("All tasks complete!");
   });
 

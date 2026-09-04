@@ -25,9 +25,9 @@ export async function execute(ctx: ExtensionContext) {
 **No active plan.**
 
 Create a plan:
-  pi_messenger({ action: "plan" })                                        # Auto-discovers PRD.md
-  pi_messenger({ action: "plan", prd: "docs/PRD.md" })                    # Explicit PRD path
-  pi_messenger({ action: "plan", prompt: "Scan the codebase for bugs" })   # Inline prompt`, {
+  omp_messenger({ action: "plan" })                                        # Auto-discovers PRD.md
+  omp_messenger({ action: "plan", prd: "docs/PRD.md" })                    # Explicit PRD path
+  omp_messenger({ action: "plan", prompt: "Scan the codebase for bugs" })   # Inline prompt`, {
       mode: "status",
       hasPlan: false
     });
@@ -152,13 +152,13 @@ Create a plan:
   if (tasks.length === 0 && isPlanningForCwd(cwd)) {
     text += `\nPlanning is in progress. Check .omp/messenger/crew/planning-progress.md for updates.`;
   } else if (tasks.length === 0) {
-    text += `\nNo tasks yet. Run \`pi_messenger({ action: "plan" })\` to generate tasks from your PRD.`;
+    text += `\nNo tasks yet. Run \`omp_messenger({ action: "plan" })\` to generate tasks from your PRD.`;
   } else if (done.length === tasks.length) {
     text += `\n🎉 All tasks complete!`;
   } else if (ready.length > 0) {
-    text += `\nRun \`pi_messenger({ action: "work" })\` to execute ${ready.map(t => t.id).join(", ")}`;
+    text += `\nRun \`omp_messenger({ action: "work" })\` to execute ${ready.map(t => t.id).join(", ")}`;
   } else if (blocked.length > 0) {
-    text += `\nUnblock tasks with \`pi_messenger({ action: "task.unblock", id: "..." })\``;
+    text += `\nUnblock tasks with \`omp_messenger({ action: "task.unblock", id: "..." })\``;
   } else if (inProgress.length > 0) {
     text += `\nWaiting for in-progress tasks to complete.`;
   }

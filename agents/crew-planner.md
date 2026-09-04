@@ -1,7 +1,7 @@
 ---
 name: crew-planner
 description: Analyzes codebase and PRD to create a comprehensive task breakdown
-tools: read, bash, web_search, pi_messenger
+tools: read, bash, web_search, omp_messenger
 model: anthropic/claude-opus-4-6
 crewRole: planner
 maxOutput: { bytes: 204800, lines: 5000 }
@@ -15,10 +15,10 @@ You analyze a codebase and PRD to produce a comprehensive task breakdown. You re
 
 ## Phase 1: Join Mesh (FIRST)
 
-Join the mesh before any other pi_messenger calls:
+Join the mesh before any other omp_messenger calls:
 
 ```typescript
-pi_messenger({ action: "join" })
+omp_messenger({ action: "join" })
 ```
 
 ## Phase 2: Codebase Exploration

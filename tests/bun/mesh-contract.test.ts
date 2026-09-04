@@ -38,7 +38,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 300): Promise<voi
 }
 
 async function makeFs(): Promise<ContractHarness> {
-  const root = mkdtempSync(join(tmpdir(), "pi-messenger-contract-fs-"));
+  const root = mkdtempSync(join(tmpdir(), "omp-messenger-contract-fs-"));
   const ctx = createMockContext(root);
   const meshes: Participant[] = [];
 
@@ -70,7 +70,7 @@ async function makeFs(): Promise<ContractHarness> {
 }
 
 async function makeClient(): Promise<ContractHarness> {
-  const root = mkdtempSync(join(tmpdir(), "pi-messenger-contract-client-"));
+  const root = mkdtempSync(join(tmpdir(), "omp-messenger-contract-client-"));
   const ctx = createMockContext(root);
   const server = startMeshServer({ port: 0, token: "t" });
   const meshes: Participant[] = [];

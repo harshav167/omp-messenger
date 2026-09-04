@@ -1,7 +1,7 @@
 ---
 name: crew-worker
 description: Implements a single crew task with mesh coordination
-tools: read, write, edit, bash, pi_messenger
+tools: read, write, edit, bash, omp_messenger
 model: anthropic/claude-haiku-4-5
 crewRole: worker
 maxOutput: { bytes: 204800, lines: 5000 }
@@ -15,10 +15,10 @@ You implement a single task. Your prompt contains TASK_ID.
 
 ## Phase 1: Join Mesh (FIRST)
 
-Join the mesh before any other pi_messenger calls:
+Join the mesh before any other omp_messenger calls:
 
 ```typescript
-pi_messenger({ action: "join" })
+omp_messenger({ action: "join" })
 ```
 
 ## Phase 2: Re-anchor (CRITICAL)
@@ -26,7 +26,7 @@ pi_messenger({ action: "join" })
 Read the task spec to understand what to build:
 
 ```typescript
-pi_messenger({ action: "task.show", id: "<TASK_ID>" })
+omp_messenger({ action: "task.show", id: "<TASK_ID>" })
 ```
 
 Read the task spec file for detailed requirements:
@@ -39,7 +39,7 @@ read({ path: ".omp/messenger/crew/tasks/<TASK_ID>.md" })
 
 If your task prompt includes an **Available Skills** section, read skills that match what you're building (for example a framework, testing library, or domain-specific tool) before starting implementation.
 
-You already have every `pi_messenger` action you need in this prompt, so do not load Crew orchestration references. If skills are marked **Recommended for this task**, read those first.
+You already have every `omp_messenger` action you need in this prompt, so do not load Crew orchestration references. If skills are marked **Recommended for this task**, read those first.
 
 ```typescript
 read({ path: "<skill-path-from-the-list>" })
@@ -50,13 +50,13 @@ Skip this phase if no Available Skills section is present or no skills match you
 ## Phase 3: Start Task & Reserve Files
 
 ```typescript
-pi_messenger({ action: "task.start", id: "<TASK_ID>" })
+omp_messenger({ action: "task.start", id: "<TASK_ID>" })
 ```
 
 Identify files you'll modify and reserve them:
 
 ```typescript
-pi_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_ID>" })
+omp_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_ID>" })
 ```
 
 ## Phase 4: Implement
@@ -69,7 +69,7 @@ pi_messenger({ action: "reserve", paths: ["src/path/to/files/"], reason: "<TASK_
 **Progress Logging:** After each significant step above, log what you did:
 
 ```typescript
-pi_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Added JWT validation to src/auth/middleware.ts" })
+omp_messenger({ action: "task.progress", id: "<TASK_ID>", message: "Added JWT validation to src/auth/middleware.ts" })
 ```
 
 Keep entries concise — one line per step. This helps the next agent pick up where you left off if the task gets interrupted.
@@ -88,13 +88,13 @@ Task: <TASK_ID>"
 Release your reservations:
 
 ```typescript
-pi_messenger({ action: "release" })
+omp_messenger({ action: "release" })
 ```
 
 Mark the task complete with evidence:
 
 ```typescript
-pi_messenger({
+omp_messenger({
   action: "task.done",
   id: "<TASK_ID>",
   summary: "Brief description of what was implemented",
@@ -109,14 +109,14 @@ pi_messenger({
 
 If you receive a message saying "SHUTDOWN REQUESTED":
 1. Stop what you're doing
-2. Release reservations: `pi_messenger({ action: "release" })`
+2. Release reservations: `omp_messenger({ action: "release" })`
 3. Do NOT mark the task as done — leave it as in_progress for retry
 4. Do NOT commit anything
 5. Exit immediately
 
 ## Important Rules
 
-- ALWAYS join first, before any other pi_messenger calls
+- ALWAYS join first, before any other omp_messenger calls
 - ALWAYS re-anchor by reading task spec
 - ALWAYS reserve files before editing
 - ALWAYS release before completing

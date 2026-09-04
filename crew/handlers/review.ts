@@ -26,7 +26,7 @@ export async function execute(
   const reviewerModel = config.models?.reviewer ?? sessionModel;
 
   if (!target) {
-    return result("Error: target (task ID) required for review action.\n\nUsage: pi_messenger({ action: \"review\", target: \"task-1\" })", {
+    return result("Error: target (task ID) required for review action.\n\nUsage: omp_messenger({ action: \"review\", target: \"task-1\" })", {
       mode: "review",
       error: "missing_target"
     });

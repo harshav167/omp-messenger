@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Mesh transport contract
+ * omp-messenger - Mesh transport contract
  *
  * A Mesh is the coordination layer behind the messenger: presence, reservations,
  * messages, and swarm claims scoped to one channel. Two implementations exist:

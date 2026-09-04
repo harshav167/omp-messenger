@@ -19,12 +19,12 @@ import { approvalTaskSummaries, taskMetadataMarkers } from "../utils/task-format
 export { executeRevise, executeReviseTree, type ReviseResult } from "./revise.ts";
 
 function revisionHint(task: Task): string {
-  return `pi_messenger({ action: "task.revise", id: "${task.id}", prompt: "Address approval feedback" })`;
+  return `omp_messenger({ action: "task.revise", id: "${task.id}", prompt: "Address approval feedback" })`;
 }
 
 function rejectedTasksText(tasks: Task[]): string {
   if (tasks.length === 0) return "";
-  return `\n\nRejected tasks need revision:\n${tasks.map(t => `  - ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}\n    Revise with: \`${revisionHint(t)}\`\n    Or revise dependents too: \`pi_messenger({ action: "task.revise-tree", id: "${t.id}", prompt: "Address approval feedback" })\``).join("\n")}`;
+  return `\n\nRejected tasks need revision:\n${tasks.map(t => `  - ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}\n    Revise with: \`${revisionHint(t)}\`\n    Or revise dependents too: \`omp_messenger({ action: "task.revise-tree", id: "${t.id}", prompt: "Address approval feedback" })\``).join("\n")}`;
 }
 
 export async function execute(
@@ -78,8 +78,8 @@ export async function execute(
 function taskActionHint(cwd: string, task: Task): string {
   if (teamStore.taskNeedsRevision(cwd, task)) return `Revise first: \`${revisionHint(task)}\``;
   return teamStore.taskNeedsApproval(cwd, task)
-    ? `Approve first: \`pi_messenger({ action: "task.approve", id: "${task.id}" })\``
-    : `Start with: \`pi_messenger({ action: "task.start", id: "${task.id}" })\``;
+    ? `Approve first: \`omp_messenger({ action: "task.approve", id: "${task.id}" })\``
+    : `Start with: \`omp_messenger({ action: "task.start", id: "${task.id}" })\``;
 }
 
 function taskCreate(cwd: string, params: CrewParams) {
@@ -90,7 +90,7 @@ function taskCreate(cwd: string, params: CrewParams) {
   // Verify plan exists
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("Error: No plan exists. Create one first with pi_messenger({ action: \"plan\" })", { 
+    return result("Error: No plan exists. Create one first with omp_messenger({ action: \"plan\" })", { 
       mode: "task.create", error: "no_plan" 
     });
   }
@@ -194,7 +194,7 @@ ${progressText}
 
 To execute the split, call task.split again with subtask definitions:
 
-pi_messenger({
+omp_messenger({
   action: "task.split",
   id: "${task.id}",
   subtasks: [
@@ -378,14 +378,14 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
 function taskList(cwd: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
+    return result("No plan found. Create one with: omp_messenger({ action: \"plan\" })", { 
       mode: "task.list", tasks: [], hasPlan: false 
     });
   }
 
   const tasks = store.getTasks(cwd);
   if (tasks.length === 0) {
-    return result(`No tasks in plan. Create with: \`pi_messenger({ action: "task.create", title: "..." })\``, {
+    return result(`No tasks in plan. Create with: \`omp_messenger({ action: "task.create", title: "..." })\``, {
       mode: "task.list",
       tasks: [],
       prd: plan.prd,
@@ -466,8 +466,8 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
 **Attempt:** ${started.attempt_count}
 ${started.base_commit ? `**Base commit:** ${started.base_commit.slice(0, 8)}` : ""}${specPreview}
 
-When done: \`pi_messenger({ action: "task.done", id: "${id}", summary: "..." })\`
-If blocked: \`pi_messenger({ action: "task.block", id: "${id}", reason: "..." })\``;
+When done: \`omp_messenger({ action: "task.done", id: "${id}", summary: "..." })\`
+If blocked: \`omp_messenger({ action: "task.block", id: "${id}", reason: "..." })\``;
 
   return result(text, {
     mode: "task.start",
@@ -583,7 +583,7 @@ function taskBlock(cwd: string, params: CrewParams, state: MessengerState) {
 
 **Reason:** ${params.reason}
 
-Unblock with: \`pi_messenger({ action: "task.unblock", id: "${id}" })\``;
+Unblock with: \`omp_messenger({ action: "task.unblock", id: "${id}" })\``;
 
   return result(text, {
     mode: "task.block",
@@ -635,7 +635,7 @@ function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
 function taskReady(cwd: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one with: pi_messenger({ action: \"plan\" })", { 
+    return result("No plan found. Create one with: omp_messenger({ action: \"plan\" })", { 
       mode: "task.ready", ready: [], hasPlan: false 
     });
   }
@@ -689,8 +689,8 @@ function taskReady(cwd: string) {
   for (const task of ready) {
     lines.push(`⬜ **${task.id}**: ${task.title}`);
   }
-  lines.push(`\nStart one: \`pi_messenger({ action: "task.start", id: "${ready[0].id}" })\``);
-  lines.push(`Or run all: \`pi_messenger({ action: "work" })\``);
+  lines.push(`\nStart one: \`omp_messenger({ action: "task.start", id: "${ready[0].id}" })\``);
+  lines.push(`Or run all: \`omp_messenger({ action: "work" })\``);
 
   if (needsApproval.length > 0) {
     lines.push(`\nNeeds approval:\n${needsApproval.map(t => `  - ${t.id}: ${t.title}`).join("\n")}`);
@@ -753,7 +753,7 @@ function taskApproval(cwd: string, params: CrewParams, state: MessengerState, st
   logFeedEvent(cwd, actor, status === "approved" ? "task.approve" : "task.reject", id, params.reason);
 
   const nextStep = status === "rejected"
-    ? `\n\nNext: revise with \`${revisionHint(task)}\`, or use \`pi_messenger({ action: "task.revise-tree", id: "${id}", prompt: "Address approval feedback" })\` if dependents need updates too.`
+    ? `\n\nNext: revise with \`${revisionHint(task)}\`, or use \`omp_messenger({ action: "task.revise-tree", id: "${id}", prompt: "Address approval feedback" })\` if dependents need updates too.`
     : "";
 
   return result(`${status === "approved" ? "Approved" : "Rejected"} task **${id}**.${nextStep}`, {
@@ -789,7 +789,7 @@ function taskReset(cwd: string, params: CrewParams, state: MessengerState) {
     : `🔄 Reset task **${id}**`;
 
   const resetTask = store.getTask(cwd, id);
-  const hint = resetTask ? taskActionHint(cwd, resetTask) : `Start with: \`pi_messenger({ action: "task.start", id: "${id}" })\``;
+  const hint = resetTask ? taskActionHint(cwd, resetTask) : `Start with: \`omp_messenger({ action: "task.start", id: "${id}" })\``;
 
   return result(`${text}\n\n${hint}`, {
     mode: "task.reset",

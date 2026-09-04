@@ -14,7 +14,7 @@ export interface TempCrewDirs {
 }
 
 export function createTempCrewDirs(): TempCrewDirs {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-test-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-test-"));
   roots.add(root);
 
   const cwd = root;

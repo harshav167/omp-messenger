@@ -78,7 +78,7 @@ describe("status heartbeat", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.resetModules();
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-home-"));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-home-"));
     tempHomes.push(home);
     vi.stubEnv("HOME", home);
     vi.stubEnv("OMP_MESSENGER_DIR", path.join(home, ".omp", "agent", "messenger"));
@@ -98,7 +98,7 @@ describe("status heartbeat", () => {
   });
 
   it("stops the heartbeat when a captured context becomes stale and restarts when a fresh tool context arrives", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-cwd-"));
     tempCwds.push(cwd);
     const pi = await loadExtension();
     const sessionStart = pi.handlers.get("session_start")?.[0];
@@ -124,7 +124,7 @@ describe("status heartbeat", () => {
     vi.advanceTimersByTime(30_000);
     expect(staleCtxReads).toBe(1);
 
-    const tool = pi.tools.find(tool => tool.name === "pi_messenger");
+    const tool = pi.tools.find(tool => tool.name === "omp_messenger");
     expect(tool).toBeTruthy();
 
     let freshCtxReads = 0;
@@ -140,7 +140,7 @@ describe("status heartbeat", () => {
   });
 
   it("wakes the configured coordinator once when a peer becomes stuck", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-cwd-"));
     tempCwds.push(cwd);
     fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
     fs.writeFileSync(
@@ -199,7 +199,7 @@ describe("status heartbeat", () => {
   });
 
   it("does not swallow non-stale status update errors", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-cwd-"));
     tempCwds.push(cwd);
     fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
     fs.writeFileSync(path.join(cwd, ".omp", "omp-messenger.json"), JSON.stringify({ autoRegister: true }));

@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Types and Pure Utilities
+ * omp-messenger - Types and Pure Utilities
  */
 
 import type * as fs from "node:fs";

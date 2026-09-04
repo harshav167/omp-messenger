@@ -79,7 +79,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
       const offered = request.headers.get("sec-websocket-protocol");
       const acceptsProtocol = offered?.split(",").some((protocol) => protocol.trim() === MESH_SUBPROTOCOL) ?? false;
       if (!acceptsProtocol) {
-        return new Response("pi-messenger-mesh: subprotocol pi-messenger.v1 required", { status: 426 });
+        return new Response("omp-messenger-mesh: subprotocol omp-messenger.v1 required", { status: 426 });
       }
       const upgraded = bunServer.upgrade(request, {
         headers: { "Sec-WebSocket-Protocol": MESH_SUBPROTOCOL },
@@ -271,11 +271,11 @@ if (import.meta.main) {
   const token = option("--token") ?? process.env.OMP_MESSENGER_MESH_TOKEN;
   const dataDir = option("--data-dir") ?? process.env.OMP_MESSENGER_MESH_DATA_DIR;
   if (!token) {
-    console.error("pi-messenger-mesh: --token or OMP_MESSENGER_MESH_TOKEN is required");
+    console.error("omp-messenger-mesh: --token or OMP_MESSENGER_MESH_TOKEN is required");
     process.exit(1);
   }
   const running = startMeshServer({ port, hostname, token, ...(dataDir ? { dataDir } : {}) });
-  console.log(`pi-messenger-mesh listening on ws://${running.hostname}:${running.port}`);
+  console.log(`omp-messenger-mesh listening on ws://${running.hostname}:${running.port}`);
   const terminate = async (): Promise<void> => {
     await running.stop();
     process.exit(0);

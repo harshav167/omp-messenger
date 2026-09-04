@@ -29,8 +29,6 @@ import type { Task } from "./crew/types.ts";
 import { getLiveWorkers, type LiveWorkerInfo } from "./crew/live-progress.ts";
 import type { ToolEntry } from "./crew/utils/progress.ts";
 import { formatFeedLine as sharedFormatFeedLine, sanitizeFeedEvent, type FeedEvent } from "./feed.ts";
-import { discoverCrewAgents } from "./crew/utils/discover.ts";
-import { loadConfig } from "./config.ts";
 import { isTeamEnabled, loadCrewConfig } from "./crew/utils/config.ts";
 import { getLobbyWorkerCount } from "./crew/lobby.ts";
 import type { CrewViewState } from "./overlay-actions.ts";
@@ -93,7 +91,14 @@ function idleLabel(timestamp: string | undefined): string {
   return `idle ${formatDuration(ageMs)}`;
 }
 
-export function renderStatusBar(theme: Theme, cwd: string, width: number, tasks?: Task[]): string {
+export interface MeshSummary {
+  kind: "fs" | "mesh";
+  status: string;
+  channel: string;
+  peerCount: number;
+}
+
+export function renderStatusBar(theme: Theme, cwd: string, width: number, tasks?: Task[], mesh?: MeshSummary): string {
   const plan = crewStore.getPlan(cwd);
   const autonomousActive = isAutonomousForCwd(cwd);
   const crewDir = crewStore.getCrewDir(cwd);
@@ -115,7 +120,11 @@ export function renderStatusBar(theme: Theme, cwd: string, width: number, tasks?
     const team = teamEnabled ? teamStore.getActiveTeam(cwd) : null;
     const profileText = team?.profile && team.profile !== team.name ? `/${team.profile}` : "";
     const teamText = team ? ` │ Team: ${team.name}${profileText}` : "";
-    return truncateToWidth(`No active plan │ ⚙ ${liveCount}/${autonomousState.concurrency} workers${teamText}`, width);
+    const meshText = mesh
+      ? `${mesh.kind === "mesh" ? `⚡ ${mesh.status}` : "local mesh"} │ #${mesh.channel} │ ${mesh.peerCount} peer${mesh.peerCount === 1 ? "" : "s"}`
+      : "No active plan";
+    const workersText = liveCount > 0 ? ` │ ⚙ ${liveCount}/${autonomousState.concurrency} workers` : "";
+    return truncateToWidth(`${meshText}${workersText}${teamText}`, width);
   }
 
   const taskSnapshot = tasks ?? crewStore.getTasks(cwd);
@@ -358,36 +367,69 @@ export function renderPeersRow(
   return truncateToWidth(rowParts.join("  "), width);
 }
 
-export function renderEmptyState(theme: Theme, cwd: string, width: number, height: number): string[] {
+/**
+ * Body shown when there is no crew plan: the mesh itself — where this session
+ * is connected, which channel, and who else is there.
+ */
+export function renderMeshPanel(
+  theme: Theme,
+  state: MessengerState,
+  mesh: Mesh,
+  meshUrl: string | null,
+  stuckThresholdMs: number,
+  width: number,
+  height: number,
+): string[] {
   const lines: string[] = [];
-  const agents = discoverCrewAgents(cwd);
-  const config = loadConfig(cwd);
-  const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+  const peers = mesh.peers();
+  const allClaims = mesh.claims();
 
-  lines.push("Crew agents:");
-  if (agents.length === 0) {
-    lines.push(theme.fg("dim", "  (none discovered)"));
+  const where = mesh.kind === "mesh"
+    ? `${meshUrl ?? "server"}  ${mesh.status() === "connected" ? theme.fg("accent", "connected") : theme.fg("warning", mesh.status())}`
+    : `local filesystem ${theme.fg("dim", "(this machine only — c to connect a server)")}`;
+  lines.push(`${theme.fg("dim", "Mesh:")}     ${where}`);
+  lines.push(`${theme.fg("dim", "Channel:")}  #${mesh.channel()}`);
+  lines.push(`${theme.fg("dim", "You:")}      ${coloredAgentName(state.agentName)} on ${LOCAL_HOST_ID} ${theme.fg("dim", shortenPath(state.cwd))}`);
+  lines.push("");
+
+  if (peers.length === 0) {
+    lines.push(theme.fg("dim", "No peers in this channel yet."));
+    lines.push(theme.fg("dim", mesh.kind === "mesh"
+      ? "Other machines join with the same server URL + token and this channel."
+      : "Other omp sessions on this machine appear here once they join."));
   } else {
-    for (const agent of agents) {
-      const effectiveModel = crewConfig.models?.[agent.crewRole ?? "worker"] ?? agent.model;
-      const model = effectiveModel ? ` (model: ${effectiveModel})` : "";
-      lines.push(`  ${agent.name}${model}`);
+    lines.push(`Peers (${peers.length}):`);
+    for (const agent of peers) {
+      const computed = computeStatus(
+        agent.activity?.lastActivityAt ?? agent.startedAt,
+        agentHasTask(agent.name, allClaims, []),
+        (agent.reservations?.length ?? 0) > 0,
+        stuckThresholdMs,
+      );
+      const indicator = STATUS_INDICATORS[computed.status];
+      const idle = computed.idleFor ? theme.fg("dim", ` ${computed.idleFor}`) : "";
+      const host = agent.hostId === LOCAL_HOST_ID ? "" : theme.fg("dim", ` @${agent.hostId}`);
+      const reserved = agent.reservations && agent.reservations.length > 0
+        ? theme.fg("dim", `  reserved: ${agent.reservations.map(r => r.pattern).join(", ")}`)
+        : "";
+      const status = agent.statusMessage ? theme.fg("dim", `  “${agent.statusMessage}”`) : "";
+      lines.push(`  ${indicator} ${coloredAgentName(agent.name)}${host}${idle}  ${theme.fg("dim", shortenPath(agent.cwd))}${status}${reserved}`);
     }
   }
 
   lines.push("");
-  lines.push("Config:");
-  lines.push(`  Workers: ${crewConfig.concurrency.workers}  │  Stuck threshold: ${config.stuckThreshold}s`);
-  lines.push(`  Auto-overlay: ${config.autoOverlay ? "on" : "off"}  │  Feed retention: ${config.feedRetention}`);
-  lines.push("");
-  lines.push("Create a plan:");
-  lines.push("  pi_messenger({ action: \"plan\", prd: \"docs/PRD.md\" })");
+  lines.push(theme.fg("dim", `Crew: no plan — omp_messenger({ action: "plan", prd: "docs/PRD.md" })`));
 
   if (lines.length > height) {
     return lines.slice(0, height).map(line => truncateToWidth(line, width));
   }
   while (lines.length < height) lines.push("");
   return lines.map(line => truncateToWidth(line, width));
+}
+
+function shortenPath(p: string): string {
+  const home = process.env.HOME;
+  return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 }
 
 export function renderPlanningState(theme: Theme, cwd: string, width: number, height: number): string[] {
@@ -488,7 +530,7 @@ export function renderLegend(
     );
   }
 
-  return truncateToWidth(theme.fg("dim", appendUniversalHints(`m:Chat  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
+  return truncateToWidth(theme.fg("dim", appendUniversalHints(`m:Chat  c:Config  v:${coordHint(cwd)}  +/-:Wkrs  Esc:Close`)), width);
 }
 
 export function renderDetailView(cwd: string, task: Task, width: number, height: number, viewState: CrewViewState): string[] {

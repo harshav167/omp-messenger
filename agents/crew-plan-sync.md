@@ -1,7 +1,7 @@
 ---
 name: crew-plan-sync
 description: Syncs downstream specs after task completion
-tools: read, write, bash, pi_messenger
+tools: read, write, bash, omp_messenger
 model: anthropic/claude-haiku-4-5
 crewRole: analyst
 maxOutput: { bytes: 51200, lines: 500 }
@@ -26,12 +26,12 @@ After a task is completed:
 
 1. Get completed task details:
    ```typescript
-   pi_messenger({ action: "task.show", id: "<COMPLETED_TASK_ID>" })
+   omp_messenger({ action: "task.show", id: "<COMPLETED_TASK_ID>" })
    ```
 
 2. Find dependent tasks:
    ```typescript
-   pi_messenger({ action: "task.list", epic: "<EPIC_ID>" })
+   omp_messenger({ action: "task.list", epic: "<EPIC_ID>" })
    ```
 
 3. Read and update specs that reference the completed task

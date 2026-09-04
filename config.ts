@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Configuration
+ * omp-messenger - Configuration
  * 
  * Priority (highest to lowest):
  * 1. Project: .omp/omp-messenger.json
@@ -8,13 +8,13 @@
  * 4. Defaults
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isValidChannelName } from "./lib.ts";
 
 export interface MeshConfig {
-  /** ws:// or wss:// URL of a pi-messenger-mesh server; null → filesystem mesh. */
+  /** ws:// or wss:// URL of a omp-messenger-mesh server; null → filesystem mesh. */
   url: string | null;
   /** Shared secret sent in the hello frame. */
   token: string;
@@ -136,34 +136,82 @@ export function matchesAutoRegisterPath(cwd: string, paths: string[]): boolean {
   return false;
 }
 
-export function saveAutoRegisterPaths(paths: string[]): void {
-  const configPath = join(homedir(), ".omp", "agent", "omp-messenger.json");
-  let existing: Record<string, unknown> = {};
-  
-  if (existsSync(configPath)) {
-    try {
-      existing = JSON.parse(readFileSync(configPath, "utf-8"));
-    } catch {
-      // Start fresh if malformed
-    }
+const userAgentDir = () => join(homedir(), ".omp", "agent");
+const userConfigPath = () => join(userAgentDir(), "omp-messenger.json");
+const meshTokenPath = () => join(userAgentDir(), "messenger", "mesh.token");
+
+function readUserConfig(): Record<string, unknown> {
+  const configPath = userConfigPath();
+  if (!existsSync(configPath)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
-  
+}
+
+function writeUserConfig(config: Record<string, unknown>): void {
+  mkdirSync(userAgentDir(), { recursive: true });
+  writeFileSync(userConfigPath(), JSON.stringify(config, null, 2));
+}
+
+export function saveAutoRegisterPaths(paths: string[]): void {
+  const existing = readUserConfig();
   existing.autoRegisterPaths = paths;
-  
-  const dir = join(homedir(), ".omp", "agent");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(configPath, JSON.stringify(existing, null, 2));
+  writeUserConfig(existing);
 }
 
 export function getAutoRegisterPaths(): string[] {
-  const configPath = join(homedir(), ".omp", "agent", "omp-messenger.json");
-  if (!existsSync(configPath)) return [];
-  
-  try {
-    const config = JSON.parse(readFileSync(configPath, "utf-8"));
-    return Array.isArray(config.autoRegisterPaths) ? config.autoRegisterPaths : [];
-  } catch {
-    return [];
+  const config = readUserConfig();
+  return Array.isArray(config.autoRegisterPaths) ? config.autoRegisterPaths : [];
+}
+
+/** Mesh settings as stored in the user config file (no env, no token-file fallback). */
+export interface StoredMeshSettings {
+  url: string;
+  channel: string;
+  /** Token from ~/.omp/agent/messenger/mesh.token (empty when absent). */
+  token: string;
+}
+
+export function getStoredMeshSettings(): StoredMeshSettings {
+  const raw = readUserConfig().mesh;
+  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  let token = "";
+  const tokenPath = meshTokenPath();
+  if (existsSync(tokenPath)) {
+    try {
+      token = readFileSync(tokenPath, "utf-8").trim();
+    } catch {
+      token = "";
+    }
+  }
+  return {
+    url: typeof obj.url === "string" ? obj.url : "",
+    channel: isValidChannelName(obj.channel) ? obj.channel : "main",
+    token,
+  };
+}
+
+/**
+ * Persist mesh settings: url/channel into ~/.omp/agent/omp-messenger.json,
+ * token into ~/.omp/agent/messenger/mesh.token (0600). Empty url → filesystem mesh.
+ */
+export function saveMeshSettings(settings: StoredMeshSettings): void {
+  const existing = readUserConfig();
+  const url = settings.url.trim();
+  const channel = isValidChannelName(settings.channel) ? settings.channel : "main";
+  existing.mesh = { url: url || null, channel };
+  writeUserConfig(existing);
+
+  mkdirSync(join(userAgentDir(), "messenger"), { recursive: true });
+  const token = settings.token.trim();
+  const tokenPath = meshTokenPath();
+  if (token) {
+    writeFileSync(tokenPath, token + "\n", { mode: 0o600 });
+  } else if (existsSync(tokenPath)) {
+    rmSync(tokenPath, { force: true });
   }
 }
 

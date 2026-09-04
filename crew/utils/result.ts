@@ -6,7 +6,7 @@
 
 /**
  * Format a tool result with text content and structured details.
- * Matches the pattern used throughout pi-messenger handlers.
+ * Matches the pattern used throughout omp-messenger handlers.
  */
 export function result(text: string, details: Record<string, unknown>) {
   return {

@@ -186,30 +186,30 @@ describe("buildWorkerPrompt - skills section", () => {
 
   it("excludes the orchestrator crew skill from worker prompts", () => {
     dirs = createTempCrewDirs();
-    const task = makeTask({ skills: ["pi-messenger-crew", "testing"] });
+    const task = makeTask({ skills: ["omp-messenger-crew", "testing"] });
     setupStore(task);
 
     const skills = [
       ...makeSkills(),
-      { name: "pi-messenger-crew", description: "Crew orchestration reference", path: "/ext/skills/pi-messenger-crew/SKILL.md", source: "extension" as const },
+      { name: "omp-messenger-crew", description: "Crew orchestration reference", path: "/ext/skills/omp-messenger-crew/SKILL.md", source: "extension" as const },
     ];
 
     const prompt = buildWorkerPrompt(task, "test.md", dirs.cwd, makeConfig(), [], skills);
     expect(prompt).toContain("testing");
-    expect(prompt).not.toContain("pi-messenger-crew");
-    expect(prompt).not.toContain("/ext/skills/pi-messenger-crew/SKILL.md");
+    expect(prompt).not.toContain("omp-messenger-crew");
+    expect(prompt).not.toContain("/ext/skills/omp-messenger-crew/SKILL.md");
   });
 
   it("omits the skills section when only orchestrator-only skills are available", () => {
     dirs = createTempCrewDirs();
-    const task = makeTask({ skills: ["pi-messenger-crew"] });
+    const task = makeTask({ skills: ["omp-messenger-crew"] });
     setupStore(task);
 
     const prompt = buildWorkerPrompt(task, "test.md", dirs.cwd, makeConfig(), [], [
-      { name: "pi-messenger-crew", description: "Crew orchestration reference", path: "/ext/skills/pi-messenger-crew/SKILL.md", source: "extension" },
+      { name: "omp-messenger-crew", description: "Crew orchestration reference", path: "/ext/skills/omp-messenger-crew/SKILL.md", source: "extension" },
     ]);
 
     expect(prompt).not.toContain("Available Skills");
-    expect(prompt).not.toContain("pi-messenger-crew");
+    expect(prompt).not.toContain("omp-messenger-crew");
   });
 });

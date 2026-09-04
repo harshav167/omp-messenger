@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Chat Overlay Component
+ * omp-messenger - Chat Overlay Component
  */
 
 import type { Component, Focusable, TUI } from "@oh-my-pi/pi-tui";
@@ -24,7 +24,7 @@ import {
   renderFeedSection,
   renderPeersRow,
   renderLegend,
-  renderEmptyState,
+  renderMeshPanel,
   renderPlanningState,
   renderDetailView,
   navigateTask,
@@ -48,6 +48,8 @@ import { spawnLobbyWorker, removeLobbyWorkerByIndex } from "./crew/lobby.ts";
 
 export interface OverlayCallbacks {
   onBackground?: (snapshot: string) => void;
+  /** Close the overlay and open the config overlay (mesh URL/token/channel). */
+  onOpenConfig?: () => void;
 }
 
 export class MessengerOverlay implements Component, Focusable {
@@ -59,6 +61,7 @@ export class MessengerOverlay implements Component, Focusable {
   private crewViewState: CrewViewState = createCrewViewState();
   private cwd: string;
   private stuckThresholdMs: number;
+  private meshUrl: string | null;
   private progressTimer: ReturnType<typeof setInterval> | null = null;
   private planningTimer: ReturnType<typeof setInterval> | null = null;
   private progressUnsubscribe: (() => void) | null = null;
@@ -80,6 +83,7 @@ export class MessengerOverlay implements Component, Focusable {
     this.cwd = cwd;
     const cfg = loadConfig(this.cwd);
     this.stuckThresholdMs = cfg.stuckThreshold * 1000;
+    this.meshUrl = cfg.mesh.url;
 
     for (const key of this.state.unreadCounts.keys()) {
       this.state.unreadCounts.set(key, 0);
@@ -343,6 +347,12 @@ export class MessengerOverlay implements Component, Focusable {
       setCoordinationOverride(next);
       setNotification(this.crewViewState, this.tui, true, `Coordination: ${next}`);
       this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "c") && !this.isPlanningActiveForCurrentProject()) {
+      this.callbacks.onOpenConfig?.();
+      this.done();
       return;
     }
 
@@ -613,7 +623,12 @@ export class MessengerOverlay implements Component, Focusable {
     const rightBorder = borderLen - leftBorder;
 
     lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
-    lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW, tasks)));
+    lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW, tasks, {
+      kind: this.mesh.kind,
+      status: this.mesh.status(),
+      channel: this.mesh.channel(),
+      peerCount: this.mesh.peers().length,
+    })));
     lines.push(emptyRow());
 
     const chromeLines = 6;
@@ -688,7 +703,7 @@ export class MessengerOverlay implements Component, Focusable {
 
       let mainLines: string[];
       if (!hasPlan && !planning) {
-        mainLines = renderEmptyState(this.theme, this.cwd, sectionW, mainHeight);
+        mainLines = renderMeshPanel(this.theme, this.state, this.mesh, this.meshUrl, this.stuckThresholdMs, sectionW, mainHeight);
       } else if (planning && tasks.length === 0) {
         mainLines = renderPlanningState(this.theme, this.cwd, sectionW, mainHeight);
       } else if (isFeedFocus && tasks.length > 0) {

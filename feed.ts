@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Activity Feed
+ * omp-messenger - Activity Feed
  *
  * Append-only JSONL feed stored at <cwd>/.omp/messenger/feed.jsonl
  */

@@ -23,7 +23,7 @@ Or link a local checkout while developing:
 omp plugin link .
 ```
 
-Crew agents ship with the plugin (`agents/*.md`) and are discovered automatically — by crew and by omp's own `task` tool. The `pi-messenger-crew` skill is auto-loaded from the plugin. Workers can load domain-specific [crew skills](#crew-skills) on demand during task execution.
+Crew agents ship with the plugin (`agents/*.md`) and are discovered automatically — by crew and by omp's own `task` tool. The `omp-messenger-crew` skill is auto-loaded from the plugin. Workers can load domain-specific [crew skills](#crew-skills) on demand during task execution.
 
 ### Multi-machine mesh
 
@@ -43,9 +43,9 @@ Point every machine at it in `~/.omp/agent/omp-messenger.json` (or per repo in `
 
 Put the token in `~/.omp/agent/messenger/mesh.token` (mode 0600), or set `mesh.token` (a literal or `$ENV_NAME`), or export `OMP_MESSENGER_MESH_TOKEN`. `OMP_MESSENGER_MESH_URL` overrides the file URL. Without `mesh.url` the plugin uses the local filesystem mesh exactly as before.
 
-`pi_messenger({ action: "channels" })` lists channels; `join { channel }` creates or joins one. The status bar shows `⚡<channel>` in mesh mode (`⚡<channel>…` while reconnecting). Set `{ "crew": { "team": { "enabled": false } } }` to switch the Team layer off.
+`omp_messenger({ action: "channels" })` lists channels; `join { channel }` creates or joins one. The status bar shows `⚡<channel>` in mesh mode (`⚡<channel>…` while reconnecting). Set `{ "crew": { "team": { "enabled": false } } }` to switch the Team layer off.
 
-List available crew agents with `pi_messenger({ action: "crew.agents" })`.
+List available crew agents with `omp_messenger({ action: "crew.agents" })`.
 
 To customize an agent for one project, copy it to `.omp/messenger/crew/agents/` and edit it.
 
@@ -54,19 +54,19 @@ To customize an agent for one project, copy it to `.omp/messenger/crew/agents/` 
 Once joined (manually or via `autoRegister` config), agents can coordinate:
 
 ```typescript
-pi_messenger({ action: "join" })
-pi_messenger({ action: "reserve", paths: ["src/auth/"], reason: "Refactoring" })
-pi_messenger({ action: "send", to: "GoldFalcon", message: "auth is done" })
-pi_messenger({ action: "release" })
-pi_messenger({ action: "leave" })
+omp_messenger({ action: "join" })
+omp_messenger({ action: "reserve", paths: ["src/auth/"], reason: "Refactoring" })
+omp_messenger({ action: "send", to: "GoldFalcon", message: "auth is done" })
+omp_messenger({ action: "release" })
+omp_messenger({ action: "leave" })
 ```
 
 For multi-agent task orchestration from a PRD:
 
 ```typescript
-pi_messenger({ action: "plan" })                       // Planner analyzes codebase, creates tasks
-pi_messenger({ action: "work", autonomous: true })      // Workers execute tasks in waves until done
-pi_messenger({ action: "review", target: "task-1" })    // Reviewer checks implementation
+omp_messenger({ action: "plan" })                       // Planner analyzes codebase, creates tasks
+omp_messenger({ action: "work", autonomous: true })      // Workers execute tasks in waves until done
+omp_messenger({ action: "review", target: "task-1" })    // Reviewer checks implementation
 ```
 
 ## Features
@@ -89,7 +89,7 @@ pi_messenger({ action: "review", target: "task-1" })    // Reviewer checks imple
 
 `/messenger` opens an interactive overlay with agent presence, activity feed, and chat:
 
-<img width="1198" height="1020" alt="pi-messenger crew overlay" src="https://github.com/user-attachments/assets/d66e5d71-5ed9-4702-9f56-9ca3f0e9c584" />
+<img width="1198" height="1020" alt="omp-messenger crew overlay" src="https://github.com/user-attachments/assets/d66e5d71-5ed9-4702-9f56-9ca3f0e9c584" />
 
 Chat input supports `@Name msg` for DMs and `@all msg` for broadcasts. Text without `@` broadcasts from the Agents tab or DMs the selected agent tab.
 
@@ -110,15 +110,15 @@ Crew logs are per project, under that project's working directory: `.omp/messeng
 
 1. **Plan** — Planner explores the codebase and PRD, drafts tasks with dependencies. A reviewer checks the plan; the planner refines until SHIP or `maxPasses` is reached. History is stored in `planning-progress.md`.
 2. **Work** — Workers implement ready tasks (all dependencies met) in parallel waves. A single `work` call runs one wave. `autonomous: true` runs waves back-to-back until everything is done or blocked. Each completed task gets an automatic reviewer pass — SHIP keeps it done, NEEDS_WORK resets it for retry with feedback, MAJOR_RETHINK blocks it. Controlled by `review.enabled` and `review.maxIterations`.
-3. **Review** — Manual review of a specific task or the plan: `pi_messenger({ action: "review", target: "task-1" })`. Returns SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback.
+3. **Review** — Manual review of a specific task or the plan: `omp_messenger({ action: "review", target: "task-1" })`. Returns SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback.
 
 No special PRD format required — the planner auto-discovers `PRD.md`, `SPEC.md`, `DESIGN.md`, etc. in your project root and `docs/`. Or skip the file entirely:
 
 ```typescript
-pi_messenger({ action: "plan", prompt: "Scan the codebase for bugs" })
+omp_messenger({ action: "plan", prompt: "Scan the codebase for bugs" })
 
 // Plan + auto-start autonomous work when planning completes
-pi_messenger({ action: "plan" })  // auto-starts workers (default)
+omp_messenger({ action: "plan" })  // auto-starts workers (default)
 ```
 
 ### Wave Execution
@@ -182,24 +182,24 @@ Reject the migration task; it needs rollback tests.
 The agent maps those requests to Team actions. If a task needs approval, the agent should ask in plain language and continue after you approve. The tool calls are mainly for agents and power users:
 
 ```typescript
-pi_messenger({ action: "team.setup", name: "migration-squad" })
-pi_messenger({ action: "team.memory.note", type: "decision", message: "Auth API changes require reviewer sign-off." })
-pi_messenger({ action: "team.roles" })
-pi_messenger({ action: "team.status" })
+omp_messenger({ action: "team.setup", name: "migration-squad" })
+omp_messenger({ action: "team.memory.note", type: "decision", message: "Auth API changes require reviewer sign-off." })
+omp_messenger({ action: "team.roles" })
+omp_messenger({ action: "team.status" })
 ```
 
 `team.setup` activates the profile, saves an editable JSON copy if needed, creates a starter charter when the project does not have one, and returns the next planning/status commands.
 
 When Team is active, planner task JSON may include `role` and `riskLabels`. Tasks persist those as `role`, `risk_labels`, and `approval`; existing tasks without those fields still work. Workers receive bounded Team role, charter, memory, and approval context. `work` skips tasks that require approval but are not approved and returns pending approvals under `needsApproval`; rejected tasks are surfaced separately with `task.revise` / `task.revise-tree` guidance.
 
-Team's built-in role names follow the packaged `pi-subagents` vocabulary where possible: `context-builder`, `delegate`, `oracle`, `planner`, `researcher`, `reviewer`, `scout`, and `worker`. Roles resolve from those built-in defaults, the active profile, and optional filesystem metadata from `pi-subagents` markdown files when present. `pi-messenger` only reads those files; it does not require or call the subagent extension, and Crew still uses its own Crew agents for execution.
+Team's built-in role names follow the packaged `pi-subagents` vocabulary where possible: `context-builder`, `delegate`, `oracle`, `planner`, `researcher`, `reviewer`, `scout`, and `worker`. Roles resolve from those built-in defaults, the active profile, and optional filesystem metadata from `pi-subagents` markdown files when present. `omp-messenger` only reads those files; it does not require or call the subagent extension, and Crew still uses its own Crew agents for execution.
 
 Built-in sample profiles are available immediately and are saved as editable JSON the first time you activate them:
 
 ```typescript
-pi_messenger({ action: "team.setup", name: "migration-squad" }) // migrations with approval gates
-pi_messenger({ action: "team.setup", name: "review-squad" })    // scout/reviewer/worker cleanup flow
-pi_messenger({ action: "team.setup", name: "research-squad" })  // research-first planning flow
+omp_messenger({ action: "team.setup", name: "migration-squad" }) // migrations with approval gates
+omp_messenger({ action: "team.setup", name: "review-squad" })    // scout/reviewer/worker cleanup flow
+omp_messenger({ action: "team.setup", name: "research-squad" })  // research-first planning flow
 ```
 
 A saved profile looks like this:

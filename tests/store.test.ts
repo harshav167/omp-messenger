@@ -13,7 +13,7 @@ const meshes = new Set<Mesh>();
 const initialCwd = process.cwd();
 
 function createTempRoot(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-store-test-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-store-test-"));
   roots.add(root);
   return root;
 }

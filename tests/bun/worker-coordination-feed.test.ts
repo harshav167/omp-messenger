@@ -79,7 +79,7 @@ let previousHome: string | undefined;
 
 beforeEach(() => {
   previousHome = process.env.HOME;
-  homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-home-"));
+  homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-home-"));
   process.env.HOME = homeDir;
   dirs = createTempCrewDirs();
 });

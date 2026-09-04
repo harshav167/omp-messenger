@@ -75,8 +75,8 @@ Profile: ${created ? "created editable JSON" : "activated"}
 Charter: ${charterStatus}
 
 Next:
-- Plan with this Team context: \`pi_messenger({ action: "plan", prompt: "..." })\`
-- Check Team status: \`pi_messenger({ action: "team.status" })\`
+- Plan with this Team context: \`omp_messenger({ action: "plan", prompt: "..." })\`
+- Check Team status: \`omp_messenger({ action: "team.status" })\`
 - Approve gated work with \`task.approve\`; reject with \`task.reject\` and feedback.`;
 
   return result(text, {
@@ -214,9 +214,9 @@ function status(cwd: string) {
     ? `\nRejected tasks:\n${rejected.map(t => `- ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}`).join("\n")}`
     : "\nRejected tasks: none";
   const nextAction = rejected.length > 0
-    ? `Revise rejected work with: pi_messenger({ action: "task.revise", id: "${rejected[0].id}", prompt: "Address approval feedback" })`
+    ? `Revise rejected work with: omp_messenger({ action: "task.revise", id: "${rejected[0].id}", prompt: "Address approval feedback" })`
     : needsLead.length > 0
-      ? `Approve with: pi_messenger({ action: "task.approve", id: "${needsLead[0].id}" })`
+      ? `Approve with: omp_messenger({ action: "task.approve", id: "${needsLead[0].id}" })`
       : team ? "Next: plan or run Crew work with this Team context." : "Next: activate a sample profile, e.g. migration-squad, review-squad, or research-squad.";
   const text = `Team: ${team?.name ?? "(none)"}\nProfile: ${profile?.name ?? team?.profile ?? "(none)"}\nCharter: ${charter ? "present" : "missing"}\nActive roles: ${activeRoleNames.length > 0 ? activeRoleNames.join(", ") : "none"}\nMemory: decisions ${counts.decision}, interfaces ${counts.interface}, risks ${counts.risk}, handoffs ${counts.handoff}${approvalText}${rejectedText}\n${nextAction}`;
   return result(text, {

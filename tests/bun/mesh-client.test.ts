@@ -34,7 +34,7 @@ describe("mesh client", () => {
   let port: number;
 
   function makeClient(agentName = "Self", explicitName = false, token = "t"): ClientFixture {
-    const root = mkdtempSync(join(tmpdir(), "pi-messenger-client-"));
+    const root = mkdtempSync(join(tmpdir(), "omp-messenger-client-"));
     roots.push(root);
     const fixture = createTestMesh(root, { agentName });
     fixture.state.explicitName = explicitName;

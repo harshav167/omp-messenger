@@ -248,9 +248,9 @@ describe("buildCoordinationContext", () => {
     expect(claimableSection).not.toContain("task-3: Needs approval");
     expect(claimableSection).not.toContain("task-5: Rejected");
     expect(result).toMatch(/Ready Tasks Needing Approval[\s\S]*task-3: Needs approval/);
-    expect(result).toContain('pi_messenger({ action: "task.approve", id: "task-3" })');
+    expect(result).toContain('omp_messenger({ action: "task.approve", id: "task-3" })');
     expect(result).toMatch(/Rejected Tasks Needing Revision[\s\S]*task-5: Rejected/);
-    expect(result).toContain('pi_messenger({ action: "task.revise", id: "task-5", prompt: "Address approval feedback" })');
+    expect(result).toContain('omp_messenger({ action: "task.revise", id: "task-5", prompt: "Address approval feedback" })');
   });
 
 });

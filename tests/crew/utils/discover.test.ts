@@ -25,7 +25,7 @@ describe("crew/utils/discover", () => {
     writeAgent(path.join(extensionAgentsDir, "crew-worker.md"), `---
 name: crew-worker
 description: Worker implementation agent
-tools: read, bash, pi_messenger
+tools: read, bash, omp_messenger
 model: gpt-4.1-mini
 crewRole: worker
 ---
@@ -37,7 +37,7 @@ You are a worker.
     expect(agents[0].name).toBe("crew-worker");
     expect(agents[0].source).toBe("extension");
     expect(agents[0].model).toBe("gpt-4.1-mini");
-    expect(agents[0].tools).toEqual(["read", "bash", "pi_messenger"]);
+    expect(agents[0].tools).toEqual(["read", "bash", "omp_messenger"]);
   });
 
   it("project agents override extension agents with the same name", () => {

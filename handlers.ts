@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - Tool and Command Handlers
+ * omp-messenger - Tool and Command Handlers
  */
 
 import { existsSync } from "node:fs";
@@ -66,7 +66,7 @@ function result(text: string, details: Record<string, unknown>) {
 
 export function notRegisteredError() {
   return result(
-    "Not registered. Use pi_messenger({ action: \"join\" }) to join the agent mesh first.",
+    "Not registered. Use omp_messenger({ action: \"join\" }) to join the agent mesh first.",
     { mode: "error", error: "not_registered" }
   );
 }
@@ -136,7 +136,7 @@ export async function executeJoin(
 
   if (agents.length > 0) {
     text += `\n\nActive peers: ${agents.map(a => a.name).join(", ")}`;
-    text += `\n\nUse pi_messenger({ action: "list" }) for details, or pi_messenger({ action: "send", to: "Name", message: "..." }) to send.`;
+    text += `\n\nUse omp_messenger({ action: "list" }) for details, or omp_messenger({ action: "send", to: "Name", message: "..." }) to send.`;
   }
 
   if (specWarning) {
@@ -167,14 +167,14 @@ export async function executeLeave(
 
   if (isPlanningForCwd(cwd)) {
     return result(
-      "Cannot leave while Crew planning is active for this project. Cancel it first with pi_messenger({ action: \"plan.cancel\" }).",
+      "Cannot leave while Crew planning is active for this project. Cancel it first with omp_messenger({ action: \"plan.cancel\" }).",
       { mode: "leave", error: "planning_active" }
     );
   }
 
   if (isAutonomousForCwd(cwd)) {
     return result(
-      "Cannot leave while autonomous Crew work is active for this project. Stop it first with pi_messenger({ action: \"work.stop\" }).",
+      "Cannot leave while autonomous Crew work is active for this project. Stop it first with omp_messenger({ action: \"work.stop\" }).",
       { mode: "leave", error: "autonomous_active" }
     );
   }
@@ -235,7 +235,7 @@ export async function executeLeave(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return result(
-      `Could not leave pi-messenger: ${message}`,
+      `Could not leave omp-messenger: ${message}`,
       { mode: "leave", error: "unregister_failed", message }
     );
   }
@@ -252,7 +252,7 @@ export async function executeLeave(
     : "";
 
   return result(
-    `Left pi-messenger.${releasedReservations.length > 0 ? `\nReleased reservations: ${releasedReservations.join(", ")}` : ""}${claimText}`,
+    `Left omp-messenger.${releasedReservations.length > 0 ? `\nReleased reservations: ${releasedReservations.join(", ")}` : ""}${claimText}`,
     {
       mode: "leave",
       releasedReservations,
@@ -292,7 +292,7 @@ export function executeStatus(state: MessengerState, mesh: Mesh, cwd: string) {
     const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
-  text += `\nUse pi_messenger({ action: "list" }) for details, pi_messenger({ action: "task.list" }) for tasks.`;
+  text += `\nUse omp_messenger({ action: "list" }) for details, omp_messenger({ action: "task.list" }) for tasks.`;
 
   return result(text, {
     mode: "status",
@@ -1046,7 +1046,7 @@ export function executeAutoRegisterPath(
   if (action === "list") {
     if (paths.length === 0) {
       return result(
-        "No auto-register paths configured.\n\nUse pi_messenger({ action: \"autoRegisterPath\", autoRegisterPath: \"add\" }) to add the current folder.",
+        "No auto-register paths configured.\n\nUse omp_messenger({ action: \"autoRegisterPath\", autoRegisterPath: \"add\" }) to add the current folder.",
         { mode: "autoRegisterPath", action: "list", paths: [], currentFolder: cwd, isCurrentInList: false }
       );
     }

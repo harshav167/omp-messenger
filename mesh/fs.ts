@@ -1,5 +1,5 @@
 /**
- * Pi Messenger - File Storage Operations
+ * omp-messenger - File Storage Operations
  */
 
 import { randomUUID } from "node:crypto";

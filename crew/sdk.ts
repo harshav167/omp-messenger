@@ -18,7 +18,7 @@ export function setSdk(api: Sdk): void {
 
 export function getSdk(): Sdk {
   if (!sdk) {
-    throw new Error("pi-messenger crew requires the oh-my-pi runtime (SDK not injected)");
+    throw new Error("omp-messenger crew requires the oh-my-pi runtime (SDK not injected)");
   }
   return sdk;
 }

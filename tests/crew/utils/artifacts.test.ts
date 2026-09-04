@@ -7,7 +7,7 @@ import { ensureArtifactsDir } from "../../../crew/utils/artifacts.ts";
 const roots = new Set<string>();
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-artifacts-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-messenger-artifacts-"));
   roots.add(dir);
   return dir;
 }

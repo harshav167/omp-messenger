@@ -136,7 +136,7 @@ ${truncatedSpec}
   return prompt;
 }
 
-const WORKER_HIDDEN_SKILLS = new Set(["pi-messenger-crew"]);
+const WORKER_HIDDEN_SKILLS = new Set(["omp-messenger-crew"]);
 
 function buildTeamSection(task: Task, teamContext: TeamPromptContext | undefined): string | null {
   if (!teamContext) return null;

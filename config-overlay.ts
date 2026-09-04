@@ -1,19 +1,50 @@
 /**
- * Pi Messenger - Config Overlay Component
+ * omp-messenger - Config Overlay Component
+ *
+ * Edits the user-level settings that decide how this machine joins a mesh
+ * (server URL, token, channel) plus the auto-register folder list. Saving mesh
+ * settings hands them to the host, which rebuilds the mesh and rejoins.
  */
 
 import type { Component, Focusable, TUI } from "@oh-my-pi/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { Theme } from "@oh-my-pi/pi-coding-agent";
-import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.ts";
+import {
+  getAutoRegisterPaths,
+  getStoredMeshSettings,
+  matchesAutoRegisterPath,
+  saveAutoRegisterPaths,
+  saveMeshSettings,
+  type StoredMeshSettings,
+} from "./config.ts";
+import { isValidChannelName } from "./lib.ts";
+
+type MeshField = "url" | "token" | "channel";
+const MESH_FIELDS: MeshField[] = ["url", "token", "channel"];
+const FIELD_LABELS: Record<MeshField, string> = { url: "Server URL", token: "Token", channel: "Channel" };
+const FIELD_HINTS: Record<MeshField, string> = {
+  url: "ws://host:8765 — empty = local filesystem mesh",
+  token: "shared secret from the server's OMP_MESSENGER_MESH_TOKEN",
+  channel: "lowercase letters, digits, - and _",
+};
+
+export interface ConfigOverlayCallbacks {
+  /** Invoked after mesh settings were written; the host reconnects. */
+  onMeshSettingsSaved?: (settings: StoredMeshSettings) => void;
+}
 
 export class MessengerConfigOverlay implements Component, Focusable {
-  readonly width = 60;
+  readonly width = 72;
   focused = false;
 
+  private mesh: StoredMeshSettings;
+  private savedMesh: StoredMeshSettings;
   private paths: string[];
-  private selectedIndex = 0;
-  private dirty = false;
+  /** 0..2 = mesh fields, 3.. = auto-register paths. */
+  private cursor = 0;
+  private editing: MeshField | null = null;
+  private editBuffer = "";
+  private pathsDirty = false;
   private statusMessage = "";
 
   constructor(
@@ -21,16 +52,59 @@ export class MessengerConfigOverlay implements Component, Focusable {
     private theme: Theme,
     private done: () => void,
     private cwd: string,
+    private callbacks: ConfigOverlayCallbacks = {},
   ) {
+    this.mesh = getStoredMeshSettings();
+    this.savedMesh = { ...this.mesh };
     this.paths = getAutoRegisterPaths();
   }
 
+  private get meshDirty(): boolean {
+    return this.mesh.url !== this.savedMesh.url
+      || this.mesh.token !== this.savedMesh.token
+      || this.mesh.channel !== this.savedMesh.channel;
+  }
+
+  private get rowCount(): number {
+    return MESH_FIELDS.length + this.paths.length;
+  }
+
   handleInput(data: string): void {
+    if (this.editing) {
+      this.handleEditInput(data);
+      return;
+    }
+
     if (matchesKey(data, "escape") || matchesKey(data, "q")) {
-      if (this.dirty) {
-        saveAutoRegisterPaths(this.paths);
-      }
+      this.persist();
       this.done();
+      return;
+    }
+
+    if (matchesKey(data, "up")) {
+      this.cursor = Math.max(0, this.cursor - 1);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      this.cursor = Math.min(Math.max(0, this.rowCount - 1), this.cursor + 1);
+      this.tui.requestRender();
+      return;
+    }
+
+    if (matchesKey(data, "return") || matchesKey(data, "e")) {
+      if (this.cursor < MESH_FIELDS.length) {
+        this.editing = MESH_FIELDS[this.cursor];
+        this.editBuffer = this.mesh[this.editing];
+        this.statusMessage = "";
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    if (matchesKey(data, "s")) {
+      this.persist();
+      this.tui.requestRender();
       return;
     }
 
@@ -41,26 +115,77 @@ export class MessengerConfigOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "d") || matchesKey(data, "backspace")) {
-      this.deleteSelected();
+      if (this.cursor >= MESH_FIELDS.length) {
+        this.deleteSelectedPath();
+      } else {
+        this.mesh[MESH_FIELDS[this.cursor]] = MESH_FIELDS[this.cursor] === "channel" ? "main" : "";
+        this.statusMessage = `Cleared ${FIELD_LABELS[MESH_FIELDS[this.cursor]]}`;
+      }
       this.tui.requestRender();
       return;
     }
+  }
 
-    if (matchesKey(data, "up")) {
-      if (this.paths.length > 0) {
-        this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-        this.tui.requestRender();
-      }
+  private handleEditInput(data: string): void {
+    const field = this.editing!;
+    if (matchesKey(data, "escape")) {
+      this.editing = null;
+      this.statusMessage = "Edit cancelled";
+      this.tui.requestRender();
       return;
     }
-
-    if (matchesKey(data, "down")) {
-      if (this.paths.length > 0) {
-        this.selectedIndex = Math.min(this.paths.length - 1, this.selectedIndex + 1);
+    if (matchesKey(data, "return")) {
+      const value = this.editBuffer.trim();
+      if (field === "channel" && value && !isValidChannelName(value)) {
+        this.statusMessage = "Invalid channel: use a-z, 0-9, - and _ (max 48)";
         this.tui.requestRender();
+        return;
       }
+      if (field === "url" && value && !/^wss?:\/\//.test(value)) {
+        this.statusMessage = "URL must start with ws:// or wss://";
+        this.tui.requestRender();
+        return;
+      }
+      this.mesh[field] = field === "channel" && !value ? "main" : value;
+      this.editing = null;
+      this.statusMessage = `${FIELD_LABELS[field]} updated — s to save`;
+      this.tui.requestRender();
       return;
     }
+    if (matchesKey(data, "backspace")) {
+      this.editBuffer = this.editBuffer.slice(0, -1);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "ctrl+u")) {
+      this.editBuffer = "";
+      this.tui.requestRender();
+      return;
+    }
+    // Printable input only (ignore other control sequences)
+    if (data.length >= 1 && !/[\x00-\x1f\x7f]/.test(data) && !data.startsWith("\x1b")) {
+      this.editBuffer += data;
+      this.tui.requestRender();
+    }
+  }
+
+  /** Write whatever changed; mesh changes are handed to the host for reconnect. */
+  private persist(): void {
+    let saved: string[] = [];
+    if (this.pathsDirty) {
+      saveAutoRegisterPaths(this.paths);
+      this.pathsDirty = false;
+      saved.push("paths");
+    }
+    if (this.meshDirty) {
+      saveMeshSettings(this.mesh);
+      this.savedMesh = { ...this.mesh };
+      saved.push("mesh");
+      this.callbacks.onMeshSettingsSaved?.({ ...this.mesh });
+    }
+    this.statusMessage = saved.length > 0
+      ? `Saved ${saved.join(" + ")}${saved.includes("mesh") ? " — reconnecting" : ""}`
+      : "Nothing to save";
   }
 
   private addCurrentPath(): void {
@@ -69,19 +194,32 @@ export class MessengerConfigOverlay implements Component, Focusable {
       return;
     }
     this.paths.push(this.cwd);
-    this.selectedIndex = this.paths.length - 1;
-    this.dirty = true;
+    this.cursor = MESH_FIELDS.length + this.paths.length - 1;
+    this.pathsDirty = true;
     this.statusMessage = "Added current folder";
   }
 
-  private deleteSelected(): void {
-    if (this.paths.length === 0) return;
-    
-    const removed = this.paths[this.selectedIndex];
-    this.paths.splice(this.selectedIndex, 1);
-    this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.paths.length - 1));
-    this.dirty = true;
+  private deleteSelectedPath(): void {
+    const index = this.cursor - MESH_FIELDS.length;
+    if (index < 0 || index >= this.paths.length) return;
+    const removed = this.paths[index];
+    this.paths.splice(index, 1);
+    this.cursor = Math.min(this.cursor, Math.max(0, this.rowCount - 1));
+    this.pathsDirty = true;
     this.statusMessage = `Removed: ${removed.split("/").pop()}`;
+  }
+
+  private fieldDisplay(field: MeshField, innerW: number): string {
+    if (this.editing === field) {
+      const shown = field === "token" ? "•".repeat(this.editBuffer.length) : this.editBuffer;
+      return this.theme.fg("accent", truncateToWidth(shown, innerW - 20) + "▏");
+    }
+    const value = this.mesh[field];
+    if (!value) {
+      return this.theme.fg("dim", field === "url" ? "(local filesystem mesh)" : field === "token" ? "(none)" : "main");
+    }
+    if (field === "token") return this.theme.fg("dim", "•".repeat(Math.min(12, value.length)) + ` (${value.length} chars)`);
+    return truncateToWidth(value, innerW - 20);
   }
 
   render(_width: number): string[] {
@@ -94,8 +232,8 @@ export class MessengerConfigOverlay implements Component, Focusable {
     const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
     const row = (content: string) => border("│") + pad(" " + content, innerW) + border("│");
     const emptyRow = () => border("│") + " ".repeat(innerW) + border("│");
+    const divider = () => border("├" + "─".repeat(innerW) + "┤");
 
-    // Top border with title
     const titleText = " Messenger Config ";
     const borderLen = innerW - titleText.length;
     const leftBorder = Math.floor(borderLen / 2);
@@ -103,61 +241,54 @@ export class MessengerConfigOverlay implements Component, Focusable {
     lines.push(border("╭" + "─".repeat(leftBorder)) + this.theme.fg("accent", titleText) + border("─".repeat(rightBorder) + "╮"));
 
     lines.push(emptyRow());
+    const mode = this.mesh.url ? `server ${this.mesh.url}` : "local filesystem";
+    lines.push(row(`${this.theme.fg("dim", "Mesh:")} ${mode}${this.meshDirty ? this.theme.fg("warning", "  (unsaved)") : ""}`));
+    lines.push(emptyRow());
 
-    // Current folder status
+    for (let i = 0; i < MESH_FIELDS.length; i++) {
+      const field = MESH_FIELDS[i];
+      const selected = this.cursor === i;
+      const marker = selected ? this.theme.fg("accent", "▸") : " ";
+      const label = pad(FIELD_LABELS[field], 11);
+      lines.push(row(`${marker} ${selected ? this.theme.fg("accent", label) : label} ${this.fieldDisplay(field, innerW)}`));
+      if (selected) {
+        lines.push(row(this.theme.fg("dim", `    ${FIELD_HINTS[field]}`)));
+      }
+    }
+
+    lines.push(emptyRow());
+    lines.push(divider());
+    lines.push(emptyRow());
+
     const cwdDisplay = truncateToWidth(this.cwd, Math.max(10, innerW - 20));
     lines.push(row(`Current folder: ${cwdDisplay}`));
-    const statusColor = isCurrentInList ? "accent" : "dim";
-    lines.push(row(`Auto-register: ${this.theme.fg(statusColor, isCurrentInList ? "YES" : "NO")}`));
-
-    lines.push(emptyRow());
-
-    // Divider
-    lines.push(border("├" + "─".repeat(innerW) + "┤"));
-
+    lines.push(row(`Auto-register: ${this.theme.fg(isCurrentInList ? "accent" : "dim", isCurrentInList ? "YES" : "NO")}`));
     lines.push(emptyRow());
     lines.push(row(this.theme.fg("dim", "Auto-register paths:")));
-    lines.push(emptyRow());
 
     if (this.paths.length === 0) {
       lines.push(row(this.theme.fg("dim", "  (none configured)")));
     } else {
       for (let i = 0; i < this.paths.length; i++) {
         const path = this.paths[i];
-        const isSelected = i === this.selectedIndex;
-        const isCurrent = path === this.cwd;
-        
-        const marker = isSelected ? this.theme.fg("accent", "▸") : " ";
-        const suffix = isCurrent ? this.theme.fg("dim", " (current)") : "";
+        const selected = this.cursor === MESH_FIELDS.length + i;
+        const marker = selected ? this.theme.fg("accent", "▸") : " ";
+        const suffix = path === this.cwd ? this.theme.fg("dim", " (current)") : "";
         const pathDisplay = truncateToWidth(path, Math.max(10, innerW - 15));
-        
-        if (isSelected) {
-          lines.push(row(`${marker} ${this.theme.fg("accent", pathDisplay)}${suffix}`));
-        } else {
-          lines.push(row(`${marker} ${pathDisplay}${suffix}`));
-        }
+        lines.push(row(`${marker} ${selected ? this.theme.fg("accent", pathDisplay) : pathDisplay}${suffix}`));
       }
     }
 
     lines.push(emptyRow());
-
-    // Divider
-    lines.push(border("├" + "─".repeat(innerW) + "┤"));
-
+    lines.push(divider());
     lines.push(emptyRow());
 
-    // Status message
-    if (this.statusMessage) {
-      lines.push(row(this.theme.fg("accent", this.statusMessage)));
-    } else {
-      lines.push(emptyRow());
-    }
+    lines.push(this.statusMessage ? row(this.theme.fg("accent", this.statusMessage)) : emptyRow());
 
-    // Help
-    const help = "a add  d delete  ↑↓ navigate  Esc save & close";
+    const help = this.editing
+      ? "type  Enter apply  Esc cancel  ^U clear"
+      : "Enter edit  d clear  a add dir  s save  ↑↓  Esc close";
     lines.push(row(this.theme.fg("dim", help)));
-
-    // Bottom border
     lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
     return lines;
