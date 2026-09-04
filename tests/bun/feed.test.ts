@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { formatFeedLine, isCrewEvent, logFeedEvent, pruneFeed, readFeedEvents } from "../feed.ts";
-import { createTempCrewDirs } from "./helpers/temp-dirs.ts";
+import { formatFeedLine, isCrewEvent, logFeedEvent, pruneFeed, readFeedEvents } from "../../feed.ts";
+import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 
 describe("feed", () => {
   let cwd: string;

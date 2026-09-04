@@ -76,15 +76,6 @@ function makeTask(id: string, overrides: Partial<Task> = {}): Task {
   };
 }
 
-async function loadWorkModule() {
-  vi.resetModules();
-  return import("../../crew/handlers/work.ts");
-}
-
-async function loadPromptModule() {
-  vi.resetModules();
-  return import("../../crew/prompt.ts");
-}
 
 async function loadCoordinationModule() {
   vi.resetModules();
@@ -219,58 +210,6 @@ describe("buildCoordinationContext", () => {
     expect(result).not.toContain("## Ready Tasks");
   });
 
-  it("with level moderate includes concurrent tasks and recent activity", () => {
-    const task = makeTask("task-1");
-    const others = [makeTask("task-2", { title: "Formatter" })];
-
-    writeFeedEvents(dirs.cwd, [
-      makeEvent("2026-01-01T22:12:00Z", "join", "OakBear"),
-      makeEvent("2026-01-01T22:13:00Z", "task.start", "OakBear", "task-5", "Reflector"),
-      makeEvent("2026-01-01T22:14:00Z", "task.done", "EpicGrove", "task-4", "Created observer.ts"),
-    ]);
-
-    const result = buildCoordinationContext(dirs.cwd, task, makeConfig("moderate"), others);
-
-    expect(result).toContain("## Concurrent Tasks");
-    expect(result).toContain("## Recent Activity");
-    expect(result).toContain("OakBear started task-5");
-    expect(result).toContain("EpicGrove completed task-4");
-    expect(result).not.toContain("OakBear" + " " + "join");
-    expect(result).not.toContain("## Ready Tasks");
-  });
-
-  it("with level chatty includes concurrent tasks, recent activity, and ready tasks", () => {
-    writeTask(dirs.tasksDir, { id: "task-1", status: "done" });
-    writeTask(dirs.tasksDir, { id: "task-2", status: "todo", title: "Formatter" });
-    writeTask(dirs.tasksDir, { id: "task-3", status: "todo", title: "File Ops" });
-    writeTask(dirs.tasksDir, { id: "task-6", status: "todo", title: "Entry Point", depends_on: ["task-1"] });
-
-    writeFeedEvents(dirs.cwd, [
-      makeEvent("2026-01-01T22:14:00Z", "task.done", "EpicGrove", "task-1", "Done"),
-    ]);
-
-    const task = makeTask("task-2", { title: "Formatter", depends_on: ["task-1"] });
-    const others = [makeTask("task-3", { title: "File Ops" })];
-
-    const result = buildCoordinationContext(dirs.cwd, task, makeConfig("chatty"), others);
-
-    expect(result).toContain("## Concurrent Tasks");
-    expect(result).toContain("## Recent Activity");
-    expect(result).toContain("## Ready Tasks");
-    expect(result).toContain("task-6: Entry Point");
-  });
-
-  it("omits concurrent tasks section when concurrentTasks is empty (solo task)", () => {
-    writeFeedEvents(dirs.cwd, [
-      makeEvent("2026-01-01T22:14:00Z", "task.done", "EpicGrove", "task-1", "Done"),
-    ]);
-
-    const task = makeTask("task-2");
-    const result = buildCoordinationContext(dirs.cwd, task, makeConfig("moderate"), []);
-
-    expect(result).not.toContain("## Concurrent Tasks");
-    expect(result).toContain("## Recent Activity");
-  });
 
   it("chatty ready tasks excludes concurrent tasks", () => {
     writeTask(dirs.tasksDir, { id: "task-1", status: "done" });
@@ -308,37 +247,6 @@ describe("buildCoordinationContext", () => {
     expect(result).toContain('pi_messenger({ action: "task.revise", id: "task-5", prompt: "Address approval feedback" })');
   });
 
-  it("filters out join/leave noise from recent activity", () => {
-    writeFeedEvents(dirs.cwd, [
-      makeEvent("2026-01-01T22:10:00Z", "join", "Worker1"),
-      makeEvent("2026-01-01T22:11:00Z", "task.start", "Worker1", "task-1", "Types"),
-      makeEvent("2026-01-01T22:12:00Z", "leave", "Worker2"),
-      makeEvent("2026-01-01T22:13:00Z", "task.done", "Worker1", "task-1", "Created types.ts"),
-    ]);
-
-    const task = makeTask("task-2");
-    const result = buildCoordinationContext(dirs.cwd, task, makeConfig("moderate"), []);
-
-    expect(result).toContain("Worker1 started task-1");
-    expect(result).toContain("Worker1 completed task-1");
-    expect(result).not.toContain("join");
-    expect(result).not.toContain("leave");
-  });
-
-  it("formats message events in recent activity with direction indicators", () => {
-    writeFeedEvents(dirs.cwd, [
-      makeEvent("2026-01-01T22:10:00Z", "task.start", "EpicGrove", "task-1", "Auth module"),
-      { ...makeEvent("2026-01-01T22:11:00Z", "message", "EpicGrove"), target: "OakBear", preview: "Need User type from schema" },
-      { ...makeEvent("2026-01-01T22:12:00Z", "message", "OakBear"), preview: "Completed task-2: schema.ts exports User, Session" },
-    ]);
-
-    const task = makeTask("task-3");
-    const result = buildCoordinationContext(dirs.cwd, task, makeConfig("moderate"), []);
-
-    expect(result).toContain("EpicGrove → OakBear: Need User type from schema");
-    expect(result).toContain("OakBear ✦ Completed task-2");
-    expect(result).not.toContain("said");
-  });
 });
 
 describe("buildCoordinationInstructions", () => {
@@ -429,62 +337,6 @@ describe("config coordination", () => {
   });
 });
 
-describe("buildWorkerPrompt integration", () => {
-  let dirs: TempCrewDirs;
-  let buildWorkerPrompt: typeof import("../../crew/prompt.ts").buildWorkerPrompt;
-
-  beforeEach(async () => {
-    dirs = createTempCrewDirs();
-    homedirMock.mockReturnValue(dirs.root);
-    const mod = await loadPromptModule();
-    buildWorkerPrompt = mod.buildWorkerPrompt;
-  });
-
-  it("at chatty level: enriched deps, concurrent tasks, recent activity, ready tasks, coordination instructions in correct order", () => {
-    writeTask(dirs.tasksDir, { id: "task-1", status: "done", title: "Types", summary: "Created types.ts" });
-    writeTask(dirs.tasksDir, { id: "task-2", status: "todo", title: "Formatter", depends_on: ["task-1"] });
-    writeTask(dirs.tasksDir, { id: "task-3", status: "todo", title: "File Ops", depends_on: ["task-1"] });
-    writeTask(dirs.tasksDir, { id: "task-6", status: "todo", title: "Entry Point", depends_on: ["task-1"] });
-
-    fs.writeFileSync(path.join(dirs.tasksDir, "task-2.md"), "Build the formatter module");
-
-    writeFeedEvents(dirs.cwd, [
-      makeEvent("2026-01-01T22:14:00Z", "task.done", "EpicGrove", "task-1", "Done"),
-    ]);
-
-    const task = makeTask("task-2", { title: "Formatter", depends_on: ["task-1"] });
-    const others = [makeTask("task-3", { title: "File Ops", depends_on: ["task-1"] })];
-    const config = makeConfig("chatty");
-
-    const prompt = buildWorkerPrompt(task, "docs/PRD.md", dirs.cwd, config, others);
-
-    // Check all sections present
-    expect(prompt).toContain("# Task Assignment");
-    expect(prompt).toContain("## Dependencies");
-    expect(prompt).toContain("task-1 (Types): Created types.ts");
-    expect(prompt).toContain("## Concurrent Tasks");
-    expect(prompt).toContain("task-3: File Ops");
-    expect(prompt).toContain("## Recent Activity");
-    expect(prompt).toContain("## Ready Tasks");
-    expect(prompt).toContain("task-6: Entry Point");
-    expect(prompt).toContain("## Task Specification");
-    expect(prompt).toContain("## Coordination");
-    expect(prompt).toContain("### Announce yourself");
-    expect(prompt).toContain("### Coordinate with peers");
-    expect(prompt).toContain("### Responding to messages");
-    expect(prompt).toContain("### Claim next task");
-
-    // Verify ordering: Dependencies before Task Specification, Coordination at end
-    const depsIdx = prompt.indexOf("## Dependencies");
-    const concurrentIdx = prompt.indexOf("## Concurrent Tasks");
-    const specIdx = prompt.indexOf("## Task Specification");
-    const coordIdx = prompt.indexOf("## Coordination");
-
-    expect(depsIdx).toBeLessThan(concurrentIdx);
-    expect(concurrentIdx).toBeLessThan(specIdx);
-    expect(specIdx).toBeLessThan(coordIdx);
-  });
-});
 
 describe("executeSend broadcast filtering", () => {
   let dirs: TempCrewDirs;

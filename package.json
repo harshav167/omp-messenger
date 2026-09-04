@@ -37,7 +37,9 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run && bun test tests/bun",
+    "test:node": "vitest run",
+    "test:bun": "bun test tests/bun",
     "test:watch": "vitest"
   },
   "peerDependencies": {
@@ -48,6 +50,7 @@
     "typebox": "*"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.0",
     "vitest": "^2.1.8"
   },
   "omp": {

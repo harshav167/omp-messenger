@@ -8,7 +8,8 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": ["bun"]
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "mesh/**/*.ts", "crew/**/*.ts"]
 }
