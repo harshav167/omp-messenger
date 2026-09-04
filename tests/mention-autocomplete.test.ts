@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@earendil-works/pi-tui", () => ({
+vi.mock("@oh-my-pi/pi-tui", () => ({
   matchesKey: (data: string, key: string) => {
     if (key === "escape") return data === "\x1b";
     if (key === "enter") return data === "\r";
@@ -15,7 +15,7 @@ vi.mock("@earendil-works/pi-tui", () => ({
 
 import { createCrewViewState, handleMessageInput, type CrewViewState } from "../overlay-actions.ts";
 import type { MessengerState, Dirs } from "../lib.ts";
-import type { TUI } from "@earendil-works/pi-tui";
+import type { TUI } from "@oh-my-pi/pi-tui";
 
 vi.mock("../store.ts", () => ({
   getActiveAgents: () => [

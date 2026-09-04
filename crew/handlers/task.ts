@@ -5,7 +5,7 @@
  * Simplified: tasks belong to the plan, not an epic
  */
 
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { MessengerState } from "../../lib.ts";
 import type { CrewParams, Task, TaskEvidence } from "../types.ts";
 import { result } from "../utils/result.ts";

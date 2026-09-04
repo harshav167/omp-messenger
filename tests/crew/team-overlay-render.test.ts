@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@oh-my-pi/pi-tui", () => ({
+  truncateToWidth: (value: string) => value,
+  visibleWidth: (value: string) => value.length,
+}));
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 import * as store from "../../crew/store.ts";
 import * as teamStore from "../../crew/team/store.ts";

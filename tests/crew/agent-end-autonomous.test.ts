@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { autonomousState, startAutonomous } from "../../crew/state.ts";
 import { createTempCrewDirs } from "../helpers/temp-dirs.ts";
 
-vi.mock("@earendil-works/pi-tui", () => ({
+vi.mock("@oh-my-pi/pi-tui", () => ({
   matchesKey: () => false,
   truncateToWidth: (value: string) => value,
   visibleWidth: (value: string) => value.length,

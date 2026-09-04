@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@earendil-works/pi-tui", () => ({
+vi.mock("@oh-my-pi/pi-tui", () => ({
   matchesKey: () => false,
   truncateToWidth: (value: string) => value,
   visibleWidth: (value: string) => value.length,
@@ -137,6 +137,65 @@ describe("status heartbeat", () => {
     vi.advanceTimersByTime(15_000);
 
     expect(freshCtxReads).toBeGreaterThan(0);
+  });
+
+  it("wakes the configured coordinator once when a peer becomes stuck", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-cwd-"));
+    tempCwds.push(cwd);
+    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, ".pi", "pi-messenger.json"),
+      JSON.stringify({
+        autoRegister: true,
+        stuckNotify: true,
+        stuckThreshold: 60,
+        stuckWakeAgent: "project-manager",
+      })
+    );
+    vi.stubEnv("PI_AGENT_NAME", "project-manager");
+
+    const base = process.env.PI_MESSENGER_DIR;
+    expect(base).toBeTruthy();
+    const registry = path.join(base ?? "", "registry");
+    fs.mkdirSync(registry, { recursive: true });
+    fs.writeFileSync(
+      path.join(registry, "s1-data.json"),
+      JSON.stringify({
+        name: "s1-data",
+        pid: process.pid,
+        cwd,
+        model: "test-model",
+        startedAt: new Date(Date.now() - 120_000).toISOString(),
+        isHuman: false,
+        session: { toolCalls: 1, tokens: 1, filesModified: [] },
+        activity: { lastActivityAt: new Date(Date.now() - 120_000).toISOString() },
+        reservations: ["packages/data"],
+      })
+    );
+
+    const pi = await loadExtension();
+    const sessionStart = pi.handlers.get("session_start")?.[0];
+    expect(sessionStart).toBeTruthy();
+
+    const ctx = createEventContext(cwd, () => true);
+    await sessionStart?.({}, ctx);
+
+    expect(ctx.ui.notify).toHaveBeenCalled();
+
+    const stuckWakeCalls = pi.sendMessage.mock.calls.filter(
+      ([message]) => message.customType === "agent_stuck"
+    );
+    expect(stuckWakeCalls).toHaveLength(1);
+    expect(stuckWakeCalls[0]?.[1]).toMatchObject({
+      deliverAs: "steer",
+      triggerTurn: true,
+    });
+
+    vi.advanceTimersByTime(30_000);
+    const repeatedCalls = pi.sendMessage.mock.calls.filter(
+      ([message]) => message.customType === "agent_stuck"
+    );
+    expect(repeatedCalls).toHaveLength(1);
   });
 
   it("does not swallow non-stale status update errors", async () => {

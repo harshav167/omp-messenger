@@ -25,6 +25,7 @@ export interface MessengerConfig {
   feedRetention: number;
   stuckThreshold: number;
   stuckNotify: boolean;
+  stuckWakeAgent: string | null;
   autoStatus: boolean;
   autoOverlay: boolean;
   autoOverlayPlanning: boolean;
@@ -43,6 +44,7 @@ const DEFAULT_CONFIG: MessengerConfig = {
   feedRetention: 50,
   stuckThreshold: 900,
   stuckNotify: true,
+  stuckWakeAgent: null,
   autoStatus: true,
   autoOverlay: true,
   autoOverlayPlanning: true,
@@ -154,6 +156,10 @@ function buildConfig(projectConfig?: Partial<MessengerConfig> | null): Messenger
     feedRetention: typeof merged.feedRetention === "number" ? merged.feedRetention : DEFAULT_CONFIG.feedRetention,
     stuckThreshold: typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold,
     stuckNotify: merged.stuckNotify !== false,
+    stuckWakeAgent:
+      typeof merged.stuckWakeAgent === "string" && merged.stuckWakeAgent.length > 0
+        ? merged.stuckWakeAgent
+        : null,
     autoStatus: merged.autoStatus !== false,
     autoOverlay: merged.autoOverlay !== false,
     autoOverlayPlanning: merged.autoOverlayPlanning !== false,

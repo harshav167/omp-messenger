@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@earendil-works/pi-tui", () => ({
+vi.mock("@oh-my-pi/pi-tui", () => ({
   matchesKey: () => false,
   truncateToWidth: (value: string) => value,
   visibleWidth: (value: string) => value.length,

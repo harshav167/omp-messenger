@@ -382,6 +382,7 @@ Create `~/.pi/agent/pi-messenger.json`:
   "nameTheme": "default",
   "stuckThreshold": 900,
   "stuckNotify": true,
+  "stuckWakeAgent": null,
   "autoOverlayPlanning": true
 }
 ```
@@ -396,6 +397,7 @@ Create `~/.pi/agent/pi-messenger.json`:
 | `feedRetention` | Max events kept in activity feed | `50` |
 | `stuckThreshold` | Seconds of inactivity before stuck detection | `900` |
 | `stuckNotify` | Show notification when a peer appears stuck | `true` |
+| `stuckWakeAgent` | Agent name that receives a steering turn when a peer first becomes stuck; `null` disables model wakeups | `null` |
 | `autoStatus` | Auto-generate status messages from activity | `true` |
 | `autoOverlay` | Auto-open overlay when autonomous crew work starts | `true` |
 | `autoOverlayPlanning` | Auto-open Crew overlay when planning starts or is restored in-progress | `true` |

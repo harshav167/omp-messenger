@@ -52,4 +52,21 @@ describe("config autoOverlayPlanning", () => {
 
     expect(cfg.autoOverlayPlanning).toBe(false);
   });
+
+  it("defaults stuckWakeAgent to null", async () => {
+    const { loadConfig } = await loadConfigModule();
+    const cfg = loadConfig(dirs.cwd);
+    expect(cfg.stuckWakeAgent).toBeNull();
+  });
+
+  it("applies project stuckWakeAgent", async () => {
+    writeJson(path.join(dirs.cwd, ".pi", "pi-messenger.json"), {
+      stuckWakeAgent: "project-manager",
+    });
+
+    const { loadConfig } = await loadConfigModule();
+    const cfg = loadConfig(dirs.cwd);
+    expect(cfg.stuckWakeAgent).toBe("project-manager");
+  });
+
 });

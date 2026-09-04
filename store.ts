@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
   type AgentRegistration,
   type AgentMailMessage,

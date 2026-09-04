@@ -41,14 +41,22 @@
     "test:watch": "vitest"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@oh-my-pi/pi-ai": "*",
+    "@oh-my-pi/pi-agent-core": "*",
+    "@oh-my-pi/pi-coding-agent": "*",
+    "@oh-my-pi/pi-tui": "*",
     "typebox": "*"
   },
   "devDependencies": {
     "vitest": "^2.1.8"
+  },
+  "omp": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "pi": {
     "extensions": [

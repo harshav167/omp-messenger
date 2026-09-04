@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { truncateToWidth } from "@earendil-works/pi-tui";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@oh-my-pi/pi-tui";
+import type { Theme } from "@oh-my-pi/pi-coding-agent";
 import {
   formatDuration,
   formatRelativeTime,

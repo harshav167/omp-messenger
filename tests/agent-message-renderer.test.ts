@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-vi.mock("@earendil-works/pi-tui", () => ({
+vi.mock("@oh-my-pi/pi-tui", () => ({
   matchesKey: () => false,
   truncateToWidth: (value: string) => value,
   visibleWidth: (value: string) => value.length,

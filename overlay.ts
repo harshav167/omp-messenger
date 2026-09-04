@@ -2,9 +2,9 @@
  * Pi Messenger - Chat Overlay Component
  */
 
-import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Component, Focusable, TUI } from "@oh-my-pi/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import type { Theme } from "@oh-my-pi/pi-coding-agent";
 import {
   extractFolder,
   formatDuration,

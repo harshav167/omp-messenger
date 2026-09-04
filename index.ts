@@ -8,9 +8,10 @@
 import { homedir } from "node:os";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
+import { truncateToWidth } from "@oh-my-pi/pi-tui";
+import type { TSchema as PiSchema } from "@oh-my-pi/pi-ai";
 import { Type, type TSchema } from "typebox";
 
 function StringEnum<T extends readonly string[]>(
@@ -229,6 +230,16 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
           const idleStr = computed.idleFor ?? "unknown";
           const taskInfo = hasTask ? " with task in progress" : " with reservation";
           ctx.ui.notify(`\u26A0\uFE0F ${agent.name} appears stuck (idle ${idleStr}${taskInfo})`, "warning");
+          if (config.stuckWakeAgent === state.agentName) {
+            pi.sendMessage(
+              {
+                customType: "agent_stuck",
+                content: `**Stuck peer detected: ${agent.name}**\n\nThe peer has been idle ${idleStr}${taskInfo}. Inspect the mesh and the peer's Herdr pane, then recover or reassign its work.`,
+                display: true,
+              },
+              { triggerTurn: true, deliverAs: "steer" }
+            );
+          }
         }
       }
     }
@@ -386,6 +397,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pi_messenger",
     label: "Pi Messenger",
+    loadMode: "essential",
     description: `Multi-agent coordination and task orchestration.
 
 Usage (action-based API - preferred):
@@ -433,8 +445,6 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "team.memory.note", type: "decision", message: "..." })
   pi_messenger({ action: "team.roles" })                        → Resolve Team roles (packaged pi-subagents vocabulary + optional metadata)
   pi_messenger({ action: "team.status" })                       → Team summary`,
-    promptSnippet:
-      "Use for multi-agent coordination and Crew workflows: join/status/feed, create plans, run work waves, manage tasks, optional Team roles/profiles, reserve files, and message agents.",
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -487,7 +497,7 @@ Usage (action-based API - preferred):
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, task block, or approval rejection feedback" })),
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
-    }),
+    }) as unknown as PiSchema,
 
     async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
       const params = rawParams as CrewParams;

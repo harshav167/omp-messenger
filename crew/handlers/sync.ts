@@ -5,7 +5,7 @@
  * Works with current plan's tasks.
  */
 
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { CrewParams } from "../types.ts";
 import { result } from "../utils/result.ts";
 import { spawnAgents } from "../agents.ts";

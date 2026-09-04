@@ -167,14 +167,14 @@ export function computeStatus(
   if (elapsed < ACTIVE_MS) {
     return { status: "active" };
   }
+  if ((hasTask || hasReservation) && elapsed >= thresholdMs) {
+    return { status: "stuck", idleFor: formatDuration(elapsed) };
+  }
   if (elapsed < IDLE_MS) {
     return { status: "idle", idleFor: formatDuration(elapsed) };
   }
   if (!hasTask && !hasReservation) {
     return { status: "away", idleFor: formatDuration(elapsed) };
-  }
-  if (elapsed >= thresholdMs) {
-    return { status: "stuck", idleFor: formatDuration(elapsed) };
   }
   return { status: "idle", idleFor: formatDuration(elapsed) };
 }
