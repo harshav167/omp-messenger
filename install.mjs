@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 
 /**
- * pi-messenger installer
+ * omp-messenger installer
  *
  * Copies the npm package contents to ~/.pi/agent/extensions/pi-messenger.
  * No git dependency — the npm package IS the source.
  *
  * Usage:
- *   npx pi-messenger                # Install or update extension
- *   npx pi-messenger --remove       # Remove the extension
- *   npx pi-messenger --crew-install   # Show crew agent info
- *   npx pi-messenger --crew-uninstall # Remove crew agents
+ *   npx omp-messenger                # Install or update extension
+ *   npx omp-messenger --remove       # Remove the extension
+ *   npx omp-messenger --crew-install   # Show crew agent info
+ *   npx omp-messenger --crew-uninstall # Remove crew agents
  */
 
 import * as fs from "node:fs";
@@ -54,14 +54,14 @@ const isHelp = args.includes("--help") || args.includes("-h");
 
 if (isHelp) {
 	console.log(`
-pi-messenger v${VERSION} - Multi-agent coordination for pi
+omp-messenger v${VERSION} - Multi-agent coordination for oh-my-pi
 
 Usage:
-  npx pi-messenger                Install or update extension
-  npx pi-messenger --remove       Remove the extension
-  npx pi-messenger --crew-install   Show crew agent info
-  npx pi-messenger --crew-uninstall Remove crew agents
-  npx pi-messenger --help          Show this help
+  npx omp-messenger                Install or update extension
+  npx omp-messenger --remove       Remove the extension
+  npx omp-messenger --crew-install   Show crew agent info
+  npx omp-messenger --crew-uninstall Remove crew agents
+  npx omp-messenger --help          Show this help
 
 Extension directory: ${EXTENSION_DIR}
 `);
@@ -73,7 +73,7 @@ Extension directory: ${EXTENSION_DIR}
 if (isCrewInstall) {
 	const agentsDir = path.join(EXTENSION_DIR, "crew", "agents");
 	if (!fs.existsSync(agentsDir)) {
-		console.log("Extension not installed. Run: npx pi-messenger");
+		console.log("Extension not installed. Run: npx omp-messenger");
 		process.exit(1);
 	}
 
@@ -145,7 +145,7 @@ if (hasNativePackageInstall()) {
 
 Keep the native install and remove any legacy copy instead:
 
-  npx pi-messenger --remove
+  npx omp-messenger --remove
 
 Do not run the legacy npx installer alongside \`pi install npm:pi-messenger\`; loading both copies registers the \`pi_messenger\` tool twice.`);
 	process.exit(1);

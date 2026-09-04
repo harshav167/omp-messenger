@@ -7,3 +7,4 @@ npm-shrinkwrap.json
 # Local agent scratch
 progress.md
 dist/
+mesh/.env

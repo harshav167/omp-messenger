@@ -1,27 +1,54 @@
 <p>
-  <img src="https://raw.githubusercontent.com/nicobailon/pi-messenger/main/banner.png" alt="pi-messenger" width="1100">
+  <img src="https://raw.githubusercontent.com/nicobailon/pi-messenger/main/banner.png" alt="omp-messenger" width="1100">
 </p>
 
-# Pi Messenger
+# omp-messenger
 
-**What if multiple agents in different terminals sharing a folder could talk to each other like they're in a chat room?** Join, see who's online and what they're doing. Claim tasks, reserve files, send messages. An extension for [Pi coding agent](https://pi.dev/) — install it and go. No daemon, no server, just files.
+**What if multiple agents in different terminals — or on different machines — could talk to each other like they're in a chat room?** Join, see who's online and what they're doing. Claim tasks, reserve files, send messages, run a crew of workers.
 
-[![npm version](https://img.shields.io/npm/v/pi-messenger?style=for-the-badge)](https://www.npmjs.com/package/pi-messenger)
+A fork of [pi-messenger](https://github.com/nicobailon/pi-messenger) rebuilt for [oh-my-pi](https://github.com/can1357/oh-my-pi): a **mesh** transport seam with named **channels** so sessions on different machines coordinate through one mesh server (Docker), crew workers that run as in-process omp subagents, non-interrupting `aside` message delivery, and a `crew.team.enabled` switch. The local filesystem mesh remains the zero-config default — no daemon, no server, just files.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)]()
 
 ## Installation
 
 ```bash
-pi install npm:pi-messenger
+omp plugin install github:harshav167/omp-messenger
 ```
 
-Crew agents ship with the extension (`crew/agents/*.md`) and are discovered automatically. The `pi-messenger-crew` skill is auto-loaded from the extension. Workers can load domain-specific [crew skills](#crew-skills) on demand during task execution.
+Or link a local checkout while developing:
+
+```bash
+omp plugin link .
+```
+
+Crew agents ship with the plugin (`agents/*.md`) and are discovered automatically — by crew and by omp's own `task` tool. The `pi-messenger-crew` skill is auto-loaded from the plugin. Workers can load domain-specific [crew skills](#crew-skills) on demand during task execution.
+
+### Multi-machine mesh
+
+Run the mesh server once on any host (Docker):
+
+```bash
+echo "PI_MESSENGER_MESH_TOKEN=$(openssl rand -hex 24)" > mesh/.env
+docker compose -f mesh/docker-compose.yml --env-file mesh/.env up -d
+curl http://<host>:8765/healthz   # → ok
+```
+
+Point every machine at it in `~/.pi/agent/pi-messenger.json` (or per repo in `.pi/pi-messenger.json`, which is how a project pins its channel):
+
+```json
+{ "mesh": { "url": "ws://<host>:8765", "channel": "main" } }
+```
+
+Put the token in `~/.pi/agent/messenger/mesh.token` (mode 0600), or set `mesh.token` (a literal or `$ENV_NAME`), or export `PI_MESSENGER_MESH_TOKEN`. `PI_MESSENGER_MESH_URL` overrides the file URL. Without `mesh.url` the plugin uses the local filesystem mesh exactly as before.
+
+`pi_messenger({ action: "channels" })` lists channels; `join { channel }` creates or joins one. The status bar shows `⚡<channel>` in mesh mode (`⚡<channel>…` while reconnecting). Set `{ "crew": { "team": { "enabled": false } } }` to switch the Team layer off.
 
 To show available crew agents:
 
 ```bash
-npx pi-messenger --crew-install
+npx omp-messenger --crew-install
 ```
 
 To customize an agent for one project, copy it to `.pi/messenger/crew/agents/` and edit it.
@@ -29,13 +56,13 @@ To customize an agent for one project, copy it to `.pi/messenger/crew/agents/` a
 To remove the extension:
 
 ```bash
-npx pi-messenger --remove
+npx omp-messenger --remove
 ```
 
 To remove stale crew agent copies from the shared legacy directory (`~/.pi/agent/agents/`):
 
 ```bash
-npx pi-messenger --crew-uninstall
+npx omp-messenger --crew-uninstall
 ```
 
 ## Quick Start
@@ -407,13 +434,13 @@ Config priority: project `.pi/pi-messenger.json` > user `~/.pi/agent/pi-messenge
 
 ## How It Works
 
-Pi-messenger is a [pi extension](https://github.com/badlogic/pi-mono) that hooks into the agent lifecycle. It uses `pi.on("tool_call")` and `pi.on("tool_result")` to track activity — every edit, commit, and test run gets logged. `pi.on("session_start")` handles auto-registration, `pi.on("session_shutdown")` cleans up, and `pi.on("agent_end")` drives autonomous crew mode by checking for ready tasks after each agent turn.
+omp-messenger is an [oh-my-pi](https://github.com/can1357/oh-my-pi) plugin whose extension hooks into the agent lifecycle. It uses `pi.on("tool_call")` and `pi.on("tool_result")` to track activity — every edit, commit, and test run gets logged. `pi.on("session_start")` handles auto-registration, `pi.on("session_shutdown")` cleans up, and `pi.on("agent_end")` drives autonomous crew mode by checking for ready tasks after each agent turn.
 
-Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerTurn: true` and `deliverAs: "steer"`, which injects the message as a steering prompt that resumes the agent. File reservations are enforced by returning `{ block: true }` from a `tool_call` hook on write/edit operations. The `/messenger` overlay uses `ctx.ui.custom()` for the chat TUI, and `ctx.ui.setStatus()` keeps the status bar updated with peer count and unread messages.
+Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerTurn: true` and `deliverAs: "aside"` — a non-interrupting delivery that starts a turn when the agent is idle and otherwise folds in at the next step boundary. Urgent crew notices (shutdown requests) use `deliverAs: "steer"`. File reservations are enforced by returning `{ block: true }` from a `tool_call` hook on write/edit operations. The `/messenger` overlay uses `ctx.ui.custom()` for the chat TUI, and `ctx.ui.setStatus()` keeps the status bar updated with peer count, unread messages, and the mesh channel.
 
-Crew workers are spawned as `pi --mode json` subprocesses with the agent's system prompt, model, and tool restrictions from their `.md` definitions. Progress is tracked via JSONL streaming — the overlay subscribes to a live progress store that shows each worker's current tool, call count, and token usage in real time. Aborting a work run triggers graceful shutdown: each worker receives an inbox message asking it to stop, followed by a grace period before SIGTERM. The planner and reviewer work the same way — just pi instances with different agent configs.
+Crew workers run as in-process omp subagents through the SDK injected into the extension (`runSubprocess` / `runSubagentFollowUpTurn`), with the agent's system prompt, model, and tool restrictions from its `.md` definition. A worker's session file lives under `<project>/.pi/messenger/crew/artifacts/<Name>.jsonl`, which is how the worker's own extension instance learns its mesh name and auto-joins. Progress comes from the SDK's `onProgress` callback — the overlay shows each worker's current tool, call count, and token usage in real time — and workers also appear in omp's Agent Hub. Aborting a work run triggers graceful shutdown: each worker receives an urgent mesh message asking it to stop, followed by a grace period before its run is aborted. Lobby workers stay alive as idle subagents and receive task assignments as follow-up turns. The planner and reviewer work the same way, just with different agent definitions.
 
-All coordination is file-based, no daemon required. Shared state (registry, inboxes, swarm claims/completions) lives in `~/.pi/agent/messenger/`. Activity feed and crew data are project-scoped under `.pi/messenger/` inside your project, so Crew logs live at `<project>/.pi/messenger/crew/` and the shared activity feed lives at `<project>/.pi/messenger/feed.jsonl`. Dead agents are detected via PID checks and cleaned up automatically.
+Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.pi/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to sqlite on a volume), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. Activity feed and crew data stay project-scoped under `.pi/messenger/`.
 
 ## Credits
 
