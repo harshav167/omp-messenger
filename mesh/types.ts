@@ -25,7 +25,8 @@ export type SendError =
   | "not_active"
   | "invalid_registration"
   | "write_failed"
-  | "unreachable";
+  | "unreachable"
+  | "ambiguous_channel";
 
 export type SendResult =
   | { ok: true; message: AgentMailMessage }
@@ -37,6 +38,11 @@ export interface SendOptions {
   from?: string;
   /** Non-interrupting delivery (aside) instead of the default interrupting steer. */
   gentle?: boolean;
+  /**
+   * Channel to route through. Required when the recipient name exists in more
+   * than one of this agent's channels; otherwise resolved automatically.
+   */
+  channel?: string;
 }
 
 export type DeliverFn = (msg: AgentMailMessage) => void;
@@ -95,42 +101,62 @@ export function isCompleteNotYours(r: CompleteResult): r is { success: false; er
 }
 
 export interface JoinOptions {
-  channel?: string;
+  /** Channels to join (replaces the current set). Defaults to `state.channels`. */
+  channels?: string[];
   nameTheme?: NameThemeConfig;
+}
+
+/** A peer as seen from this agent: its registration plus the joined channels it shares with us. */
+export interface MeshPeer extends AgentRegistration {
+  channels: string[];
 }
 
 /**
  * The messenger's coordination layer. `state` (MessengerState) and `deliver`
  * are bound at construction; every method reads/mutates that state.
+ *
+ * One identity, N channels: the agent is registered under the same name in
+ * every channel of `state.channels`; peers, claims, and completions are the
+ * union across those channels, each tagged with its channel.
  */
 export interface Mesh {
   readonly kind: "fs" | "mesh";
   status(): MeshStatus;
-  /** Current channel name. */
-  channel(): string;
-  /** Register (name allocation + presence) and start inbox delivery. */
+  /** Channels this agent is registered in (sorted; empty when not joined). */
+  channels(): string[];
+  /** Register (name allocation + presence) in every channel and start inbox delivery. */
   join(ctx: ExtensionContext, opts?: JoinOptions): Promise<boolean>;
-  /** Channels known to this mesh (current one included). */
-  channels(): Promise<ChannelInfo[]>;
-  /** Push the full registration (reservations, spec, session, activity, statusMessage). */
+  /** Add channels to the current membership (idempotent). */
+  joinChannels(ctx: ExtensionContext, channels: string[]): Promise<boolean>;
+  /** Leave a subset of channels; leaving the last one unregisters entirely. */
+  leaveChannels(channels: string[]): Promise<void>;
+  /** Channels known to the mesh (joined or not). */
+  listChannels(): Promise<ChannelInfo[]>;
+  /** Push the full registration to every joined channel. */
   publish(ctx: ExtensionContext): void;
-  /** Unregister; throws when the registration could not be removed. */
+  /** Unregister from every channel; throws when a registration could not be removed. */
   leave(): Promise<void>;
   rename(ctx: ExtensionContext, newName: string): Promise<RenameResult>;
-  /** Synchronous peer snapshot; excludes self; applies `state.scopeToFolder`. */
-  peers(): AgentRegistration[];
-  /** Drop a dead local worker's registration eagerly. */
+  /**
+   * Synchronous peer snapshot: union across joined channels, excluding self,
+   * `state.scopeToFolder` applied. `channels` lists every joined channel the
+   * peer shares with us.
+   */
+  peers(): MeshPeer[];
+  /** Drop a dead local worker's registration eagerly (every joined channel). */
   evict(name: string): void;
   send(to: string, text: string, opts?: SendOptions): Promise<SendResult>;
   /** Idempotent: make sure inbox delivery is running. */
   recoverInbox(): void;
   /** Synchronous pull of anything pending (filesystem); no-op for the mesh client. */
   drainInbox(): void;
+  /** Merged claims across joined channels (a spec/task claimed in any channel counts). */
   claims(): AllClaims;
   completions(): AllCompletions;
-  claim(ctx: ExtensionContext, spec: string, taskId: string, reason?: string): Promise<ClaimResult>;
-  unclaim(spec: string, taskId: string): Promise<UnclaimResult>;
-  complete(spec: string, taskId: string, notes?: string): Promise<CompleteResult>;
+  /** Claim in `channel` (default: the first joined channel). */
+  claim(ctx: ExtensionContext, spec: string, taskId: string, reason?: string, channel?: string): Promise<ClaimResult>;
+  unclaim(spec: string, taskId: string, channel?: string): Promise<UnclaimResult>;
+  complete(spec: string, taskId: string, notes?: string, channel?: string): Promise<CompleteResult>;
   /** Stop inbox delivery / close the socket; the instance stays reusable (join again). */
   close(): void;
 }

@@ -58,6 +58,8 @@ export interface AgentMailMessage {
   replyTo: string | null;
   /** Non-interrupting delivery (aside) on the receiver; absent/false → interrupting steer. */
   gentle?: boolean;
+  /** Channel the message travelled through (set by the mesh on delivery). */
+  channel?: string;
 }
 
 interface AgentMailMessageInput {
@@ -70,6 +72,7 @@ interface AgentMailMessageInput {
   ts?: unknown;
   replyTo?: unknown;
   gentle?: unknown;
+  channel?: unknown;
 }
 
 function stringField(value: unknown, fallback: string): string {
@@ -92,7 +95,17 @@ export function normalizeAgentMailMessage(
     timestamp: stringField(raw.timestamp, stringField(raw.ts, defaults.timestamp)),
     replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
     ...(raw.gentle === true ? { gentle: true } : {}),
+    ...(typeof raw.channel === "string" && raw.channel ? { channel: raw.channel } : {}),
   };
+}
+
+/** Sorted, de-duplicated, valid channel names; empty input → ["main"]. Throws on an invalid name. */
+export function normalizeChannels(input: readonly string[] | undefined): string[] {
+  const names = [...new Set((input ?? []).map(c => c.trim()).filter(c => c.length > 0))];
+  for (const name of names) {
+    if (!isValidChannelName(name)) throw new Error(`Invalid channel name: ${name}`);
+  }
+  return names.length === 0 ? ["main"] : names.sort();
 }
 
 export interface ReservationConflict {
@@ -108,8 +121,8 @@ export interface MessengerState {
   /** Name came from OMP_AGENT_NAME or a crew identity: never auto-suffixed on conflict. */
   explicitName: boolean;
   registered: boolean;
-  /** Mesh channel this session lives in (default "main"). */
-  channel: string;
+  /** Mesh channels this session is registered in (default ["main"]; sorted, unique). */
+  channels: string[];
   /** This session is an in-process crew worker (omp subagent spawned by the orchestrator). */
   isCrewWorker: boolean;
   /** Messages sent this session (budget accounting). */

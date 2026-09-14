@@ -11,15 +11,15 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isValidChannelName } from "./lib.ts";
+import { isValidChannelName, normalizeChannels } from "./lib.ts";
 
 export interface MeshConfig {
   /** ws:// or wss:// URL of a omp-messenger-mesh server; null → filesystem mesh. */
   url: string | null;
   /** Shared secret sent in the hello frame. */
   token: string;
-  /** Channel joined by default (explicit `join { channel }` wins). */
-  channel: string;
+  /** Channels joined by default (explicit `join { channels }` replaces). */
+  channels: string[];
 }
 
 export interface MessengerConfig {
@@ -60,7 +60,7 @@ const DEFAULT_CONFIG: MessengerConfig = {
   autoOverlay: true,
   autoOverlayPlanning: true,
   crewEventsInFeed: true,
-  mesh: { url: null, token: "", channel: "main" },
+  mesh: { url: null, token: "", channels: ["main"] },
 };
 
 /**
@@ -87,8 +87,22 @@ function resolveMeshConfig(raw: unknown): MeshConfig {
     }
   }
 
-  const channel = isValidChannelName(obj.channel) ? obj.channel : "main";
-  return { url, token, channel };
+  return { url, token, channels: parseChannelList(obj.channels ?? obj.channel) };
+}
+
+/**
+ * Accepts `["a","b"]`, `"a,b"`, or `"a"`; drops invalid names; empty → ["main"].
+ * Env `OMP_MESSENGER_MESH_CHANNELS` (comma-separated) overrides file config.
+ */
+export function parseChannelList(raw: unknown): string[] {
+  const source = process.env.OMP_MESSENGER_MESH_CHANNELS ?? raw;
+  const items = Array.isArray(source)
+    ? source
+    : typeof source === "string"
+      ? source.split(",")
+      : [];
+  const valid = items.map(item => (typeof item === "string" ? item.trim() : "")).filter(isValidChannelName);
+  return normalizeChannels(valid);
 }
 
 function readJsonFile(path: string): Record<string, unknown> | null {
@@ -170,7 +184,7 @@ export function getAutoRegisterPaths(): string[] {
 /** Mesh settings as stored in the user config file (no env, no token-file fallback). */
 export interface StoredMeshSettings {
   url: string;
-  channel: string;
+  channels: string[];
   /** Token from ~/.omp/agent/messenger/mesh.token (empty when absent). */
   token: string;
 }
@@ -189,7 +203,7 @@ export function getStoredMeshSettings(): StoredMeshSettings {
   }
   return {
     url: typeof obj.url === "string" ? obj.url : "",
-    channel: isValidChannelName(obj.channel) ? obj.channel : "main",
+    channels: parseChannelList(obj.channels ?? obj.channel),
     token,
   };
 }
@@ -201,8 +215,8 @@ export function getStoredMeshSettings(): StoredMeshSettings {
 export function saveMeshSettings(settings: StoredMeshSettings): void {
   const existing = readUserConfig();
   const url = settings.url.trim();
-  const channel = isValidChannelName(settings.channel) ? settings.channel : "main";
-  existing.mesh = { url: url || null, channel };
+  const channels = normalizeChannels(settings.channels.filter(isValidChannelName));
+  existing.mesh = { url: url || null, channels };
   writeUserConfig(existing);
 
   mkdirSync(join(userAgentDir(), "messenger"), { recursive: true });
