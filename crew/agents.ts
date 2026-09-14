@@ -284,7 +284,6 @@ async function runAgent(
     if (options.mesh && role === "worker") {
       const sent = await options.mesh.send(name, SHUTDOWN_MESSAGE, {
         from: "crew-orchestrator",
-        urgent: true,
       });
       if (sent.ok && await raceTimeout(
         runPromise.then(() => {}),

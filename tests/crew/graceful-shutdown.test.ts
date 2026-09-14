@@ -46,7 +46,7 @@ describe("crew/graceful shutdown", () => {
     await expect(slow).resolves.toBe(false);
   });
 
-  it("sends an urgent shutdown message and evicts the settled worker", async () => {
+  it("sends an interrupting shutdown message and evicts the settled worker", async () => {
     const fake = createFakeSdk();
     setSdk(fake.sdk);
     writeWorkerAgent(dirs.cwd);
@@ -105,7 +105,7 @@ describe("crew/graceful shutdown", () => {
           text,
           timestamp: new Date().toISOString(),
           replyTo: null,
-          urgent: options?.urgent,
+          gentle: options?.gentle,
         },
       };
     });
@@ -125,7 +125,7 @@ describe("crew/graceful shutdown", () => {
     expect(sendSpy).toHaveBeenCalledWith(
       workerName,
       expect.stringContaining("SHUTDOWN REQUESTED"),
-      { from: "crew-orchestrator", urgent: true },
+      { from: "crew-orchestrator" },
     );
     expect(result?.wasGracefullyShutdown).toBe(true);
     expect(fs.existsSync(path.join(registryDir, `${workerName}.json`))).toBe(false);

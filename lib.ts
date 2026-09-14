@@ -56,8 +56,8 @@ export interface AgentMailMessage {
   text: string;
   timestamp: string;
   replyTo: string | null;
-  /** Interrupting delivery (steer) on the receiver; absent/false → non-interrupting aside. */
-  urgent?: boolean;
+  /** Non-interrupting delivery (aside) on the receiver; absent/false → interrupting steer. */
+  gentle?: boolean;
 }
 
 interface AgentMailMessageInput {
@@ -69,7 +69,7 @@ interface AgentMailMessageInput {
   timestamp?: unknown;
   ts?: unknown;
   replyTo?: unknown;
-  urgent?: unknown;
+  gentle?: unknown;
 }
 
 function stringField(value: unknown, fallback: string): string {
@@ -91,7 +91,7 @@ export function normalizeAgentMailMessage(
     text: stringField(raw.text, stringField(raw.message, "")),
     timestamp: stringField(raw.timestamp, stringField(raw.ts, defaults.timestamp)),
     replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
-    ...(raw.urgent === true ? { urgent: true } : {}),
+    ...(raw.gentle === true ? { gentle: true } : {}),
   };
 }
 

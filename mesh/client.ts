@@ -546,7 +546,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         text,
         timestamp: new Date().toISOString(),
         replyTo: sendOptions?.replyTo ?? null,
-        ...(sendOptions?.urgent ? { urgent: true } : {}),
+        ...(sendOptions?.gentle ? { gentle: true } : {}),
       };
       return request<SendResult>({ t: "send", id, to, message },
         (reply) => !Array.isArray(reply) && "ok" in reply

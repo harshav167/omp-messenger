@@ -35,8 +35,8 @@ export interface SendOptions {
   replyTo?: string;
   /** Sender name override; defaults to the local agent name. */
   from?: string;
-  /** Interrupting delivery on the receiver (steer) instead of a non-interrupting aside. */
-  urgent?: boolean;
+  /** Non-interrupting delivery (aside) instead of the default interrupting steer. */
+  gentle?: boolean;
 }
 
 export type DeliverFn = (msg: AgentMailMessage) => void;

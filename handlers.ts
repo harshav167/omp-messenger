@@ -410,7 +410,8 @@ export async function executeSend(
   to: string | string[] | undefined,
   broadcast: boolean | undefined,
   message?: string,
-  replyTo?: string
+  replyTo?: string,
+  gentle?: boolean
 ) {
   if (!state.registered) {
     return notRegisteredError();
@@ -476,7 +477,7 @@ export async function executeSend(
       continue;
     }
 
-    const sendResult = await mesh.send(recipient, message, { replyTo });
+    const sendResult = await mesh.send(recipient, message, { replyTo, gentle });
     if (sendResult.ok === true) {
       sent.push(recipient);
     } else {

@@ -140,6 +140,7 @@ export interface CrewParams {
   to?: string | string[];
   message?: string;
   replyTo?: string;
+  gentle?: boolean;
   paths?: string[];
   reason?: string;
   name?: string;

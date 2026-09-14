@@ -838,7 +838,7 @@ function sendMessageToAgent(
   text: string,
   from: string,
   replyTo: string | null,
-  urgent: boolean,
+  gentle: boolean,
 ): AgentMailMessage {
   const targetInbox = join(dirs.inbox, to);
   ensureDirSync(targetInbox);
@@ -850,7 +850,7 @@ function sendMessageToAgent(
     text,
     timestamp: new Date().toISOString(),
     replyTo,
-    ...(urgent ? { urgent: true } : {}),
+    ...(gentle ? { gentle: true } : {}),
   };
 
   const random = Math.random().toString(36).substring(2, 8);
@@ -1086,7 +1086,7 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
           text,
           opts?.from ?? state.agentName,
           opts?.replyTo ?? null,
-          opts?.urgent === true,
+          opts?.gentle === true,
         );
         return { ok: true, message };
       } catch {

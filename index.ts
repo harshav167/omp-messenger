@@ -190,9 +190,9 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     pi.sendMessage(
       { customType: "agent_message", content, display: true, details: msg },
-      msg.urgent
-        ? { triggerTurn: true, deliverAs: "steer" }
-        : { triggerTurn: true, deliverAs: "aside" }
+      msg.gentle
+        ? { triggerTurn: true, deliverAs: "aside" }
+        : { triggerTurn: true, deliverAs: "steer" }
     );
   }
 
@@ -527,6 +527,7 @@ Usage (action-based API - preferred):
       to: Type.Optional(Type.Any({ description: "Target agent name (string) or multiple names (array)" })),
       message: Type.Optional(Type.String({ description: "Message to send, Team setup/charter text, or Team memory note" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
+      gentle: Type.Optional(Type.Boolean({ description: "Deliver without interrupting the recipient (queued until its current step ends). Default: interrupt." })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, task block, or approval rejection feedback" })),
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }) as unknown as PiSchema,

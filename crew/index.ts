@@ -111,10 +111,10 @@ export async function executeCrewAction(
       return handlers.executeSetSpec(state, mesh, ctx, params.spec);
 
     case 'send':
-      return handlers.executeSend(state, mesh, ctx.cwd, params.to, false, params.message, params.replyTo);
+      return handlers.executeSend(state, mesh, ctx.cwd, params.to, false, params.message, params.replyTo, params.gentle);
 
     case 'broadcast':
-      return handlers.executeSend(state, mesh, ctx.cwd, undefined, true, params.message, params.replyTo);
+      return handlers.executeSend(state, mesh, ctx.cwd, undefined, true, params.message, params.replyTo, params.gentle);
 
     case 'reserve':
       if (!params.paths || params.paths.length === 0) {
