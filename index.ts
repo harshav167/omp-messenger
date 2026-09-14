@@ -102,7 +102,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   const state: MessengerState = {
     agentName: process.env.OMP_AGENT_NAME || "",
     explicitName: !!process.env.OMP_AGENT_NAME,
-    channel: config.mesh.channel,
+    channels: config.mesh.channels,
     isCrewWorker: false,
     messagesSent: 0,
     registered: false,
@@ -188,6 +188,25 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       content = `*(reply to ${msg.replyTo.substring(0, 8)})*\n\n${content}`;
     }
 
+    // Route by receiver state. omp refuses to start a turn from extension messages after the
+    // user pressed Esc (autoResumeSuppressed) — except for its own peer-message record type,
+    // `irc:incoming` delivered as an aside, which is allowed to wake the session. So:
+    //   idle  → irc:incoming aside: wakes an Esc'd/idle session (omp renders its peer card).
+    //   busy  → steer: breaks into the running turn even inside a long-blocking tool call;
+    //           `gentle` keeps the non-interrupting aside instead.
+    const idle = latestCtx?.isIdle() ?? true;
+    if (idle) {
+      pi.sendMessage(
+        {
+          customType: "irc:incoming",
+          content,
+          display: true,
+          details: { id: msg.id, from: msg.from, message: msg.text, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
+        },
+        { triggerTurn: true, deliverAs: "aside" }
+      );
+      return;
+    }
     pi.sendMessage(
       { customType: "agent_message", content, display: true, details: msg },
       msg.gentle
@@ -296,17 +315,18 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
       const nameStr = theme.fg("accent", state.agentName);
       const countStr = theme.fg("dim", ` (${count} peer${count === 1 ? "" : "s"})`);
+      const channelList = mesh.channels().join(",");
       const meshStr = mesh.kind === "mesh"
         ? theme.fg(
             mesh.status() === "connected" ? "dim" : "warning",
             mesh.status() === "connected"
-              ? ` ⚡${mesh.channel()}`
+              ? ` ⚡${channelList}`
               : mesh.status() === "reconnecting"
-                ? ` ⚡${mesh.channel()}…`
-                : ` ⚡${mesh.channel()}✗`,
+                ? ` ⚡${channelList}…`
+                : ` ⚡${channelList}✗`,
           )
-        : mesh.channel() !== "main"
-          ? theme.fg("dim", ` #${mesh.channel()}`)
+        : channelList !== "main"
+          ? theme.fg("dim", ` #${channelList}`)
           : "";
       const unreadStr = totalUnread > 0 ? theme.fg("accent", ` ●${totalUnread}`) : "";
 
@@ -441,8 +461,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
 Usage (action-based API - preferred):
   // Coordination
-  omp_messenger({ action: "join", channel: "repo-a" })           → Join a mesh channel (channel is optional)
+  omp_messenger({ action: "join", channels: ["main", "repo-a"] }) → Join mesh channels (channels is optional)
   omp_messenger({ action: "channels" })                          → List mesh channels
+  omp_messenger({ action: "channels.join", channels: ["blue"] }) → Join additional channels
+  omp_messenger({ action: "channels.leave", channels: ["blue"] })→ Leave channels (last one leaves the mesh)
   omp_messenger({ action: "leave" })                             → Leave mesh for this session
   omp_messenger({ action: "status" })                            → Get status
   omp_messenger({ action: "list" })                              → List agents with presence
@@ -517,7 +539,8 @@ Usage (action-based API - preferred):
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
       name: Type.Optional(Type.String({ description: "Name for rename action or Team setup/profile/charter commands" })),
-      channel: Type.Optional(Type.String({ description: "Mesh channel to join (default: config mesh.channel)" })),
+      channel: Type.Optional(Type.String({ description: "Channel to route a send/claim through when the recipient or claim is in several channels" })),
+      channels: Type.Optional(Type.Array(Type.String(), { description: "Mesh channels for join / channels.join / channels.leave" })),
 
       // ═══════════════════════════════════════════════════════════════════════
       // MESSAGING & COORDINATION PARAMETERS
@@ -581,11 +604,11 @@ Usage (action-based API - preferred):
       try { await mesh.leave(); } catch {}
     }
     mesh.close();
-    state.channel = config.mesh.channel;
+    state.channels = config.mesh.channels;
     mesh = createMesh({ config, base: baseDir, state, deliver: deliverMessage, onStatusChange: () => { if (latestCtx) updateStatus(latestCtx); } });
     if (wasRegistered) {
       if (await mesh.join(ctx, { nameTheme })) {
-        ctx.ui.notify(`Rejoined mesh as ${state.agentName} (${mesh.kind === "mesh" ? config.mesh.url : "local"}, #${mesh.channel()})`, "info");
+        ctx.ui.notify(`Rejoined mesh as ${state.agentName} (${mesh.kind === "mesh" ? config.mesh.url : "local"}, #${mesh.channels().join(",")})`, "info");
       } else {
         ctx.ui.notify("Mesh settings saved, but rejoining failed — check URL/token", "error");
       }
@@ -907,7 +930,7 @@ Usage (action-based API - preferred):
     captureStatusContext(ctx);
     state.cwd = ctx.cwd;
     config = loadConfig(state.cwd);
-    state.channel = config.mesh.channel;
+    state.channels = config.mesh.channels;
     const identity = detectCrewIdentity(ctx);
     if (identity) {
       state.agentName = identity.name;

@@ -6,13 +6,13 @@ vi.mock("@oh-my-pi/pi-tui", () => ({
 }));
 
 import { renderMeshPanel, renderStatusBar } from "../overlay-render.ts";
-import { LOCAL_HOST_ID, type AgentRegistration } from "../lib.ts";
-import type { Mesh } from "../mesh/types.ts";
+import { LOCAL_HOST_ID } from "../lib.ts";
+import type { Mesh, MeshPeer } from "../mesh/types.ts";
 import { createTestMesh } from "./helpers/mesh.ts";
 import { createTempCrewDirs } from "./helpers/temp-dirs.ts";
 import { createMockContext } from "./helpers/mock-context.ts";
 
-function peer(overrides: Partial<AgentRegistration>): AgentRegistration {
+function peer(overrides: Partial<MeshPeer>): MeshPeer {
   const now = new Date().toISOString();
   return {
     name: "Beta",
@@ -25,15 +25,16 @@ function peer(overrides: Partial<AgentRegistration>): AgentRegistration {
     isHuman: false,
     session: { toolCalls: 0, tokens: 0, filesModified: [] },
     activity: { lastActivityAt: now },
+    channels: ["repo-a"],
     ...overrides,
   };
 }
 
-function fakeMesh(peers: AgentRegistration[], kind: "fs" | "mesh" = "mesh"): Mesh {
+function fakeMesh(peers: MeshPeer[], kind: "fs" | "mesh" = "mesh", channels = ["repo-a"]): Mesh {
   return {
     kind,
     status: () => (kind === "mesh" ? "connected" : "local"),
-    channel: () => "repo-a",
+    channels: () => channels,
     peers: () => peers,
     claims: () => ({}),
   } as unknown as Mesh;
@@ -65,6 +66,24 @@ describe("renderMeshPanel", () => {
     expect(text).not.toContain("Crew agents:");
   });
 
+  it("tags peers with their shared channels when joined to more than one", () => {
+    const { cwd } = createTempCrewDirs();
+    const { state } = createTestMesh(cwd, { agentName: "Alpha", cwd, channels: ["main", "blue"] });
+    const theme = createMockContext(cwd).ui.theme;
+    const mesh = fakeMesh([
+      peer({ name: "Beta", channels: ["main", "blue"] }),
+      peer({ name: "Gamma", hostId: LOCAL_HOST_ID, channels: ["blue"] }),
+    ], "mesh", ["main", "blue"]);
+
+    const text = renderMeshPanel(theme, state, mesh, "ws://h:1", 900_000, 200, 12).join("\n");
+
+    expect(text).toContain("#main");
+    expect(text).toContain("#blue");
+    expect(text).toMatch(/Beta.*#main.*#blue/);
+    expect(text).toMatch(/Gamma.*#blue/);
+    expect(text).not.toMatch(/Gamma[^\n]*#main/);
+  });
+
   it("explains an empty local mesh and points at the config key", () => {
     const { cwd } = createTempCrewDirs();
     const { state } = createTestMesh(cwd, { agentName: "Alpha", cwd });
@@ -74,7 +93,7 @@ describe("renderMeshPanel", () => {
 
     expect(text).toContain("local filesystem");
     expect(text).toContain("c to connect a server");
-    expect(text).toContain("No peers in this channel yet.");
+    expect(text).toContain("No peers in your channels yet.");
   });
 });
 
@@ -83,11 +102,20 @@ describe("renderStatusBar without a plan", () => {
     const { cwd } = createTempCrewDirs();
     const theme = createMockContext(cwd).ui.theme;
 
-    const line = renderStatusBar(theme, cwd, 200, undefined, { kind: "mesh", status: "connected", channel: "repo-a", peerCount: 2 });
+    const line = renderStatusBar(theme, cwd, 200, undefined, { kind: "mesh", status: "connected", channels: ["repo-a"], peerCount: 2 });
 
     expect(line).toContain("⚡ connected");
     expect(line).toContain("#repo-a");
     expect(line).toContain("2 peers");
     expect(line).not.toContain("No active plan");
+  });
+
+  it("joins every joined channel into the status bar", () => {
+    const { cwd } = createTempCrewDirs();
+    const theme = createMockContext(cwd).ui.theme;
+
+    const line = renderStatusBar(theme, cwd, 200, undefined, { kind: "mesh", status: "connected", channels: ["main", "blue"], peerCount: 3 });
+
+    expect(line).toContain("#main,blue");
   });
 });

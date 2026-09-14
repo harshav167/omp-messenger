@@ -2,7 +2,7 @@
  * omp-messenger - Config Overlay Component
  *
  * Edits the user-level settings that decide how this machine joins a mesh
- * (server URL, token, channel) plus the auto-register folder list. Saving mesh
+ * (server URL, token, channels) plus the auto-register folder list. Saving mesh
  * settings hands them to the host, which rebuilds the mesh and rejoins.
  */
 
@@ -17,15 +17,15 @@ import {
   saveMeshSettings,
   type StoredMeshSettings,
 } from "./config.ts";
-import { isValidChannelName } from "./lib.ts";
+import { isValidChannelName, normalizeChannels } from "./lib.ts";
 
-type MeshField = "url" | "token" | "channel";
-const MESH_FIELDS: MeshField[] = ["url", "token", "channel"];
-const FIELD_LABELS: Record<MeshField, string> = { url: "Server URL", token: "Token", channel: "Channel" };
+type MeshField = "url" | "token" | "channels";
+const MESH_FIELDS: MeshField[] = ["url", "token", "channels"];
+const FIELD_LABELS: Record<MeshField, string> = { url: "Server URL", token: "Token", channels: "Channels" };
 const FIELD_HINTS: Record<MeshField, string> = {
   url: "ws://host:8765 — empty = local filesystem mesh",
   token: "shared secret from the server's OMP_MESSENGER_MESH_TOKEN",
-  channel: "lowercase letters, digits, - and _",
+  channels: "comma-separated, e.g. main,blue",
 };
 
 export interface ConfigOverlayCallbacks {
@@ -55,14 +55,14 @@ export class MessengerConfigOverlay implements Component, Focusable {
     private callbacks: ConfigOverlayCallbacks = {},
   ) {
     this.mesh = getStoredMeshSettings();
-    this.savedMesh = { ...this.mesh };
+    this.savedMesh = { ...this.mesh, channels: [...this.mesh.channels] };
     this.paths = getAutoRegisterPaths();
   }
 
   private get meshDirty(): boolean {
     return this.mesh.url !== this.savedMesh.url
       || this.mesh.token !== this.savedMesh.token
-      || this.mesh.channel !== this.savedMesh.channel;
+      || this.mesh.channels.join(",") !== this.savedMesh.channels.join(",");
   }
 
   private get rowCount(): number {
@@ -94,8 +94,9 @@ export class MessengerConfigOverlay implements Component, Focusable {
 
     if (matchesKey(data, "return") || matchesKey(data, "e")) {
       if (this.cursor < MESH_FIELDS.length) {
-        this.editing = MESH_FIELDS[this.cursor];
-        this.editBuffer = this.mesh[this.editing];
+        const field = MESH_FIELDS[this.cursor];
+        this.editing = field;
+        this.editBuffer = field === "channels" ? this.mesh.channels.join(",") : this.mesh[field];
         this.statusMessage = "";
         this.tui.requestRender();
       }
@@ -118,8 +119,13 @@ export class MessengerConfigOverlay implements Component, Focusable {
       if (this.cursor >= MESH_FIELDS.length) {
         this.deleteSelectedPath();
       } else {
-        this.mesh[MESH_FIELDS[this.cursor]] = MESH_FIELDS[this.cursor] === "channel" ? "main" : "";
-        this.statusMessage = `Cleared ${FIELD_LABELS[MESH_FIELDS[this.cursor]]}`;
+        const field = MESH_FIELDS[this.cursor];
+        if (field === "channels") {
+          this.mesh.channels = ["main"];
+        } else {
+          this.mesh[field] = "";
+        }
+        this.statusMessage = `Cleared ${FIELD_LABELS[field]}`;
       }
       this.tui.requestRender();
       return;
@@ -136,17 +142,23 @@ export class MessengerConfigOverlay implements Component, Focusable {
     }
     if (matchesKey(data, "return")) {
       const value = this.editBuffer.trim();
-      if (field === "channel" && value && !isValidChannelName(value)) {
-        this.statusMessage = "Invalid channel: use a-z, 0-9, - and _ (max 48)";
-        this.tui.requestRender();
-        return;
+      if (field === "channels") {
+        const names = value.split(",").map(name => name.trim()).filter(name => name.length > 0);
+        const invalid = names.find(name => !isValidChannelName(name));
+        if (invalid) {
+          this.statusMessage = `Invalid channel: ${invalid}`;
+          this.tui.requestRender();
+          return;
+        }
+        this.mesh.channels = normalizeChannels(names);
+      } else {
+        if (field === "url" && value && !/^wss?:\/\//.test(value)) {
+          this.statusMessage = "URL must start with ws:// or wss://";
+          this.tui.requestRender();
+          return;
+        }
+        this.mesh[field] = value;
       }
-      if (field === "url" && value && !/^wss?:\/\//.test(value)) {
-        this.statusMessage = "URL must start with ws:// or wss://";
-        this.tui.requestRender();
-        return;
-      }
-      this.mesh[field] = field === "channel" && !value ? "main" : value;
       this.editing = null;
       this.statusMessage = `${FIELD_LABELS[field]} updated — s to save`;
       this.tui.requestRender();
@@ -179,7 +191,7 @@ export class MessengerConfigOverlay implements Component, Focusable {
     }
     if (this.meshDirty) {
       saveMeshSettings(this.mesh);
-      this.savedMesh = { ...this.mesh };
+      this.savedMesh = { ...this.mesh, channels: [...this.mesh.channels] };
       saved.push("mesh");
       this.callbacks.onMeshSettingsSaved?.({ ...this.mesh });
     }
@@ -214,9 +226,12 @@ export class MessengerConfigOverlay implements Component, Focusable {
       const shown = field === "token" ? "•".repeat(this.editBuffer.length) : this.editBuffer;
       return this.theme.fg("accent", truncateToWidth(shown, innerW - 20) + "▏");
     }
+    if (field === "channels") {
+      return truncateToWidth(this.mesh.channels.join(","), innerW - 20);
+    }
     const value = this.mesh[field];
     if (!value) {
-      return this.theme.fg("dim", field === "url" ? "(local filesystem mesh)" : field === "token" ? "(none)" : "main");
+      return this.theme.fg("dim", field === "url" ? "(local filesystem mesh)" : "(none)");
     }
     if (field === "token") return this.theme.fg("dim", "•".repeat(Math.min(12, value.length)) + ` (${value.length} chars)`);
     return truncateToWidth(value, innerW - 20);

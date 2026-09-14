@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRegistration } from "../../lib.ts";
-import { MESH_CLOSE, MESH_SUBPROTOCOL, parseFrame, type ClientFrame, type ServerFrame } from "../../mesh/protocol.ts";
+import { MESH_CLOSE, MESH_SUBPROTOCOL, parseFrame, type ChannelSnapshot, type ClientFrame, type ServerFrame } from "../../mesh/protocol.ts";
 import { startMeshServer, type MeshServer } from "../../mesh/server.ts";
 
 type FrameWaiter = {
@@ -89,15 +89,26 @@ function registration(name: string): AgentRegistration {
   };
 }
 
-async function hello(client: TestClient, name: string, channel = "main", token = "t"): Promise<ServerFrame> {
+async function hello(client: TestClient, name: string, channels: string[] = ["main"], token = "t"): Promise<ServerFrame> {
   await client.opened;
-  client.send({ t: "hello", token, channel, agent: registration(name), claims: [] });
+  client.send({ t: "hello", token, channels, agent: registration(name), claims: [] });
   return client.next((frame) => frame.t === "welcome" || frame.t === "reject");
 }
 
 function isReply(frame: ServerFrame, id: string): boolean {
   return frame.t === "reply" && frame.id === id;
 }
+
+function snapshot(frame: ServerFrame, channel: string): ChannelSnapshot | undefined {
+  return frame.t === "welcome" ? frame.channels.find((snap) => snap.channel === channel) : undefined;
+}
+function replyChannels(frame: ServerFrame, id: string): (ChannelSnapshot | string)[] | undefined {
+  if (frame.t !== "reply" || frame.id !== id) return undefined;
+  const result = frame.result;
+  if (Array.isArray(result) || !("ok" in result) || result.ok !== true || !("channels" in result)) return undefined;
+  return result.channels;
+}
+
 
 afterEach(async () => {
   for (const client of clients.splice(0)) client.close();
@@ -108,7 +119,7 @@ afterEach(async () => {
 describe("mesh server", () => {
   it("rejects a bad token and closes with the authentication code", async () => {
     const client = connect(start());
-    const rejected = await hello(client, "A", "main", "wrong");
+    const rejected = await hello(client, "A", ["main"], "wrong");
     expect(rejected).toEqual({ t: "reject", error: "bad_token" });
     expect((await client.closed).code).toBe(MESH_CLOSE.BAD_TOKEN);
   });
@@ -126,16 +137,15 @@ describe("mesh server", () => {
     const c = connect(server);
     await hello(a, "A");
     await hello(b, "B");
-    await a.next((frame) => frame.t === "peers" && frame.peers.some((peer) => peer.name === "B"));
-    await b.next((frame) => frame.t === "peers" && frame.peers.some((peer) => peer.name === "A"));
-    const cWelcome = await hello(c, "C", "blue");
+    await a.next((frame) => frame.t === "peers" && frame.channel === "main" && frame.peers.some((peer) => peer.name === "B"));
+    await b.next((frame) => frame.t === "peers" && frame.channel === "main" && frame.peers.some((peer) => peer.name === "A"));
+    const cWelcome = await hello(c, "C", ["blue"]);
     a.send({ t: "publish", agent: { ...registration("A"), statusMessage: "after-blue-join" } });
     const aPeers = await a.next((frame) => frame.t === "peers" && frame.peers.some((peer) => peer.statusMessage === "after-blue-join"));
     const bPeers = await b.next((frame) => frame.t === "peers" && frame.peers.some((peer) => peer.statusMessage === "after-blue-join"));
     expect(aPeers.t === "peers" && aPeers.peers.some((peer) => peer.name === "C")).toBeFalse();
     expect(bPeers.t === "peers" && bPeers.peers.some((peer) => peer.name === "C")).toBeFalse();
-    expect(cWelcome.t === "welcome" && cWelcome.peers.some((peer) => peer.name !== "C")).toBeFalse();
-
+    expect(snapshot(cWelcome, "blue")?.peers.some((peer) => peer.name !== "C")).toBeFalse();
   });
 
   it("reports channel membership", async () => {
@@ -143,7 +153,7 @@ describe("mesh server", () => {
     const a = connect(server);
     await hello(a, "A");
     await hello(connect(server), "B");
-    await hello(connect(server), "C", "blue");
+    await hello(connect(server), "C", ["blue"]);
     a.send({ t: "channels", id: "channels" });
     const reply = await a.next((frame) => isReply(frame, "channels"));
     expect(reply.t === "reply" && Array.isArray(reply.result) && reply.result.find((ch) => ch.name === "main")?.members).toBe(2);
@@ -154,10 +164,10 @@ describe("mesh server", () => {
     const server = start();
     await hello(connect(server), "A");
     const duplicate = connect(server);
-    expect(await hello(duplicate, "A")).toEqual({ t: "reject", error: "name_taken" });
-    duplicate.send({ t: "hello", token: "t", channel: "blue", agent: registration("A"), claims: [] });
+    expect(await hello(duplicate, "A")).toEqual({ t: "reject", error: "name_taken", channel: "main" });
+    duplicate.send({ t: "hello", token: "t", channels: ["blue"], agent: registration("A"), claims: [] });
     const welcome = await duplicate.next((frame) => frame.t === "welcome");
-    expect(welcome.t === "welcome" && welcome.channel).toBe("blue");
+    expect(snapshot(welcome, "blue")?.channel).toBe("blue");
   });
 
   it("delivers messages and reports an absent recipient", async () => {
@@ -167,12 +177,13 @@ describe("mesh server", () => {
     await hello(a, "A");
     await hello(b, "B");
     const message = { id: "m1", from: "A", to: "B", text: "hello", timestamp: new Date().toISOString(), replyTo: null };
-    a.send({ t: "send", id: "send-1", to: "B", message });
-    expect(await b.next((frame) => frame.t === "message" && frame.message.id === "m1")).toEqual({ t: "message", message });
+    a.send({ t: "send", id: "send-1", channel: "main", to: "B", message });
+    expect(await b.next((frame) => frame.t === "message" && frame.message.id === "m1"))
+      .toEqual({ t: "message", channel: "main", message: { ...message, channel: "main" } });
     const delivered = await a.next((frame) => isReply(frame, "send-1"));
     expect(delivered.t === "reply" && !Array.isArray(delivered.result) && "ok" in delivered.result && delivered.result.ok).toBeTrue();
 
-    a.send({ t: "send", id: "send-2", to: "nobody", message: { ...message, id: "m2", to: "nobody" } });
+    a.send({ t: "send", id: "send-2", channel: "main", to: "nobody", message: { ...message, id: "m2", to: "nobody" } });
     const absent = await a.next((frame) => isReply(frame, "send-2"));
     expect(absent.t === "reply" && !Array.isArray(absent.result) && "error" in absent.result && absent.result.error).toBe("not_found");
   });
@@ -183,19 +194,20 @@ describe("mesh server", () => {
     const b = connect(server);
     await hello(a, "A");
     await hello(b, "B");
-    a.send({ t: "claim", id: "claim-a", spec: "spec", taskId: "T1" });
+    a.send({ t: "claim", id: "claim-a", channel: "main", spec: "spec", taskId: "T1" });
     const first = await a.next((frame) => isReply(frame, "claim-a"));
     expect(first.t === "reply" && !Array.isArray(first.result) && "success" in first.result && first.result.success).toBeTrue();
-    b.send({ t: "claim", id: "claim-b1", spec: "spec", taskId: "T1" });
+    b.send({ t: "claim", id: "claim-b1", channel: "main", spec: "spec", taskId: "T1" });
     const conflict = await b.next((frame) => isReply(frame, "claim-b1"));
     expect(conflict.t === "reply" && !Array.isArray(conflict.result) && "error" in conflict.result && conflict.result.error).toBe("already_claimed");
 
     a.close();
-    await b.next((frame) => frame.t === "peers" && !frame.peers.some((peer) => peer.name === "A"));
-    b.send({ t: "claim", id: "claim-b2", spec: "spec", taskId: "T1" });
+    await b.next((frame) => frame.t === "peers" && frame.channel === "main" && !frame.peers.some((peer) => peer.name === "A"));
+    b.send({ t: "claim", id: "claim-b2", channel: "main", spec: "spec", taskId: "T1" });
     const claimed = await b.next((frame) => isReply(frame, "claim-b2"));
     expect(claimed.t === "reply" && !Array.isArray(claimed.result) && "success" in claimed.result && claimed.result.success).toBeTrue();
     const claims = await b.next((frame) => frame.t === "claims" && frame.claims.spec?.T1?.agent === "B");
+    expect(claims.t === "claims" && claims.channel).toBe("main");
     expect(claims.t === "claims" && claims.claims.spec?.T1?.agent).toBe("B");
   });
 
@@ -217,10 +229,10 @@ describe("mesh server", () => {
     tempDirs.push(dataDir);
     const firstServer = start(dataDir);
     const a = connect(firstServer);
-    await hello(a, "A", "blue");
-    a.send({ t: "claim", id: "claim", spec: "spec", taskId: "T1" });
+    await hello(a, "A", ["blue"]);
+    a.send({ t: "claim", id: "claim", channel: "blue", spec: "spec", taskId: "T1" });
     await a.next((frame) => isReply(frame, "claim"));
-    a.send({ t: "complete", id: "complete", spec: "spec", taskId: "T1" });
+    a.send({ t: "complete", id: "complete", channel: "blue", spec: "spec", taskId: "T1" });
     const completed = await a.next((frame) => isReply(frame, "complete"));
     expect(completed.t === "reply" && !Array.isArray(completed.result) && "success" in completed.result && completed.result.success).toBeTrue();
     a.close();
@@ -229,8 +241,8 @@ describe("mesh server", () => {
 
     const secondServer = start(dataDir);
     const fresh = connect(secondServer);
-    const welcome = await hello(fresh, "B", "blue");
-    expect(welcome.t === "welcome" && welcome.completions.spec?.T1?.completedBy).toBe("A");
+    const welcome = await hello(fresh, "B", ["blue"]);
+    expect(snapshot(welcome, "blue")?.completions.spec?.T1?.completedBy).toBe("A");
     fresh.send({ t: "channels", id: "channels" });
     const channels = await fresh.next((frame) => isReply(frame, "channels"));
     expect(channels.t === "reply" && Array.isArray(channels.result) && channels.result.some((channel) => channel.name === "blue")).toBeTrue();
@@ -241,5 +253,150 @@ describe("mesh server", () => {
     const response = await fetch(`http://${server.hostname}:${server.port}/healthz`);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("ok");
+  });
+
+  it("welcomes a multi-channel hello with a snapshot per channel", async () => {
+    const server = start();
+    const mainOnly = connect(server);
+    const blueOnly = connect(server);
+    const bridge = connect(server);
+    await hello(mainOnly, "MainOnly", ["main"]);
+    await hello(blueOnly, "BlueOnly", ["blue"]);
+
+    const welcome = await hello(bridge, "Bridge", ["main", "blue"]);
+    expect(welcome.t === "welcome" && welcome.name).toBe("Bridge");
+    expect(welcome.t === "welcome" && welcome.channels.map((snap) => snap.channel).sort()).toEqual(["blue", "main"]);
+    expect(snapshot(welcome, "main")?.peers.some((peer) => peer.name === "MainOnly")).toBeTrue();
+    expect(snapshot(welcome, "main")?.peers.some((peer) => peer.name === "BlueOnly")).toBeFalse();
+    expect(snapshot(welcome, "blue")?.peers.some((peer) => peer.name === "BlueOnly")).toBeTrue();
+    expect(snapshot(welcome, "blue")?.peers.some((peer) => peer.name === "MainOnly")).toBeFalse();
+
+    const mainPeers = await mainOnly.next((frame) => frame.t === "peers" && frame.channel === "main" && frame.peers.some((peer) => peer.name === "Bridge"));
+    expect(mainPeers.t === "peers" && mainPeers.peers.some((peer) => peer.name === "BlueOnly")).toBeFalse();
+    const bluePeers = await blueOnly.next((frame) => frame.t === "peers" && frame.channel === "blue" && frame.peers.some((peer) => peer.name === "Bridge"));
+    expect(bluePeers.t === "peers" && bluePeers.peers.some((peer) => peer.name === "MainOnly")).toBeFalse();
+  });
+
+  it("routes sends through the named channel and reports absent recipients", async () => {
+    const server = start();
+    const mainOnly = connect(server);
+    const blueOnly = connect(server);
+    const bridge = connect(server);
+    await hello(mainOnly, "MainOnly", ["main"]);
+    await hello(blueOnly, "BlueOnly", ["blue"]);
+    await hello(bridge, "Bridge", ["main", "blue"]);
+
+    const stamp = () => new Date().toISOString();
+    mainOnly.send({
+      t: "send",
+      id: "s1",
+      channel: "main",
+      to: "Bridge",
+      message: { id: "m1", from: "MainOnly", to: "Bridge", text: "via main", timestamp: stamp(), replyTo: null },
+    });
+    const viaMain = await bridge.next((frame) => frame.t === "message" && frame.message.id === "m1");
+    expect(viaMain.t === "message" && viaMain.channel).toBe("main");
+    expect(viaMain.t === "message" && viaMain.message.channel).toBe("main");
+
+    blueOnly.send({
+      t: "send",
+      id: "s2",
+      channel: "blue",
+      to: "Bridge",
+      message: { id: "m2", from: "BlueOnly", to: "Bridge", text: "via blue", timestamp: stamp(), replyTo: null },
+    });
+    const viaBlue = await bridge.next((frame) => frame.t === "message" && frame.message.id === "m2");
+    expect(viaBlue.t === "message" && viaBlue.channel).toBe("blue");
+    expect(viaBlue.t === "message" && viaBlue.message.channel).toBe("blue");
+
+    mainOnly.send({
+      t: "send",
+      id: "s3",
+      channel: "main",
+      to: "BlueOnly",
+      message: { id: "m3", from: "MainOnly", to: "BlueOnly", text: "unreachable", timestamp: stamp(), replyTo: null },
+    });
+    const absent = await mainOnly.next((frame) => isReply(frame, "s3"));
+    expect(absent.t === "reply" && !Array.isArray(absent.result) && "error" in absent.result && absent.result.error).toBe("not_found");
+  });
+
+  it("joins and parts channels on a live socket", async () => {
+    const server = start();
+    const a = connect(server);
+    const observer = connect(server);
+    await hello(a, "A", ["main", "blue"]);
+    await hello(observer, "MainObs", ["main"]);
+
+    a.send({ t: "join", id: "j1", channels: ["green"] });
+    const joined = await a.next((frame) => isReply(frame, "j1"));
+    const green = replyChannels(joined, "j1")?.find((snap): snap is ChannelSnapshot => typeof snap === "object" && snap.channel === "green");
+    expect(green?.channel).toBe("green");
+    expect(green?.peers.some((peer) => peer.name === "A")).toBeTrue();
+
+    a.send({ t: "part", id: "p1", channels: ["main"] });
+    const parted = await a.next((frame) => isReply(frame, "p1"));
+    expect(replyChannels(parted, "p1")).toEqual(["blue", "green"]);
+    await observer.next((frame) => frame.t === "peers" && frame.channel === "main" && !frame.peers.some((peer) => peer.name === "A"));
+
+    a.send({ t: "part", id: "p2", channels: ["blue", "green"] });
+    const emptied = await a.next((frame) => isReply(frame, "p2"));
+    expect(replyChannels(emptied, "p2")).toEqual([]);
+    expect((await a.closed).code).toBe(1000);
+  });
+
+  it("rejects a hello when the name is taken in one requested channel", async () => {
+    const server = start();
+    await hello(connect(server), "A", ["main"]);
+    const observer = connect(server);
+    await hello(observer, "BlueObs", ["blue"]);
+
+    const dup = connect(server);
+    const rejected = await hello(dup, "A", ["main", "blue"]);
+    expect(rejected).toEqual({ t: "reject", error: "name_taken", channel: "main" });
+
+    // A bogus blue peers broadcast is debounced during hello processing, so it
+    // precedes the reply to any later request on the observer's socket.
+    observer.send({ t: "channels", id: "flush" });
+    await observer.next((frame) => isReply(frame, "flush"));
+    expect(observer.frames.some((frame) => frame.t === "peers" && frame.peers.some((peer) => peer.name === "A"))).toBeFalse();
+  });
+
+  it("refuses a rename when the new name exists in any joined channel", async () => {
+    const server = start();
+    const a = connect(server);
+    const b = connect(server);
+    const c = connect(server);
+    await hello(a, "A", ["main", "blue"]);
+    await hello(b, "B", ["main"]);
+    await hello(c, "C", ["blue"]);
+
+    a.send({ t: "rename", id: "r1", name: "C" });
+    const conflict = await a.next((frame) => isReply(frame, "r1"));
+    expect(conflict.t === "reply" && !Array.isArray(conflict.result) && "error" in conflict.result && conflict.result.error).toBe("name_taken");
+
+    a.send({ t: "rename", id: "r2", name: "Zed" });
+    const renamed = await a.next((frame) => isReply(frame, "r2"));
+    expect(renamed.t === "reply" && !Array.isArray(renamed.result) && "success" in renamed.result && renamed.result.success).toBeTrue();
+    await b.next((frame) => frame.t === "peers" && frame.channel === "main" && frame.peers.some((peer) => peer.name === "Zed"));
+    await c.next((frame) => frame.t === "peers" && frame.channel === "blue" && frame.peers.some((peer) => peer.name === "Zed"));
+  });
+
+  it("scopes claim broadcasts to their channel", async () => {
+    const server = start();
+    const mainOnly = connect(server);
+    const bridge = connect(server);
+    await hello(mainOnly, "MainOnly", ["main"]);
+    await hello(bridge, "Bridge", ["main", "blue"]);
+
+    bridge.send({ t: "claim", id: "c1", channel: "blue", spec: "spec", taskId: "T1" });
+    const blueClaims = await bridge.next((frame) => frame.t === "claims" && frame.channel === "blue");
+    expect(blueClaims.t === "claims" && blueClaims.claims.spec?.T1?.agent).toBe("Bridge");
+
+    bridge.send({ t: "claim", id: "c2", channel: "main", spec: "spec", taskId: "T2" });
+    const mainClaims = await mainOnly.next((frame) => frame.t === "claims" && frame.channel === "main");
+    expect(mainClaims.t === "claims" && mainClaims.claims.spec?.T2?.agent).toBe("Bridge");
+    expect(mainClaims.t === "claims" && mainClaims.claims.spec?.T1).toBeUndefined();
+    expect(mainOnly.frames.some((frame) => frame.t === "claims" && frame.channel === "blue")).toBeFalse();
+    expect(mainOnly.frames.some((frame) => frame.t === "claims" && frame.claims.spec?.T1 !== undefined)).toBeFalse();
   });
 });

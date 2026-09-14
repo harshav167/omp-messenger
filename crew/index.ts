@@ -54,7 +54,7 @@ export async function executeCrewAction(
 
   // join - this is how you register
   if (group === 'join') {
-    return handlers.executeJoin(state, mesh, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention, params.channel);
+    return handlers.executeJoin(state, mesh, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention, params.channels);
   }
 
   // autoRegisterPath - config management, not agent operation
@@ -81,6 +81,12 @@ export async function executeCrewAction(
       return handlers.executeStatus(state, mesh, ctx.cwd);
 
     case 'channels':
+      if (op === 'join') {
+        return handlers.executeJoinChannels(state, mesh, ctx, params.channels);
+      }
+      if (op === 'leave') {
+        return handlers.executeLeaveChannels(state, mesh, params.channels);
+      }
       return handlers.executeChannels(mesh);
 
     case 'leave':
@@ -111,10 +117,10 @@ export async function executeCrewAction(
       return handlers.executeSetSpec(state, mesh, ctx, params.spec);
 
     case 'send':
-      return handlers.executeSend(state, mesh, ctx.cwd, params.to, false, params.message, params.replyTo, params.gentle);
+      return handlers.executeSend(state, mesh, ctx.cwd, params.to, false, params.message, params.replyTo, params.gentle, params.channel);
 
     case 'broadcast':
-      return handlers.executeSend(state, mesh, ctx.cwd, undefined, true, params.message, params.replyTo, params.gentle);
+      return handlers.executeSend(state, mesh, ctx.cwd, undefined, true, params.message, params.replyTo, params.gentle, params.channel);
 
     case 'reserve':
       if (!params.paths || params.paths.length === 0) {
@@ -138,19 +144,19 @@ export async function executeCrewAction(
       if (!params.taskId) {
         return result("Error: taskId required for claim action.", { mode: "claim", error: "missing_taskId" });
       }
-      return handlers.executeClaim(state, mesh, ctx, params.taskId, params.spec, params.reason);
+      return handlers.executeClaim(state, mesh, ctx, params.taskId, params.spec, params.reason, params.channel);
 
     case 'unclaim':
       if (!params.taskId) {
         return result("Error: taskId required for unclaim action.", { mode: "unclaim", error: "missing_taskId" });
       }
-      return handlers.executeUnclaim(state, mesh, ctx.cwd, params.taskId, params.spec);
+      return handlers.executeUnclaim(state, mesh, ctx.cwd, params.taskId, params.spec, params.channel);
 
     case 'complete':
       if (!params.taskId) {
         return result("Error: taskId required for complete action.", { mode: "complete", error: "missing_taskId" });
       }
-      return handlers.executeComplete(state, mesh, ctx.cwd, params.taskId, params.notes, params.spec);
+      return handlers.executeComplete(state, mesh, ctx.cwd, params.taskId, params.notes, params.spec, params.channel);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Crew actions - Simplified PRD-based workflow

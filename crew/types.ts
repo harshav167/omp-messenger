@@ -88,7 +88,9 @@ export interface CrewParams {
   // Action
   action?: string;
 
-  // Mesh channel (join)
+  // Mesh channels (join / channels.join / channels.leave)
+  channels?: string[];
+  // Channel to route a send/claim through when the target is in several channels
   channel?: string;
 
   // Plan

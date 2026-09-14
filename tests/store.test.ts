@@ -171,6 +171,7 @@ describe("filesystem mesh inbox", () => {
         text: "Historical body",
         timestamp,
         replyTo: null,
+        channel: "main",
       },
     ]);
     expect(fs.readdirSync(inbox)).toEqual([]);
@@ -183,9 +184,11 @@ describe("filesystem mesh channels", () => {
     const fixture = createTestMesh(root);
     const mesh = trackMesh(fixture.mesh);
 
-    expect(await mesh.join(createContext(root), { channel: "alpha" })).toBe(true);
+    expect(await mesh.join(createContext(root), { channels: ["alpha"] })).toBe(true);
 
+    expect(mesh.channels()).toEqual(["alpha"]);
     expect(fs.existsSync(path.join(fixture.base, "channels", "alpha", "registry", "Self.json"))).toBe(true);
+    expect(fs.existsSync(path.join(fixture.base, "registry", "Self.json"))).toBe(false);
   });
 
   it("lists main and named channels with their live member counts", async () => {
@@ -196,13 +199,40 @@ describe("filesystem mesh channels", () => {
     const alphaMesh = trackMesh(alphaFixture.mesh);
 
     expect(await mainMesh.join(createContext(root))).toBe(true);
-    expect(await alphaMesh.join(createContext(root), { channel: "alpha" })).toBe(true);
+    expect(await alphaMesh.join(createContext(root), { channels: ["alpha"] })).toBe(true);
 
-    const channels = await mainMesh.channels();
+    const channels = await mainMesh.listChannels();
 
     expect(channels.map(({ name, members }) => ({ name, members }))).toEqual([
       { name: "main", members: 1 },
       { name: "alpha", members: 1 },
     ]);
+  });
+
+  it("registers in every joined channel and drains each channel inbox", async () => {
+    const root = createTempRoot();
+    const fixture = createTestMesh(root, { agentName: "Self", channels: ["main", "blue"] });
+    const mesh = trackMesh(fixture.mesh);
+    const mainPeer = trackMesh(createTestMesh(root, { agentName: "MainPeer", channels: ["main"] }).mesh);
+    const bluePeer = trackMesh(createTestMesh(root, { agentName: "BluePeer", channels: ["blue"] }).mesh);
+
+    expect(await mesh.join(createContext(root))).toBe(true);
+    expect(await mainPeer.join(createContext(root))).toBe(true);
+    expect(await bluePeer.join(createContext(root))).toBe(true);
+
+    expect(fs.existsSync(path.join(fixture.base, "registry", "Self.json"))).toBe(true);
+    expect(fs.existsSync(path.join(fixture.base, "channels", "blue", "registry", "Self.json"))).toBe(true);
+    expect(mesh.channels()).toEqual(["blue", "main"]);
+
+    expect((await mainPeer.send("Self", "from main")).ok).toBe(true);
+    expect((await bluePeer.send("Self", "from blue")).ok).toBe(true);
+
+    mesh.drainInbox();
+
+    const byText: Record<string, string | undefined> = Object.fromEntries(
+      fixture.delivered.map((message) => [message.text, message.channel]),
+    );
+    expect(byText["from main"]).toBe("main");
+    expect(byText["from blue"]).toBe("blue");
   });
 });

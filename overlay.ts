@@ -48,7 +48,7 @@ import { spawnLobbyWorker, removeLobbyWorkerByIndex } from "./crew/lobby.ts";
 
 export interface OverlayCallbacks {
   onBackground?: (snapshot: string) => void;
-  /** Close the overlay and open the config overlay (mesh URL/token/channel). */
+  /** Close the overlay and open the config overlay (mesh URL/token/channels). */
   onOpenConfig?: () => void;
 }
 
@@ -626,7 +626,7 @@ export class MessengerOverlay implements Component, Focusable {
     lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW, tasks, {
       kind: this.mesh.kind,
       status: this.mesh.status(),
-      channel: this.mesh.channel(),
+      channels: this.mesh.channels(),
       peerCount: this.mesh.peers().length,
     })));
     lines.push(emptyRow());

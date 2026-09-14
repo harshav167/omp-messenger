@@ -50,14 +50,14 @@ describe("crew action router status behavior", () => {
     ]));
   });
 
-  it("forwards the requested channel when joining", async () => {
+  it("forwards the requested channels when joining", async () => {
     const { cwd } = createTempCrewDirs();
     const { mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
     const ctx = createMockContext(cwd);
 
     const response = await executeCrewAction(
       "join",
-      { channel: "blue" },
+      { channels: ["blue"] },
       state,
       mesh,
       ctx,
@@ -66,8 +66,45 @@ describe("crew action router status behavior", () => {
       vi.fn(),
     );
 
-    expect(mesh.channel()).toBe("blue");
-    expect(response.details.channel).toBe("blue");
+    expect(mesh.channels()).toEqual(["blue"]);
+    expect(response.details.channels).toEqual(["blue"]);
+  });
+
+  it("routes channels.join and channels.leave to live membership changes", async () => {
+    const { cwd } = createTempCrewDirs();
+    const { mesh, state } = createTestMesh(cwd, { agentName: "AgentOne", cwd });
+    const ctx = createMockContext(cwd);
+    await mesh.join(ctx);
+
+    const joined = await executeCrewAction(
+      "channels.join",
+      { channels: ["blue"] },
+      state,
+      mesh,
+      ctx,
+      () => {},
+      () => {},
+      vi.fn(),
+    );
+
+    expect(joined.details.mode).toBe("channels.join");
+    expect(joined.details.channels).toEqual(["blue", "main"]);
+    expect(mesh.channels()).toEqual(["blue", "main"]);
+
+    const left = await executeCrewAction(
+      "channels.leave",
+      { channels: ["blue"] },
+      state,
+      mesh,
+      ctx,
+      () => {},
+      () => {},
+      vi.fn(),
+    );
+
+    expect(left.details.mode).toBe("channels.leave");
+    expect(left.details.channels).toEqual(["main"]);
+    expect(mesh.channels()).toEqual(["main"]);
   });
 
   it("routes action=crew.status to crew status handler", async () => {

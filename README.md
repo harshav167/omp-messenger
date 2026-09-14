@@ -35,15 +35,15 @@ docker compose -f mesh/docker-compose.yml --env-file mesh/.env up -d
 curl http://<host>:8765/healthz   # → ok
 ```
 
-Point every machine at it in `~/.omp/agent/omp-messenger.json` (or per repo in `.omp/omp-messenger.json`, which is how a project pins its channel):
+Point every machine at it in `~/.omp/agent/omp-messenger.json` (or per repo in `.omp/omp-messenger.json`, which is how a project pins its channels):
 
 ```json
-{ "mesh": { "url": "ws://<host>:8765", "channel": "main" } }
+{ "mesh": { "url": "ws://<host>:8765", "channels": ["main"] } }
 ```
 
-Put the token in `~/.omp/agent/messenger/mesh.token` (mode 0600), or set `mesh.token` (a literal or `$ENV_NAME`), or export `OMP_MESSENGER_MESH_TOKEN`. `OMP_MESSENGER_MESH_URL` overrides the file URL. Without `mesh.url` the plugin uses the local filesystem mesh exactly as before.
+Put the token in `~/.omp/agent/messenger/mesh.token` (mode 0600), or set `mesh.token` (a literal or `$ENV_NAME`), or export `OMP_MESSENGER_MESH_TOKEN`. `OMP_MESSENGER_MESH_URL` overrides the file URL and `OMP_MESSENGER_MESH_CHANNELS` (comma-separated) overrides `channels`. Without `mesh.url` the plugin uses the local filesystem mesh exactly as before. `/messenger config` edits the same URL, token, and comma-separated channel list, then reconnects.
 
-`omp_messenger({ action: "channels" })` lists channels; `join { channel }` creates or joins one. The status bar shows `⚡<channel>` in mesh mode (`⚡<channel>…` while reconnecting). Set `{ "crew": { "team": { "enabled": false } } }` to switch the Team layer off.
+One identity can live in several channels at once: an agent joined to `main` and `blue` sees the union of both peer lists and bridges them — an agent only in `main` can reach an agent only in `blue` through it. `omp_messenger({ action: "channels" })` lists channels (joined ones marked); `join { channels: [...] }` replaces the joined set, `channels.join { channels }` adds, `channels.leave { channels }` removes (leaving the last channel leaves the mesh). The status bar shows `⚡<channels>` in mesh mode (`⚡<channels>…` while reconnecting). When a recipient name exists in more than one of your channels, `send` fails with `ambiguous_channel` — pass `channel` to pick one. Set `{ "crew": { "team": { "enabled": false } } }` to switch the Team layer off.
 
 List available crew agents with `omp_messenger({ action: "crew.agents" })`.
 
@@ -316,14 +316,17 @@ Agent definitions live in `agents/` within the extension. To customize one for a
 
 | Action | Description |
 |--------|-------------|
-| `join` | Join the agent mesh |
+| `join` | Join the agent mesh (`channels` optional — defaults to config) |
+| `channels` | List mesh channels (joined ones marked) |
+| `channels.join` | Join additional channels (`channels` required) |
+| `channels.leave` | Leave channels (`channels` required; last one leaves the mesh) |
 | `leave` | Leave the mesh for the current session |
 | `list` | List agents with presence info |
 | `status` | Show your status or crew progress |
 | `whois` | Detailed info about an agent (`name` required) |
 | `feed` | Show activity feed (`limit` optional, default: 20) |
 | `set_status` | Set custom status message (`message` optional — omit to clear) |
-| `send` | Send DM (`to` + `message` required) |
+| `send` | Send DM (`to` + `message` required; `channel` picks the route when the recipient is in several of your channels) |
 | `broadcast` | Broadcast to all (`message` required) |
 | `reserve` | Reserve files (`paths` required, `reason` optional) |
 | `release` | Release reservations (`paths` optional — omit to release all) |
@@ -422,7 +425,7 @@ Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerT
 
 Crew workers run as in-process omp subagents through the SDK injected into the extension (`runSubprocess` / `runSubagentFollowUpTurn`), with the agent's system prompt, model, and tool restrictions from its `.md` definition. A worker's session file lives under `<project>/.omp/messenger/crew/artifacts/<Name>.jsonl`, which is how the worker's own extension instance learns its mesh name and auto-joins. Progress comes from the SDK's `onProgress` callback — the overlay shows each worker's current tool, call count, and token usage in real time — and workers also appear in omp's Agent Hub. Aborting a work run triggers graceful shutdown: each worker receives a mesh message asking it to stop, followed by a grace period before its run is aborted. Lobby workers stay alive as idle omp subagents and receive task assignments through follow-up turns.
 
-Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.omp/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to sqlite on a volume), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. Activity feed and crew data stay project-scoped under `.omp/messenger/`.
+Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.omp/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to sqlite on a volume), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. One session registers the same identity in every configured channel, so peers, claims, and completions are the union across them. Activity feed and crew data stay project-scoped under `.omp/messenger/`.
 
 ## Credits
 

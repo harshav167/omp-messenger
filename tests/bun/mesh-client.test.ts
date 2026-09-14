@@ -33,10 +33,10 @@ describe("mesh client", () => {
   let server: MeshServer;
   let port: number;
 
-  function makeClient(agentName = "Self", explicitName = false, token = "t"): ClientFixture {
+  function makeClient(agentName = "Self", explicitName = false, token = "t", channels?: string[]): ClientFixture {
     const root = mkdtempSync(join(tmpdir(), "omp-messenger-client-"));
     roots.push(root);
-    const fixture = createTestMesh(root, { agentName });
+    const fixture = createTestMesh(root, { agentName, channels });
     fixture.state.explicitName = explicitName;
     const ctx = createMockContext(root);
     const mesh = createMeshClient({
@@ -77,6 +77,7 @@ describe("mesh client", () => {
     await waitUntil(() => b.delivered.length === 1);
     expect(b.delivered[0]?.text).toBe("hi");
     expect(b.delivered[0]?.from).toBe(a.state.agentName);
+    expect(b.delivered[0]?.channel).toBe("main");
   });
 
   it("rejects an explicit duplicate and suffixes an automatic duplicate", async () => {
@@ -117,14 +118,15 @@ describe("mesh client", () => {
   it("isolates peers by channel and lists channel membership", async () => {
     const a = makeClient();
     const b = makeClient();
-    const c = makeClient();
+    const c = makeClient("Self", false, "t", ["blue"]);
     await a.mesh.join(a.ctx);
     await b.mesh.join(b.ctx);
-    await c.mesh.join(c.ctx, { channel: "blue" });
+    await c.mesh.join(c.ctx);
 
     await waitUntil(() => a.mesh.peers().length === 1);
     expect(a.mesh.peers().some((peer) => peer.name === c.state.agentName)).toBe(false);
-    expect(await a.mesh.channels()).toEqual(expect.arrayContaining([
+    expect(c.mesh.channels()).toEqual(["blue"]);
+    expect(await a.mesh.listChannels()).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "main", members: 2 }),
       expect.objectContaining({ name: "blue", members: 1 }),
     ]));
@@ -177,5 +179,83 @@ describe("mesh client", () => {
     await a.mesh.leave();
     await waitUntil(() => b.mesh.peers().every((peer) => peer.name !== a.state.agentName));
     expect(await a.mesh.join(a.ctx)).toBe(true);
+  });
+
+  it("bridges single-channel peers and tags each peer with its shared channels", async () => {
+    const a = makeClient("Bridge", false, "t", ["main", "blue"]);
+    const b = makeClient("MainOnly", false, "t", ["main"]);
+    const c = makeClient("BlueOnly", false, "t", ["blue"]);
+    expect(await a.mesh.join(a.ctx, { channels: ["main", "blue"] })).toBe(true);
+    expect(await b.mesh.join(b.ctx)).toBe(true);
+    expect(await c.mesh.join(c.ctx)).toBe(true);
+
+    await waitUntil(() => a.mesh.peers().length === 2);
+    const peers: Record<string, string[]> = Object.fromEntries(a.mesh.peers().map((peer) => [peer.name, peer.channels]));
+    expect(peers["MainOnly"]).toEqual(["main"]);
+    expect(peers["BlueOnly"]).toEqual(["blue"]);
+
+    await waitUntil(() => b.mesh.peers().length === 1);
+    expect(b.mesh.peers()[0]?.name).toBe("Bridge");
+    expect(b.mesh.peers()[0]?.channels).toEqual(["main"]);
+
+    expect((await c.mesh.send("Bridge", "hi")).ok).toBe(true);
+    await waitUntil(() => a.delivered.length === 1);
+    expect(a.delivered[0]?.channel).toBe("blue");
+    expect(a.delivered[0]?.from).toBe("BlueOnly");
+  });
+
+  it("requires a channel when the recipient name is present in two joined channels", async () => {
+    const a = makeClient("Bridge", false, "t", ["main", "blue"]);
+    const b = makeClient("Same", false, "t", ["main"]);
+    const b2 = makeClient("Same", false, "t", ["blue"]);
+    await a.mesh.join(a.ctx);
+    await b.mesh.join(b.ctx);
+    await b2.mesh.join(b2.ctx);
+
+    await waitUntil(() => a.mesh.peers().some((peer) => peer.name === "Same" && peer.channels.length === 2));
+
+    expect(await a.mesh.send("Same", "x")).toEqual({ ok: false, error: "ambiguous_channel" });
+
+    expect((await a.mesh.send("Same", "x", { channel: "blue" })).ok).toBe(true);
+    await waitUntil(() => b2.delivered.length === 1);
+    expect(b2.delivered[0]?.channel).toBe("blue");
+    expect(b.delivered).toHaveLength(0);
+
+    expect((await a.mesh.send("Same", "y", { channel: "main" })).ok).toBe(true);
+    await waitUntil(() => b.delivered.length === 1);
+    expect(b.delivered[0]?.channel).toBe("main");
+  });
+
+  it("joins and leaves channels on the live connection", async () => {
+    const a = makeClient("Bridge", false, "t", ["main", "blue"]);
+    const b = makeClient("MainOnly", false, "t", ["main"]);
+    await a.mesh.join(a.ctx);
+    await b.mesh.join(b.ctx);
+    await waitUntil(() => b.mesh.peers().some((peer) => peer.name === "Bridge"));
+
+    expect(await a.mesh.joinChannels(a.ctx, ["green"])).toBe(true);
+    expect(a.mesh.channels()).toEqual(["blue", "green", "main"]);
+
+    await a.mesh.leaveChannels(["main"]);
+    expect(a.mesh.channels()).toEqual(["blue", "green"]);
+    expect(a.mesh.peers().some((peer) => peer.name === "MainOnly")).toBe(false);
+    await waitUntil(() => b.mesh.peers().every((peer) => peer.name !== "Bridge"));
+  });
+
+  it("re-asserts every joined channel after a server restart", async () => {
+    const a = makeClient("Bridge", false, "t", ["main", "blue"]);
+    const c = makeClient("BlueOnly", false, "t", ["blue"]);
+    await a.mesh.join(a.ctx);
+    await c.mesh.join(c.ctx);
+    await waitUntil(() => c.mesh.peers().some((peer) => peer.name === "Bridge"));
+
+    await server.stop();
+    await waitUntil(() => a.mesh.status() === "reconnecting", 500);
+    server = startMeshServer({ port, token: "t" });
+    servers.push(server);
+
+    await waitUntil(() => a.mesh.status() === "connected", 2_000);
+    await waitUntil(() => c.mesh.peers().some((peer) => peer.name === "Bridge"), 2_000);
+    expect(a.mesh.channels()).toEqual(["blue", "main"]);
   });
 });

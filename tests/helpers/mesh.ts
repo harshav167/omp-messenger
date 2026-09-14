@@ -7,7 +7,7 @@ import type { Mesh } from "../../mesh/types.ts";
 export interface TestMeshOptions {
   agentName?: string;
   cwd?: string;
-  channel?: string;
+  channels?: string[];
 }
 
 export interface TestMesh {
@@ -27,7 +27,7 @@ export function createTestMesh(root: string, opts?: TestMeshOptions): TestMesh {
     agentName: opts?.agentName ?? "Self",
     explicitName: false,
     registered: false,
-    channel: opts?.channel ?? "main",
+    channels: opts?.channels ?? ["main"],
     isCrewWorker: false,
     messagesSent: 0,
     watcher: null,

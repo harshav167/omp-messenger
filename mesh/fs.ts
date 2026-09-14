@@ -23,6 +23,7 @@ import {
   isProcessAlive,
   isValidAgentName,
   normalizeAgentMailMessage,
+  normalizeChannels,
 } from "../lib.ts";
 import { buildRegistration, normalizeCwd } from "./registration.ts";
 import type {
@@ -30,7 +31,9 @@ import type {
   CompleteResult,
   DeliverFn,
   Mesh,
+  MeshPeer,
   RenameResult,
+  SendError,
   SendOptions,
   UnclaimResult,
 } from "./types.ts";
@@ -39,20 +42,25 @@ interface AgentsCache {
   allAgents: AgentRegistration[];
   filtered: Map<string, AgentRegistration[]>;
   timestamp: number;
-  registryPath: string;
 }
 
-interface PendingProcessArgs {
-  state: MessengerState;
-  dirs: Dirs;
-  deliver: DeliverFn;
-}
 
 interface FsRuntime {
-  agentsCache: AgentsCache | null;
+  /** Agents cache per channel registry path. */
+  agentsCache: Map<string, AgentsCache>;
   cacheGeneration: number;
   isProcessingMessages: boolean;
-  pendingProcessArgs: PendingProcessArgs | null;
+  /** Channels that asked for message processing while another run was active. */
+  pendingProcess: Map<string, Dirs>;
+  /** Inbox watchers per joined channel. */
+  watches: Map<string, ChannelWatch>;
+}
+
+interface ChannelWatch {
+  watcher: fs.FSWatcher | null;
+  retries: number;
+  retryTimer: Timer | null;
+  debounceTimer: Timer | null;
 }
 
 const AGENTS_CACHE_TTL_MS = 1000;
@@ -64,7 +72,7 @@ export function invalidateAgentsCache(): void {
 
 function refreshCacheGeneration(runtime: FsRuntime): void {
   if (runtime.cacheGeneration === agentsCacheGeneration) return;
-  runtime.agentsCache = null;
+  runtime.agentsCache.clear();
   runtime.cacheGeneration = agentsCacheGeneration;
 }
 
@@ -114,7 +122,9 @@ async function withSwarmLock<T>(baseDir: string, fn: () => T): Promise<T> {
         if (i === maxRetries - 1) {
           throw new Error("Failed to acquire swarm lock");
         }
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, retryDelay);
+        await promise;
         continue;
       }
       throw err;
@@ -140,40 +150,13 @@ function getRegistrationPath(state: MessengerState, dirs: Dirs): string {
   return join(dirs.registry, `${state.agentName}.json`);
 }
 
-function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime): AgentRegistration[] {
-  refreshCacheGeneration(runtime);
-  const now = Date.now();
-  const excludeName = state.agentName;
-  const myCwd = normalizeCwd(state.cwd);
-  const scopeToFolder = state.scopeToFolder;
-  const cacheKey = scopeToFolder ? `${excludeName}:${myCwd}` : excludeName;
-  const cached = runtime.agentsCache;
-
-  if (
-    cached &&
-    cached.registryPath === dirs.registry &&
-    now - cached.timestamp < AGENTS_CACHE_TTL_MS
-  ) {
-    const cachedFiltered = cached.filtered.get(cacheKey);
-    if (cachedFiltered) return cachedFiltered;
-
-    let filtered = cached.allAgents.filter(agent => agent.name !== excludeName);
-    if (scopeToFolder) {
-      filtered = filtered.filter(agent => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
-    }
-    cached.filtered.set(cacheKey, filtered);
-    return filtered;
-  }
-
+function readAliveAgents(registry: string): AgentRegistration[] {
   const allAgents: AgentRegistration[] = [];
-  if (!fs.existsSync(dirs.registry)) {
-    runtime.agentsCache = { allAgents, filtered: new Map(), timestamp: now, registryPath: dirs.registry };
-    return allAgents;
-  }
+  if (!fs.existsSync(registry)) return allAgents;
 
   let files: string[];
   try {
-    files = fs.readdirSync(dirs.registry);
+    files = fs.readdirSync(registry);
   } catch {
     return allAgents;
   }
@@ -182,12 +165,12 @@ function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime):
     if (!file.endsWith(".json")) continue;
 
     try {
-      const content = fs.readFileSync(join(dirs.registry, file), "utf-8");
+      const content = fs.readFileSync(join(registry, file), "utf-8");
       const reg: AgentRegistration = JSON.parse(content);
 
       if (!isProcessAlive(reg.pid)) {
         try {
-          fs.unlinkSync(join(dirs.registry, file));
+          fs.unlinkSync(join(registry, file));
         } catch {
           // Ignore cleanup errors
         }
@@ -210,6 +193,31 @@ function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime):
       // Ignore malformed registrations
     }
   }
+  return allAgents;
+}
+
+function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime): AgentRegistration[] {
+  refreshCacheGeneration(runtime);
+  const now = Date.now();
+  const excludeName = state.agentName;
+  const myCwd = normalizeCwd(state.cwd);
+  const scopeToFolder = state.scopeToFolder;
+  const cacheKey = scopeToFolder ? `${excludeName}:${myCwd}` : excludeName;
+  const cached = runtime.agentsCache.get(dirs.registry);
+
+  if (cached && now - cached.timestamp < AGENTS_CACHE_TTL_MS) {
+    const cachedFiltered = cached.filtered.get(cacheKey);
+    if (cachedFiltered) return cachedFiltered;
+
+    let filtered = cached.allAgents.filter(agent => agent.name !== excludeName);
+    if (scopeToFolder) {
+      filtered = filtered.filter(agent => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
+    }
+    cached.filtered.set(cacheKey, filtered);
+    return filtered;
+  }
+
+  const allAgents = readAliveAgents(dirs.registry);
 
   let filtered = allAgents.filter(agent => agent.name !== excludeName);
   if (scopeToFolder) {
@@ -217,45 +225,107 @@ function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime):
   }
   const filteredMap = new Map<string, AgentRegistration[]>();
   filteredMap.set(cacheKey, filtered);
-  runtime.agentsCache = { allAgents, filtered: filteredMap, timestamp: now, registryPath: dirs.registry };
+  runtime.agentsCache.set(dirs.registry, { allAgents, filtered: filteredMap, timestamp: now });
 
   return filtered;
 }
 
-function findAvailableName(baseName: string, dirs: Dirs): string | null {
-  const basePath = join(dirs.registry, `${baseName}.json`);
-  if (!fs.existsSync(basePath)) return baseName;
-
+/** An alive registration for `name` held by another pid in this channel's registry. */
+function nameConflict(dirs: Dirs, name: string): boolean {
+  const regPath = join(dirs.registry, `${name}.json`);
+  if (!fs.existsSync(regPath)) return false;
   try {
-    const existing: AgentRegistration = JSON.parse(fs.readFileSync(basePath, "utf-8"));
-    if (!isProcessAlive(existing.pid) || existing.pid === process.pid) {
-      return baseName;
-    }
+    const existing: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+    return isProcessAlive(existing.pid) && existing.pid !== process.pid;
   } catch {
-    return baseName;
+    return false;
   }
+}
+
+/** First channel where `name` is taken by another live agent, or null. */
+function nameConflictChannel(base: string, channels: readonly string[], name: string): string | null {
+  for (const channel of channels) {
+    if (nameConflict(channelDirs(base, channel), name)) return channel;
+  }
+  return null;
+}
+
+function findAvailableName(baseName: string, base: string, channels: readonly string[]): string | null {
+  if (!nameConflictChannel(base, channels, baseName)) return baseName;
 
   for (let i = 2; i <= 99; i++) {
     const altName = `${baseName}${i}`;
-    const altPath = join(dirs.registry, `${altName}.json`);
-
-    if (!fs.existsSync(altPath)) return altName;
-
-    try {
-      const altReg: AgentRegistration = JSON.parse(fs.readFileSync(altPath, "utf-8"));
-      if (!isProcessAlive(altReg.pid)) return altName;
-    } catch {
-      return altName;
-    }
+    if (!nameConflictChannel(base, channels, altName)) return altName;
   }
 
   return null;
 }
 
-function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, nameTheme?: NameThemeConfig): boolean {
-  if (state.registered) return true;
+interface WriteRegistrationsResult {
+  ok: boolean;
+  reason?: "write_failed" | "verify_failed";
+  detail?: string;
+}
 
-  ensureDirSync(dirs.registry);
+/** Write the same registration file into every channel, then verify each write. */
+function writeRegistrationFiles(
+  state: MessengerState,
+  base: string,
+  channels: readonly string[],
+  registration: AgentRegistration,
+): WriteRegistrationsResult {
+  for (const channel of channels) {
+    const dirs = channelDirs(base, channel);
+    ensureDirSync(dirs.registry);
+    ensureDirSync(getMyInbox(state, dirs));
+    const regPath = getRegistrationPath(state, dirs);
+    if (fs.existsSync(regPath)) {
+      try {
+        fs.unlinkSync(regPath);
+      } catch {
+        // Ignore
+      }
+    }
+    try {
+      fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
+    } catch (err) {
+      return { ok: false, reason: "write_failed", detail: err instanceof Error ? err.message : "unknown error" };
+    }
+  }
+
+  for (const channel of channels) {
+    const regPath = getRegistrationPath(state, channelDirs(base, channel));
+    try {
+      const written: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+      if (written.pid !== process.pid) return { ok: false, reason: "verify_failed" };
+    } catch {
+      return { ok: false, reason: "verify_failed" };
+    }
+  }
+  return { ok: true };
+}
+
+/** Remove registration files for `name` that still contain our pid (best-effort rollback). */
+function rollbackRegistrations(base: string, channels: readonly string[], name: string): void {
+  for (const channel of channels) {
+    const regPath = join(channelDirs(base, channel).registry, `${name}.json`);
+    try {
+      const reg: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+      if (reg.pid === process.pid) fs.unlinkSync(regPath);
+    } catch {
+      // Missing or already overwritten by another agent
+    }
+  }
+}
+
+function register(
+  state: MessengerState,
+  base: string,
+  channels: readonly string[],
+  ctx: ExtensionContext,
+  nameTheme?: NameThemeConfig,
+): boolean {
+  if (state.registered) return true;
 
   if (!state.agentName) {
     state.agentName = generateMemorableName(nameTheme);
@@ -265,7 +335,7 @@ function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, name
   const maxAttempts = isExplicitName ? 1 : 3;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    // Validate and find available name
+    // The name must be free in EVERY channel before any file is written.
     if (isExplicitName) {
       if (!isValidAgentName(state.agentName)) {
         if (ctx.hasUI) {
@@ -273,22 +343,15 @@ function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, name
         }
         return false;
       }
-      const regPath = join(dirs.registry, `${state.agentName}.json`);
-      if (fs.existsSync(regPath)) {
-        try {
-          const existing: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
-          if (isProcessAlive(existing.pid) && existing.pid !== process.pid) {
-            if (ctx.hasUI) {
-              ctx.ui.notify(`Agent name "${state.agentName}" already in use (PID ${existing.pid})`, "error");
-            }
-            return false;
-          }
-        } catch {
-          // Malformed, proceed to overwrite
+      const conflict = nameConflictChannel(base, channels, state.agentName);
+      if (conflict) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Agent name "${state.agentName}" already in use in #${conflict}`, "error");
         }
+        return false;
       }
     } else {
-      const availableName = findAvailableName(state.agentName, dirs);
+      const availableName = findAvailableName(state.agentName, base, channels);
       if (!availableName) {
         if (ctx.hasUI) {
           ctx.ui.notify("Could not find available agent name after 99 attempts", "error");
@@ -298,39 +361,9 @@ function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, name
       state.agentName = availableName;
     }
 
-    const regPath = getRegistrationPath(state, dirs);
-    if (fs.existsSync(regPath)) {
-      try {
-        fs.unlinkSync(regPath);
-      } catch {
-        // Ignore
-      }
-    }
-
-    ensureDirSync(getMyInbox(state, dirs));
-
     const registration = buildRegistration(state, ctx, state.agentName);
-
-    try {
-      fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
-    } catch (err) {
-      if (ctx.hasUI) {
-        const msg = err instanceof Error ? err.message : "unknown error";
-        ctx.ui.notify(`Failed to register: ${msg}`, "error");
-      }
-      return false;
-    }
-
-    let verified = false;
-    let verifyError = false;
-    try {
-      const written: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
-      verified = written.pid === process.pid;
-    } catch {
-      verifyError = true;
-    }
-
-    if (verified) {
+    const written = writeRegistrationFiles(state, base, channels, registration);
+    if (written.ok) {
       state.registered = true;
       state.model = registration.model;
       state.cwd = registration.cwd;
@@ -340,18 +373,13 @@ function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, name
       return true;
     }
 
-    // Verification failed - clean up our write attempt if file still contains our data
-    // (handles I/O error case where we wrote successfully but couldn't read back)
-    if (verifyError) {
-      try {
-        const checkContent = fs.readFileSync(regPath, "utf-8");
-        const checkReg: AgentRegistration = JSON.parse(checkContent);
-        if (checkReg.pid === process.pid) {
-          fs.unlinkSync(regPath);
-        }
-      } catch {
-        // Best effort cleanup
+    rollbackRegistrations(base, channels, state.agentName);
+
+    if (written.reason === "write_failed") {
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Failed to register: ${written.detail ?? "unknown error"}`, "error");
       }
+      return false;
     }
 
     // Another agent claimed this name - retry with fresh lookup (auto-generated only)
@@ -399,9 +427,7 @@ function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionCon
 }
 
 
-function unregister(state: MessengerState, dirs: Dirs): void {
-  if (!state.registered) return;
-
+function unregisterChannel(state: MessengerState, dirs: Dirs): void {
   const regPath = getRegistrationPath(state, dirs);
   try {
     fs.unlinkSync(regPath);
@@ -410,15 +436,13 @@ function unregister(state: MessengerState, dirs: Dirs): void {
       throw error;
     }
   }
-
-  state.registered = false;
   invalidateAgentsCache();
 }
 
 
 function renameAgent(
   state: MessengerState,
-  dirs: Dirs,
+  base: string,
   ctx: ExtensionContext,
   newName: string,
   deliver: DeliverFn,
@@ -436,90 +460,81 @@ function renameAgent(
     return { success: false, error: "same_name" };
   }
 
-  const newRegPath = join(dirs.registry, `${newName}.json`);
-  if (fs.existsSync(newRegPath)) {
-    try {
-      const existing: AgentRegistration = JSON.parse(fs.readFileSync(newRegPath, "utf-8"));
-      if (isProcessAlive(existing.pid) && existing.pid !== process.pid) {
-        return { success: false, error: "name_taken" };
-      }
-    } catch {
-      // Malformed file, we can overwrite
-    }
+  const channels = state.channels;
+  if (nameConflictChannel(base, channels, newName)) {
+    return { success: false, error: "name_taken" };
   }
 
   const oldName = state.agentName;
-  const oldRegPath = getRegistrationPath(state, dirs);
-  const oldInbox = getMyInbox(state, dirs);
-  const newInbox = join(dirs.inbox, newName);
 
-  processAllPendingMessages(state, dirs, deliver, runtime);
+  for (const channel of channels) {
+    processAllPendingMessages(state, channelDirs(base, channel), deliver, runtime, channel);
+  }
 
   const registration = buildRegistration(state, ctx, newName);
 
-  ensureDirSync(dirs.registry);
-  
-  try {
-    fs.writeFileSync(join(dirs.registry, `${newName}.json`), JSON.stringify(registration, null, 2));
-  } catch {
-    return { success: false, error: "invalid_name" };
+  // Write the new registration in every channel before removing the old one.
+  for (const channel of channels) {
+    const dirs = channelDirs(base, channel);
+    ensureDirSync(dirs.registry);
+    const newRegPath = join(dirs.registry, `${newName}.json`);
+    try {
+      fs.writeFileSync(newRegPath, JSON.stringify(registration, null, 2));
+    } catch {
+      rollbackRegistrations(base, channels, newName);
+      return { success: false, error: "invalid_name" };
+    }
   }
 
-  // Verify we own the new registration (guards against race condition)
-  let verified = false;
-  let verifyError = false;
-  try {
-    const written: AgentRegistration = JSON.parse(fs.readFileSync(newRegPath, "utf-8"));
-    verified = written.pid === process.pid;
-  } catch {
-    verifyError = true;
+  // Verify we own every new registration (guards against race condition)
+  for (const channel of channels) {
+    const newRegPath = join(channelDirs(base, channel).registry, `${newName}.json`);
+    let ours = false;
+    try {
+      const written: AgentRegistration = JSON.parse(fs.readFileSync(newRegPath, "utf-8"));
+      ours = written.pid === process.pid;
+    } catch {
+      // Not readable means not verifiably ours
+    }
+    if (!ours) {
+      rollbackRegistrations(base, channels, newName);
+      return { success: false, error: "race_lost" };
+    }
   }
 
-  if (!verified) {
-    // Clean up our write attempt if file still contains our data (I/O error case)
-    if (verifyError) {
+  for (const channel of channels) {
+    const dirs = channelDirs(base, channel);
+    try {
+      fs.unlinkSync(join(dirs.registry, `${oldName}.json`));
+    } catch {
+      // Ignore - old file might already be gone
+    }
+
+    const newInbox = join(dirs.inbox, newName);
+    if (fs.existsSync(newInbox)) {
       try {
-        const checkReg: AgentRegistration = JSON.parse(fs.readFileSync(newRegPath, "utf-8"));
-        if (checkReg.pid === process.pid) {
-          fs.unlinkSync(newRegPath);
+        const staleFiles = fs.readdirSync(newInbox).filter(f => f.endsWith(".json"));
+        for (const file of staleFiles) {
+          try {
+            fs.unlinkSync(join(newInbox, file));
+          } catch {
+            // Ignore
+          }
         }
       } catch {
-        // Best effort cleanup
+        // Ignore
       }
     }
-    return { success: false, error: "race_lost" };
-  }
+    ensureDirSync(newInbox);
 
-  try {
-    fs.unlinkSync(oldRegPath);
-  } catch {
-    // Ignore - old file might already be gone
+    try {
+      fs.rmdirSync(join(dirs.inbox, oldName));
+    } catch {
+      // Ignore - might have new messages or not exist
+    }
   }
 
   state.agentName = newName;
-
-  if (fs.existsSync(newInbox)) {
-    try {
-      const staleFiles = fs.readdirSync(newInbox).filter(f => f.endsWith(".json"));
-      for (const file of staleFiles) {
-        try {
-          fs.unlinkSync(join(newInbox, file));
-        } catch {
-          // Ignore
-        }
-      }
-    } catch {
-      // Ignore
-    }
-  }
-  ensureDirSync(newInbox);
-
-  try {
-    fs.rmdirSync(oldInbox);
-  } catch {
-    // Ignore - might have new messages or not exist
-  }
-
   state.model = registration.model;
   state.cwd = registration.cwd;
   state.gitBranch = registration.gitBranch;
@@ -779,11 +794,12 @@ function processAllPendingMessages(
   dirs: Dirs,
   deliver: DeliverFn,
   runtime: FsRuntime,
+  channel: string,
 ): void {
   if (!state.registered) return;
 
   if (runtime.isProcessingMessages) {
-    runtime.pendingProcessArgs = { state, dirs, deliver };
+    runtime.pendingProcess.set(channel, dirs);
     return;
   }
 
@@ -810,6 +826,7 @@ function processAllPendingMessages(
           to: state.agentName,
           timestamp: new Date().toISOString(),
         });
+        msg.channel = channel;
         deliver(msg);
         fs.unlinkSync(msgPath);
       } catch {
@@ -824,10 +841,12 @@ function processAllPendingMessages(
   } finally {
     runtime.isProcessingMessages = false;
 
-    if (runtime.pendingProcessArgs) {
-      const args = runtime.pendingProcessArgs;
-      runtime.pendingProcessArgs = null;
-      processAllPendingMessages(args.state, args.dirs, args.deliver, runtime);
+    if (runtime.pendingProcess.size > 0) {
+      const pending = [...runtime.pendingProcess.entries()];
+      runtime.pendingProcess.clear();
+      for (const [pendingChannel, pendingDirs] of pending) {
+        processAllPendingMessages(state, pendingDirs, deliver, runtime, pendingChannel);
+      }
     }
   }
 }
@@ -839,6 +858,7 @@ function sendMessageToAgent(
   from: string,
   replyTo: string | null,
   gentle: boolean,
+  channel: string,
 ): AgentMailMessage {
   const targetInbox = join(dirs.inbox, to);
   ensureDirSync(targetInbox);
@@ -850,6 +870,7 @@ function sendMessageToAgent(
     text,
     timestamp: new Date().toISOString(),
     replyTo,
+    channel,
     ...(gentle ? { gentle: true } : {}),
   };
 
@@ -866,70 +887,86 @@ function sendMessageToAgent(
 
 const WATCHER_DEBOUNCE_MS = 50;
 
+function channelWatch(runtime: FsRuntime, channel: string): ChannelWatch {
+  let watch = runtime.watches.get(channel);
+  if (!watch) {
+    watch = { watcher: null, retries: 0, retryTimer: null, debounceTimer: null };
+    runtime.watches.set(channel, watch);
+  }
+  return watch;
+}
+
 function startWatcher(
   state: MessengerState,
   dirs: Dirs,
   deliver: DeliverFn,
   runtime: FsRuntime,
+  channel: string,
 ): void {
   if (!state.registered) return;
-  if (state.watcher) return;
-  if (state.watcherRetries >= MAX_WATCHER_RETRIES) return;
+  const watch = channelWatch(runtime, channel);
+  if (watch.watcher) return;
+  if (watch.retries >= MAX_WATCHER_RETRIES) return;
 
   const inbox = getMyInbox(state, dirs);
   ensureDirSync(inbox);
 
-  processAllPendingMessages(state, dirs, deliver, runtime);
+  processAllPendingMessages(state, dirs, deliver, runtime, channel);
 
   function scheduleRetry(): void {
-    state.watcherRetries++;
-    if (state.watcherRetries < MAX_WATCHER_RETRIES) {
-      const delay = Math.min(1000 * Math.pow(2, state.watcherRetries - 1), 30000);
-      state.watcherRetryTimer = setTimeout(() => {
-        state.watcherRetryTimer = null;
-        startWatcher(state, dirs, deliver, runtime);
+    watch.retries++;
+    if (watch.retries < MAX_WATCHER_RETRIES) {
+      const delay = Math.min(1000 * Math.pow(2, watch.retries - 1), 30000);
+      watch.retryTimer = setTimeout(() => {
+        watch.retryTimer = null;
+        startWatcher(state, dirs, deliver, runtime, channel);
       }, delay);
     }
   }
 
+  let watcher: fs.FSWatcher;
   try {
-    state.watcher = fs.watch(inbox, () => {
-      // Fix 2: Debounce rapid events
-      if (state.watcherDebounceTimer) {
-        clearTimeout(state.watcherDebounceTimer);
+    watcher = fs.watch(inbox, () => {
+      // Debounce rapid events
+      if (watch.debounceTimer) {
+        clearTimeout(watch.debounceTimer);
       }
-      state.watcherDebounceTimer = setTimeout(() => {
-        state.watcherDebounceTimer = null;
-        processAllPendingMessages(state, dirs, deliver, runtime);
+      watch.debounceTimer = setTimeout(() => {
+        watch.debounceTimer = null;
+        processAllPendingMessages(state, dirs, deliver, runtime, channel);
       }, WATCHER_DEBOUNCE_MS);
     });
   } catch {
     scheduleRetry();
     return;
   }
+  watch.watcher = watcher;
 
-  state.watcher.on("error", () => {
-    stopWatcher(state);
+  watcher.on("error", () => {
+    stopWatcher(runtime, channel);
     scheduleRetry();
   });
 
-  state.watcherRetries = 0;
+  watch.retries = 0;
 }
 
-function stopWatcher(state: MessengerState): void {
-  if (state.watcherDebounceTimer) {
-    clearTimeout(state.watcherDebounceTimer);
-    state.watcherDebounceTimer = null;
+function stopWatcher(runtime: FsRuntime, channel: string): void {
+  const watch = runtime.watches.get(channel);
+  if (!watch) return;
+  if (watch.debounceTimer) {
+    clearTimeout(watch.debounceTimer);
+    watch.debounceTimer = null;
   }
-  if (state.watcherRetryTimer) {
-    clearTimeout(state.watcherRetryTimer);
-    state.watcherRetryTimer = null;
+  if (watch.retryTimer) {
+    clearTimeout(watch.retryTimer);
+    watch.retryTimer = null;
   }
-  if (state.watcher) {
-    state.watcher.close();
-    state.watcher = null;
+  if (watch.watcher) {
+    watch.watcher.close();
+    watch.watcher = null;
   }
 }
+
 
 // =============================================================================
 // Target Validation
@@ -1011,24 +1048,117 @@ function channelInfo(base: string, name: string): { name: string; members: numbe
 
 export function createFsMesh(base: string, state: MessengerState, deliver: DeliverFn): Mesh {
   const runtime: FsRuntime = {
-    agentsCache: null,
+    agentsCache: new Map(),
     cacheGeneration: agentsCacheGeneration,
     isProcessingMessages: false,
-    pendingProcessArgs: null,
+    pendingProcess: new Map(),
+    watches: new Map(),
   };
 
-  return {
+  function notifyInvalidChannels(ctx: ExtensionContext, err: unknown): void {
+    if (ctx.hasUI) {
+      ctx.ui.notify(err instanceof Error ? err.message : "Invalid channel name", "error");
+    }
+  }
+
+  /** Dirs for a claim operation; the channel must be one we joined. */
+  function joinedDirs(channel: string | undefined): Dirs {
+    const name = channel ?? state.channels[0];
+    if (name === undefined || !state.channels.includes(name)) {
+      throw new Error(`not joined: ${name}`);
+    }
+    return channelDirs(base, name);
+  }
+
+  const mesh: Mesh = {
     kind: "fs",
     status: () => "local",
-    channel: () => state.channel,
+    channels: () => (state.registered ? [...state.channels] : []),
+
     async join(ctx, opts) {
-      if (opts?.channel) state.channel = opts.channel;
-      const dirs = channelDirs(base, state.channel);
-      const joined = register(state, dirs, ctx, opts?.nameTheme);
-      if (joined) startWatcher(state, dirs, deliver, runtime);
+      let channels: string[];
+      try {
+        channels = normalizeChannels(opts?.channels ?? state.channels);
+      } catch (err) {
+        notifyInvalidChannels(ctx, err);
+        return false;
+      }
+      if (state.registered) {
+        // Reconcile membership: join additions first so the set never empties mid-flight.
+        const added = channels.filter(c => !state.channels.includes(c));
+        const removed = state.channels.filter(c => !channels.includes(c));
+        if (added.length > 0 && !(await mesh.joinChannels(ctx, added))) return false;
+        if (removed.length > 0) await mesh.leaveChannels(removed);
+        return true;
+      }
+      state.channels = channels;
+      const joined = register(state, base, state.channels, ctx, opts?.nameTheme);
+      if (joined) {
+        for (const channel of state.channels) {
+          startWatcher(state, channelDirs(base, channel), deliver, runtime, channel);
+        }
+      }
       return joined;
     },
-    async channels() {
+
+    async joinChannels(ctx, chs) {
+      let next: string[];
+      try {
+        next = normalizeChannels([...state.channels, ...chs]);
+      } catch (err) {
+        notifyInvalidChannels(ctx, err);
+        return false;
+      }
+      if (!state.registered) {
+        state.channels = next;
+        return true;
+      }
+      const added = next.filter(c => !state.channels.includes(c));
+      if (added.length === 0) {
+        state.channels = next;
+        return true;
+      }
+      const conflict = nameConflictChannel(base, added, state.agentName);
+      if (conflict) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Agent name "${state.agentName}" already in use in #${conflict}`, "error");
+        }
+        return false;
+      }
+      const registration = buildRegistration(state, ctx, state.agentName);
+      const written = writeRegistrationFiles(state, base, added, registration);
+      if (!written.ok) {
+        rollbackRegistrations(base, added, state.agentName);
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            written.reason === "write_failed"
+              ? `Failed to register: ${written.detail ?? "unknown error"}`
+              : `Agent name "${state.agentName}" was claimed by another agent`,
+            "error",
+          );
+        }
+        return false;
+      }
+      state.channels = next;
+      for (const channel of added) {
+        startWatcher(state, channelDirs(base, channel), deliver, runtime, channel);
+      }
+      invalidateAgentsCache();
+      return true;
+    },
+
+    async leaveChannels(chs) {
+      for (const channel of chs) {
+        if (!state.channels.includes(channel)) continue;
+        stopWatcher(runtime, channel);
+        runtime.watches.delete(channel);
+        unregisterChannel(state, channelDirs(base, channel));
+        state.channels = state.channels.filter(c => c !== channel);
+      }
+      if (state.channels.length === 0) state.registered = false;
+    },
+
+    async listChannels() {
       const channels = [channelInfo(base, "main")];
       const channelsDir = join(base, "channels");
       if (!fs.existsSync(channelsDir)) return channels;
@@ -1045,77 +1175,138 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
       for (const name of names) channels.push(channelInfo(base, name));
       return channels;
     },
+
     publish(ctx) {
-      const dirs = channelDirs(base, state.channel);
-      updateRegistration(state, dirs, ctx);
+      for (const channel of state.channels) {
+        updateRegistration(state, channelDirs(base, channel), ctx);
+      }
     },
+
     async leave() {
-      const dirs = channelDirs(base, state.channel);
-      unregister(state, dirs);
+      await mesh.leaveChannels([...state.channels]);
     },
+
     async rename(ctx, newName) {
-      const dirs = channelDirs(base, state.channel);
-      stopWatcher(state);
-      const result = renameAgent(state, dirs, ctx, newName, deliver, runtime);
-      state.watcherRetries = 0;
-      startWatcher(state, dirs, deliver, runtime);
+      for (const channel of state.channels) stopWatcher(runtime, channel);
+      const result = renameAgent(state, base, ctx, newName, deliver, runtime);
+      for (const channel of state.channels) {
+        channelWatch(runtime, channel).retries = 0;
+        startWatcher(state, channelDirs(base, channel), deliver, runtime, channel);
+      }
       return result;
     },
-    peers() {
-      const dirs = channelDirs(base, state.channel);
-      return getActiveAgents(state, dirs, runtime);
+
+    peers(): MeshPeer[] {
+      const byName = new Map<string, MeshPeer>();
+      for (const channel of state.channels) {
+        for (const agent of getActiveAgents(state, channelDirs(base, channel), runtime)) {
+          const existing = byName.get(agent.name);
+          if (existing) {
+            existing.channels.push(channel);
+            Object.assign(existing, agent);
+          } else {
+            byName.set(agent.name, { ...agent, channels: [channel] });
+          }
+        }
+      }
+      return [...byName.values()];
     },
+
     evict(name) {
-      const dirs = channelDirs(base, state.channel);
-      try {
-        fs.unlinkSync(join(dirs.registry, `${name}.json`));
-      } catch {
-        // The registration is already absent or cannot be removed.
+      for (const channel of state.channels) {
+        const dirs = channelDirs(base, channel);
+        try {
+          fs.unlinkSync(join(dirs.registry, `${name}.json`));
+        } catch {
+          // The registration is already absent or cannot be removed.
+        }
       }
       invalidateAgentsCache();
     },
+
     async send(to, text, opts?: SendOptions) {
-      const dirs = channelDirs(base, state.channel);
-      const target = validateTargetAgent(to, dirs);
-      if (target.valid === false) return { ok: false, error: target.error };
+      if (!isValidAgentName(to)) return { ok: false, error: "invalid_name" };
+
+      let channel: string;
+      if (opts?.channel !== undefined) {
+        if (!state.channels.includes(opts.channel)) return { ok: false, error: "not_found" };
+        const target = validateTargetAgent(to, channelDirs(base, opts.channel));
+        if (target.valid === false) return { ok: false, error: target.error };
+        channel = opts.channel;
+      } else {
+        const candidates: string[] = [];
+        let firstError: SendError = "not_found";
+        for (const joined of state.channels) {
+          const target = validateTargetAgent(to, channelDirs(base, joined));
+          if (target.valid === true) {
+            candidates.push(joined);
+          } else if (candidates.length === 0 && firstError === "not_found") {
+            firstError = target.error;
+          }
+        }
+        if (candidates.length === 0) return { ok: false, error: firstError };
+        if (candidates.length > 1) return { ok: false, error: "ambiguous_channel" };
+        channel = candidates[0];
+      }
 
       try {
         const message = sendMessageToAgent(
-          dirs,
+          channelDirs(base, channel),
           to,
           text,
           opts?.from ?? state.agentName,
           opts?.replyTo ?? null,
           opts?.gentle === true,
+          channel,
         );
         return { ok: true, message };
       } catch {
         return { ok: false, error: "write_failed" };
       }
     },
+
     recoverInbox() {
-      const dirs = channelDirs(base, state.channel);
-      if (state.registered && !state.watcher && !state.watcherRetryTimer) {
-        state.watcherRetries = 0;
-        startWatcher(state, dirs, deliver, runtime);
+      if (!state.registered) return;
+      for (const channel of state.channels) {
+        const watch = channelWatch(runtime, channel);
+        if (!watch.watcher && !watch.retryTimer) {
+          watch.retries = 0;
+          startWatcher(state, channelDirs(base, channel), deliver, runtime, channel);
+        }
       }
     },
+
     drainInbox() {
-      const dirs = channelDirs(base, state.channel);
-      processAllPendingMessages(state, dirs, deliver, runtime);
+      for (const channel of state.channels) {
+        processAllPendingMessages(state, channelDirs(base, channel), deliver, runtime, channel);
+      }
     },
+
     claims() {
-      const dirs = channelDirs(base, state.channel);
-      return getClaims(dirs);
+      const merged: AllClaims = {};
+      for (const channel of state.channels) {
+        const claims = getClaims(channelDirs(base, channel));
+        for (const [spec, tasks] of Object.entries(claims)) {
+          merged[spec] = { ...merged[spec], ...tasks };
+        }
+      }
+      return merged;
     },
+
     completions() {
-      const dirs = channelDirs(base, state.channel);
-      return getCompletions(dirs);
+      const merged: AllCompletions = {};
+      for (const channel of state.channels) {
+        const completions = getCompletions(channelDirs(base, channel));
+        for (const [spec, tasks] of Object.entries(completions)) {
+          merged[spec] = { ...merged[spec], ...tasks };
+        }
+      }
+      return merged;
     },
-    claim(ctx, spec, taskId, reason) {
-      const dirs = channelDirs(base, state.channel);
+
+    claim(ctx, spec, taskId, reason, channel) {
       return claimTask(
-        dirs,
+        joinedDirs(channel),
         spec,
         taskId,
         state.agentName,
@@ -1124,16 +1315,21 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
         reason,
       );
     },
-    unclaim(spec, taskId) {
-      const dirs = channelDirs(base, state.channel);
-      return unclaimTask(dirs, spec, taskId, state.agentName);
+
+    unclaim(spec, taskId, channel) {
+      return unclaimTask(joinedDirs(channel), spec, taskId, state.agentName);
     },
-    complete(spec, taskId, notes) {
-      const dirs = channelDirs(base, state.channel);
-      return completeTask(dirs, spec, taskId, state.agentName, notes);
+
+    complete(spec, taskId, notes, channel) {
+      return completeTask(joinedDirs(channel), spec, taskId, state.agentName, notes);
     },
+
     close() {
-      stopWatcher(state);
+      for (const channel of runtime.watches.keys()) {
+        stopWatcher(runtime, channel);
+      }
     },
   };
+
+  return mesh;
 }

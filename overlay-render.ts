@@ -94,7 +94,7 @@ function idleLabel(timestamp: string | undefined): string {
 export interface MeshSummary {
   kind: "fs" | "mesh";
   status: string;
-  channel: string;
+  channels: string[];
   peerCount: number;
 }
 
@@ -121,7 +121,7 @@ export function renderStatusBar(theme: Theme, cwd: string, width: number, tasks?
     const profileText = team?.profile && team.profile !== team.name ? `/${team.profile}` : "";
     const teamText = team ? ` │ Team: ${team.name}${profileText}` : "";
     const meshText = mesh
-      ? `${mesh.kind === "mesh" ? `⚡ ${mesh.status}` : "local mesh"} │ #${mesh.channel} │ ${mesh.peerCount} peer${mesh.peerCount === 1 ? "" : "s"}`
+      ? `${mesh.kind === "mesh" ? `⚡ ${mesh.status}` : "local mesh"} │ #${mesh.channels.join(",")} │ ${mesh.peerCount} peer${mesh.peerCount === 1 ? "" : "s"}`
       : "No active plan";
     const workersText = liveCount > 0 ? ` │ ⚙ ${liveCount}/${autonomousState.concurrency} workers` : "";
     return truncateToWidth(`${meshText}${workersText}${teamText}`, width);
@@ -369,7 +369,7 @@ export function renderPeersRow(
 
 /**
  * Body shown when there is no crew plan: the mesh itself — where this session
- * is connected, which channel, and who else is there.
+ * is connected, which channels, and who else is there.
  */
 export function renderMeshPanel(
   theme: Theme,
@@ -388,17 +388,18 @@ export function renderMeshPanel(
     ? `${meshUrl ?? "server"}  ${mesh.status() === "connected" ? theme.fg("accent", "connected") : theme.fg("warning", mesh.status())}`
     : `local filesystem ${theme.fg("dim", "(this machine only — c to connect a server)")}`;
   lines.push(`${theme.fg("dim", "Mesh:")}     ${where}`);
-  lines.push(`${theme.fg("dim", "Channel:")}  #${mesh.channel()}`);
+  lines.push(`${theme.fg("dim", "Channels:")}  ${mesh.channels().map(c => `#${c}`).join(" ")}`);
   lines.push(`${theme.fg("dim", "You:")}      ${coloredAgentName(state.agentName)} on ${LOCAL_HOST_ID} ${theme.fg("dim", shortenPath(state.cwd))}`);
   lines.push("");
 
   if (peers.length === 0) {
-    lines.push(theme.fg("dim", "No peers in this channel yet."));
+    lines.push(theme.fg("dim", "No peers in your channels yet."));
     lines.push(theme.fg("dim", mesh.kind === "mesh"
-      ? "Other machines join with the same server URL + token and this channel."
+      ? "Other machines join with the same server URL + token and one of these channels."
       : "Other omp sessions on this machine appear here once they join."));
   } else {
     lines.push(`Peers (${peers.length}):`);
+    const multiChannel = mesh.channels().length > 1;
     for (const agent of peers) {
       const computed = computeStatus(
         agent.activity?.lastActivityAt ?? agent.startedAt,
@@ -409,11 +410,14 @@ export function renderMeshPanel(
       const indicator = STATUS_INDICATORS[computed.status];
       const idle = computed.idleFor ? theme.fg("dim", ` ${computed.idleFor}`) : "";
       const host = agent.hostId === LOCAL_HOST_ID ? "" : theme.fg("dim", ` @${agent.hostId}`);
+      const channelTags = multiChannel && agent.channels.length > 0
+        ? theme.fg("dim", agent.channels.map(c => ` #${c}`).join(""))
+        : "";
       const reserved = agent.reservations && agent.reservations.length > 0
         ? theme.fg("dim", `  reserved: ${agent.reservations.map(r => r.pattern).join(", ")}`)
         : "";
       const status = agent.statusMessage ? theme.fg("dim", `  “${agent.statusMessage}”`) : "";
-      lines.push(`  ${indicator} ${coloredAgentName(agent.name)}${host}${idle}  ${theme.fg("dim", shortenPath(agent.cwd))}${status}${reserved}`);
+      lines.push(`  ${indicator} ${coloredAgentName(agent.name)}${channelTags}${host}${idle}  ${theme.fg("dim", shortenPath(agent.cwd))}${status}${reserved}`);
     }
   }
 

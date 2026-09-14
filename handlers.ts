@@ -25,6 +25,7 @@ import {
 } from "./lib.ts";
 import {
   type Mesh,
+  type MeshPeer,
   type SendError,
   isClaimSuccess,
   isClaimAlreadyHaveClaim,
@@ -47,6 +48,7 @@ const SEND_ERROR_TEXT: Record<SendError, string> = {
   invalid_registration: "invalid registration",
   write_failed: "write failed",
   unreachable: "mesh unreachable",
+  ambiguous_channel: "recipient is in several channels — pass channel",
 };
 
 // =============================================================================
@@ -84,18 +86,18 @@ export async function executeJoin(
   specPath?: string,
   nameTheme?: NameThemeConfig,
   feedRetention?: number,
-  channel?: string
+  channels?: string[]
 ) {
   if (state.registered) {
     const agents = mesh.peers();
     return result(
-      `Already joined as ${state.agentName}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.\nChannel: ${mesh.channel()}`,
+      `Already joined as ${state.agentName}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.\nChannels: ${mesh.channels().join(", ")}`,
       {
         mode: "join",
         alreadyJoined: true,
         name: state.agentName,
         peerCount: agents.length,
-        channel: mesh.channel(),
+        channels: mesh.channels(),
       }
     );
   }
@@ -103,7 +105,7 @@ export async function executeJoin(
   state.isHuman = ctx.hasUI;
   const cwd = ctx.cwd;
 
-  if (!await mesh.join(ctx, { channel, nameTheme })) {
+  if (!await mesh.join(ctx, { channels, nameTheme })) {
     return result(
       "Failed to join the agent mesh. Check logs for details.",
       { mode: "join", error: "registration_failed" }
@@ -128,7 +130,7 @@ export async function executeJoin(
   const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
 
   let text = `Joined as ${state.agentName} in ${locationPart}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`;
-  text += `\nChannel: ${mesh.channel()}`;
+  text += `\nChannels: ${mesh.channels().join(", ")}`;
 
   if (state.spec) {
     text += `\nSpec: ${displaySpecPath(state.spec, cwd)}`;
@@ -150,7 +152,53 @@ export async function executeJoin(
     peerCount: agents.length,
     peers: agents.map(a => a.name),
     spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined,
-    channel: mesh.channel(),
+    channels: mesh.channels(),
+  });
+}
+
+export async function executeJoinChannels(
+  _state: MessengerState,
+  mesh: Mesh,
+  ctx: ExtensionContext,
+  channels?: string[]
+) {
+  if (!channels || channels.length === 0) {
+    return result(
+      "Error: channels is required",
+      { mode: "channels.join", error: "missing_channels" }
+    );
+  }
+
+  if (!await mesh.joinChannels(ctx, channels)) {
+    return result(
+      `Failed to join channels: ${channels.join(", ")}`,
+      { mode: "channels.join", error: "join_failed", channels }
+    );
+  }
+
+  return result(`Channels: ${mesh.channels().join(", ")}`, {
+    mode: "channels.join",
+    channels: mesh.channels(),
+  });
+}
+
+export async function executeLeaveChannels(
+  _state: MessengerState,
+  mesh: Mesh,
+  channels?: string[]
+) {
+  if (!channels || channels.length === 0) {
+    return result(
+      "Error: channels is required",
+      { mode: "channels.leave", error: "missing_channels" }
+    );
+  }
+
+  await mesh.leaveChannels(channels);
+
+  return result(`Channels: ${mesh.channels().join(", ")}`, {
+    mode: "channels.leave",
+    channels: mesh.channels(),
   });
 }
 
@@ -313,9 +361,10 @@ export function executeStatus(state: MessengerState, mesh: Mesh, cwd: string) {
 }
 
 export async function executeChannels(mesh: Mesh) {
-  const channels = await mesh.channels();
+  const channels = await mesh.listChannels();
+  const joined = mesh.channels();
   const lines = channels.map(channel => {
-    const marker = channel.name === mesh.channel() ? " (current)" : "";
+    const marker = joined.includes(channel.name) ? " (joined)" : "";
     return `  ${channel.name}${marker}  ${channel.members} member(s)  created ${channel.createdAt}`;
   });
   return result(`Channels:\n${lines.join("\n")}`, { mode: "channels", channels });
@@ -334,8 +383,10 @@ export function executeList(state: MessengerState, mesh: Mesh, cwd: string, conf
   const lines: string[] = [];
   lines.push(`# Agents (${totalCount} online - project: ${folder})`, "");
 
+  const multiChannel = mesh.channels().length > 1;
+
   function formatAgentLine(
-    a: AgentRegistration,
+    a: AgentRegistration | MeshPeer,
     isSelf: boolean,
     hasTask: boolean
   ): string {
@@ -346,7 +397,10 @@ export function executeList(state: MessengerState, mesh: Mesh, cwd: string, conf
       thresholdMs
     );
     const indicator = STATUS_INDICATORS[computed.status];
-    const nameLabel = isSelf ? `${a.name} (you)` : a.name;
+    const channelTag = !isSelf && multiChannel && "channels" in a && a.channels.length > 0
+      ? ` #${a.channels.join(",")}`
+      : "";
+    const nameLabel = isSelf ? `${a.name} (you)` : `${a.name}${channelTag}`;
 
     const parts: string[] = [`${indicator} ${nameLabel}`];
 
@@ -411,7 +465,8 @@ export async function executeSend(
   broadcast: boolean | undefined,
   message?: string,
   replyTo?: string,
-  gentle?: boolean
+  gentle?: boolean,
+  channel?: string
 ) {
   if (!state.registered) {
     return notRegisteredError();
@@ -477,7 +532,7 @@ export async function executeSend(
       continue;
     }
 
-    const sendResult = await mesh.send(recipient, message, { replyTo, gentle });
+    const sendResult = await mesh.send(recipient, message, { replyTo, gentle, channel });
     if (sendResult.ok === true) {
       sent.push(recipient);
     } else {
@@ -636,7 +691,8 @@ export async function executeClaim(
   ctx: ExtensionContext,
   taskId: string,
   specPath?: string,
-  reason?: string
+  reason?: string,
+  channel?: string
 ) {
   const cwd = ctx.cwd;
   const spec = specPath ? resolveSpecPath(specPath, cwd) : state.spec;
@@ -651,7 +707,7 @@ export async function executeClaim(
     ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
     : "";
 
-  const claimResult = await mesh.claim(ctx, spec, taskId, reason);
+  const claimResult = await mesh.claim(ctx, spec, taskId, reason, channel);
 
   const display = displaySpecPath(spec, cwd);
   if (isClaimSuccess(claimResult)) {
@@ -688,7 +744,8 @@ export async function executeUnclaim(
   mesh: Mesh,
   cwd: string,
   taskId: string,
-  specPath?: string
+  specPath?: string,
+  channel?: string
 ) {
   const spec = specPath ? resolveSpecPath(specPath, cwd) : state.spec;
   if (!spec) {
@@ -699,7 +756,7 @@ export async function executeUnclaim(
     ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
     : "";
 
-  const unclaimResult = await mesh.unclaim(spec, taskId);
+  const unclaimResult = await mesh.unclaim(spec, taskId, channel);
   const display = displaySpecPath(spec, cwd);
 
   if (isUnclaimSuccess(unclaimResult)) {
@@ -723,7 +780,8 @@ export async function executeComplete(
   cwd: string,
   taskId: string,
   notes?: string,
-  specPath?: string
+  specPath?: string,
+  channel?: string
 ) {
   const spec = specPath ? resolveSpecPath(specPath, cwd) : state.spec;
   if (!spec) {
@@ -734,7 +792,7 @@ export async function executeComplete(
     ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
     : "";
 
-  const completeResult = await mesh.complete(spec, taskId, notes);
+  const completeResult = await mesh.complete(spec, taskId, notes, channel);
   const display = displaySpecPath(spec, cwd);
 
   if (isCompleteSuccess(completeResult)) {
@@ -959,7 +1017,10 @@ export function executeWhois(
     );
   }
 
-  return formatWhoisOutput(agent, false, mesh, cwd, thresholdMs);
+  const channelTag = mesh.channels().length > 1 && agent.channels.length > 0
+    ? ` #${agent.channels.join(",")}`
+    : "";
+  return formatWhoisOutput(agent, false, mesh, cwd, thresholdMs, channelTag);
 }
 
 function executeWhoisSelf(
@@ -976,7 +1037,8 @@ function formatWhoisOutput(
   isSelf: boolean,
   mesh: Mesh,
   cwd: string,
-  thresholdMs: number
+  thresholdMs: number,
+  channelTag = ""
 ) {
   const allClaims = mesh.claims();
   const canReadLocalFiles = isSelf || agent.hostId === LOCAL_HOST_ID;
@@ -999,7 +1061,7 @@ function formatWhoisOutput(
   const tokenStr = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
 
   const lines: string[] = [];
-  lines.push(`# ${agent.name}${isSelf ? " (you)" : ""}`, "");
+  lines.push(`# ${agent.name}${isSelf ? " (you)" : channelTag}`, "");
   lines.push(`${indicator} ${statusLabel}${idleStr}`);
   if (agent.model) lines.push(`Model: ${agent.model}`);
   if (agent.gitBranch) lines.push(`Branch: ${agent.gitBranch}`);

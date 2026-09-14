@@ -2,16 +2,23 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
+  type AgentRegistration,
+  type AllClaims,
+  type AllCompletions,
   type MessengerState,
   LOCAL_HOST_ID,
   generateMemorableName,
   isValidAgentName,
   normalizeAgentMailMessage,
+  normalizeChannels,
 } from "../lib.ts";
 import { buildRegistration, getGitBranch, normalizeCwd } from "./registration.ts";
 import {
   MESH_SUBPROTOCOL,
   parseFrame,
+  type ChannelSnapshot,
+  type JoinReply,
+  type PartReply,
   type ClaimAssertion,
   type ClientFrame,
   type ReplyResult,
@@ -23,6 +30,7 @@ import type {
   CompleteResult,
   DeliverFn,
   Mesh,
+  MeshPeer,
   MeshStatus,
   RenameResult,
   SendOptions,
@@ -45,12 +53,35 @@ interface PendingReply {
   readonly timer: Timer;
 }
 
+interface ChannelReplica {
+  peers: AgentRegistration[];
+  claims: AllClaims;
+  completions: AllCompletions;
+}
+function isJoinReply(result: ReplyResult): result is JoinReply {
+  if (Array.isArray(result) || !("ok" in result)) return false;
+  if (result.ok === true) return "channels" in result;
+  return "channel" in result;
+}
+
+function isPartReply(result: ReplyResult): result is PartReply {
+  return !Array.isArray(result) && "ok" in result && result.ok === true
+    && "channels" in result && result.channels.every(c => typeof c === "string");
+}
+
+function isSendResult(result: ReplyResult): result is SendResult {
+  if (Array.isArray(result) || !("ok" in result)) return false;
+  if (result.ok === true) return "message" in result;
+  return "error" in result && !("channel" in result);
+}
+
+
 type RequestFrame = Extract<ClientFrame, { id: string }>;
 type WelcomeFrame = Extract<ServerFrame, { t: "welcome" }>;
 type RejectFrame = Extract<ServerFrame, { t: "reject" }>;
 type HandshakeOutcome =
   | { kind: "welcome" }
-  | { kind: "reject"; error: RejectFrame["error"] }
+  | { kind: "reject"; error: RejectFrame["error"]; channel?: string }
   | { kind: "failure"; reason: string };
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -61,11 +92,7 @@ const STALE_PEERS_MS = 30_000;
 export function createMeshClient(opts: MeshClientOptions): Mesh {
   const { state, deliver } = opts;
   const reconnectBaseMs = opts.reconnectBaseMs ?? 1000;
-  const replica: {
-    peers: WelcomeFrame["peers"];
-    claims: WelcomeFrame["claims"];
-    completions: WelcomeFrame["completions"];
-  } = { peers: [], claims: {}, completions: {} };
+  const replica = new Map<string, ChannelReplica>();
   const pendingReplies = new Map<string, PendingReply>();
   const myClaims = new Map<string, ClaimAssertion>();
 
@@ -88,10 +115,23 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     heartbeatTimer = undefined;
   }
 
-  function clearReplica(): void {
-    replica.peers = [];
-    replica.claims = {};
-    replica.completions = {};
+  function channelReplica(channel: string): ChannelReplica {
+    let entry = replica.get(channel);
+    if (!entry) {
+      entry = { peers: [], claims: {}, completions: {} };
+      replica.set(channel, entry);
+    }
+    return entry;
+  }
+
+  function applySnapshots(snapshots: ChannelSnapshot[]): void {
+    for (const snapshot of snapshots) {
+      replica.set(snapshot.channel, {
+        peers: snapshot.peers,
+        claims: snapshot.claims,
+        completions: snapshot.completions,
+      });
+    }
   }
 
   function sendFrame(socket: WebSocket, frame: ClientFrame): boolean {
@@ -113,12 +153,6 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     pendingReplies.clear();
   }
 
-  function copyReplica(frame: WelcomeFrame): void {
-    replica.peers = frame.peers;
-    replica.claims = frame.claims;
-    replica.completions = frame.completions;
-  }
-
   function startHeartbeat(): void {
     clearHeartbeat();
     heartbeatTimer = setInterval(() => {
@@ -135,7 +169,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   function acceptWelcome(frame: WelcomeFrame, ctx: ExtensionContext, initial: boolean): void {
     const now = new Date().toISOString();
     state.agentName = frame.name;
-    state.channel = frame.channel;
+    state.channels = frame.channels.map(snapshot => snapshot.channel).sort();
     state.registered = true;
     if (initial) {
       state.cwd = normalizeCwd(ctx.cwd);
@@ -144,7 +178,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       state.activity.lastActivityAt = now;
       state.sessionStartedAt = now;
     }
-    copyReplica(frame);
+    replica.clear();
+    applySnapshots(frame.channels);
     clearTimeout(staleTimer);
     staleTimer = undefined;
     backoffMs = reconnectBaseMs;
@@ -158,29 +193,33 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   function handleServerFrame(frame: ServerFrame): void {
     switch (frame.t) {
       case "welcome":
-        copyReplica(frame);
+        replica.clear();
+        applySnapshots(frame.channels);
         opts.onStatusChange?.();
         return;
       case "peers":
-        replica.peers = frame.peers;
+        channelReplica(frame.channel).peers = frame.peers;
         opts.onStatusChange?.();
         return;
       case "claims":
-        replica.claims = frame.claims;
+        channelReplica(frame.channel).claims = frame.claims;
         opts.onStatusChange?.();
         return;
       case "completions":
-        replica.completions = frame.completions;
+        channelReplica(frame.channel).completions = frame.completions;
         opts.onStatusChange?.();
         return;
-      case "message":
-        deliver(normalizeAgentMailMessage(frame.message, {
+      case "message": {
+        const message = normalizeAgentMailMessage(frame.message, {
           id: randomUUID(),
           from: "unknown",
           to: state.agentName,
           timestamp: new Date().toISOString(),
-        }));
+        });
+        message.channel ??= frame.channel;
+        deliver(message);
         return;
+      }
       case "reply": {
         const pending = pendingReplies.get(frame.id);
         if (!pending) return;
@@ -225,7 +264,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     if (!staleTimer) {
       staleTimer = setTimeout(() => {
         staleTimer = null;
-        replica.peers = [];
+        for (const entry of replica.values()) entry.peers = [];
         opts.onStatusChange?.();
       }, STALE_PEERS_MS);
     }
@@ -268,7 +307,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       if (!name || !sendFrame(socket, {
         t: "hello",
         token: opts.token,
-        channel: state.channel,
+        channels: state.channels,
         agent: buildRegistration(state, ctx, name),
         claims: [...myClaims.values()],
       })) {
@@ -287,7 +326,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
           sendHello();
           return;
         }
-        finish({ kind: "reject", error: frame.error });
+        finish({ kind: "reject", error: frame.error, ...(frame.channel ? { channel: frame.channel } : {}) });
         socket.close();
         return;
       }
@@ -319,20 +358,20 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     return promise;
   }
 
-  function leaveAfterReject(ctx: ExtensionContext, error: RejectFrame["error"]): void {
+  function leaveAfterReject(ctx: ExtensionContext, error: RejectFrame["error"], channel?: string): void {
     state.registered = false;
     wantConnected = false;
     meshStatus = "disconnected";
-    clearReplica();
+    replica.clear();
     switch (error) {
       case "name_taken":
-        notify(ctx, `Mesh: agent name ${state.agentName} was taken while reconnecting; left the mesh`);
+        notify(ctx, `Mesh: agent name ${state.agentName} was taken${channel ? ` in #${channel}` : ""} while reconnecting; left the mesh`);
         break;
       case "invalid_name":
         notify(ctx, "Mesh rejected agent name");
         break;
       case "invalid_channel":
-        notify(ctx, `Invalid mesh channel: ${state.channel}`);
+        notify(ctx, `Invalid mesh channel: ${channel ?? "unknown"}`);
         break;
       case "bad_token":
         notify(ctx, "Mesh rejected the token");
@@ -352,7 +391,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       case "welcome":
         return;
       case "reject":
-        leaveAfterReject(lastCtx, outcome.error);
+        leaveAfterReject(lastCtx, outcome.error, outcome.channel);
         return;
       case "failure":
         if (wantConnected) {
@@ -405,14 +444,36 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     return promise;
   }
 
+  /** Channel for a claim operation; must be one we joined. */
+  function joinedChannel(channel: string | undefined): string {
+    const name = channel ?? state.channels[0];
+    if (name === undefined || !state.channels.includes(name)) {
+      throw new Error(`not joined: ${name}`);
+    }
+    return name;
+  }
+
   const mesh: Mesh = {
     kind: "mesh",
     status: () => meshStatus,
-    channel: () => state.channel,
+    channels: () => (state.registered ? [...state.channels] : []),
 
     async join(ctx, joinOptions): Promise<boolean> {
-      if (state.registered) return true;
-      if (joinOptions?.channel) state.channel = joinOptions.channel;
+      let channels: string[];
+      try {
+        channels = normalizeChannels(joinOptions?.channels ?? state.channels);
+      } catch (err) {
+        notify(ctx, err instanceof Error ? err.message : "Invalid channel name");
+        return false;
+      }
+      if (state.registered) {
+        const added = channels.filter(c => !state.channels.includes(c));
+        const removed = state.channels.filter(c => !channels.includes(c));
+        if (added.length > 0 && !(await mesh.joinChannels(ctx, added))) return false;
+        if (removed.length > 0) await mesh.leaveChannels(removed);
+        return true;
+      }
+      state.channels = channels;
       lastCtx = ctx;
       if (!/^wss?:\/\//.test(opts.url)) {
         notify(ctx, `Invalid mesh url: ${opts.url}`);
@@ -442,14 +503,14 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
           switch (outcome.error) {
             case "name_taken":
               notify(ctx, state.explicitName
-                ? "Mesh rejected agent name: name is already taken"
+                ? `Mesh rejected agent name: name is already taken${outcome.channel ? ` in #${outcome.channel}` : ""}`
                 : "Could not find available agent name after 99 attempts");
               return false;
             case "invalid_name":
               notify(ctx, "Mesh rejected agent name");
               return false;
             case "invalid_channel":
-              notify(ctx, `Invalid mesh channel: ${state.channel}`);
+              notify(ctx, `Invalid mesh channel: ${outcome.channel ?? "unknown"}`);
               return false;
             case "bad_token":
               notify(ctx, "Mesh rejected the token");
@@ -466,7 +527,73 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       }
     },
 
-    async channels(): Promise<ChannelInfo[]> {
+    async joinChannels(ctx, chs): Promise<boolean> {
+      let next: string[];
+      try {
+        next = normalizeChannels([...state.channels, ...chs]);
+      } catch (err) {
+        notify(ctx, err instanceof Error ? err.message : "Invalid channel name");
+        return false;
+      }
+      const added = next.filter(c => !state.channels.includes(c));
+      if (added.length === 0) {
+        state.channels = next;
+        return true;
+      }
+      if (!state.registered) {
+        state.channels = next;
+        return true;
+      }
+      if (meshStatus !== "connected") {
+        notify(ctx, "Mesh unreachable");
+        return false;
+      }
+      const id = randomUUID();
+      const reply = await request<JoinReply | null>(
+        { t: "join", id, channels: added },
+        (result) => (isJoinReply(result) ? result : null),
+        () => null,
+      );
+      if (!reply) {
+        notify(ctx, "Mesh unreachable");
+        return false;
+      }
+      if (reply.ok === false) {
+        notify(ctx, reply.error === "name_taken"
+          ? `Agent name "${state.agentName}" already in use in #${reply.channel}`
+          : `Mesh rejected channel ${reply.channel}: ${reply.error}`);
+        return false;
+      }
+      applySnapshots(reply.channels);
+      state.channels = next;
+      return true;
+    },
+
+    async leaveChannels(chs): Promise<void> {
+      const leaving = chs.filter(c => state.channels.includes(c));
+      if (leaving.length === 0) return;
+      const id = randomUUID();
+      const reply = await request<PartReply | null>(
+        { t: "part", id, channels: leaving },
+        (result) => (isPartReply(result) ? result : null),
+        () => null,
+      );
+      const remaining = reply ? reply.channels : state.channels.filter(c => !leaving.includes(c));
+      for (const channel of leaving) replica.delete(channel);
+      for (const key of myClaims.keys()) {
+        if (leaving.includes(key.split("\u0000")[0] ?? "")) myClaims.delete(key);
+      }
+      state.channels = [...remaining].sort();
+      if (state.channels.length === 0) {
+        state.registered = false;
+        wantConnected = false;
+        replica.clear();
+        // The server closes the socket after the part reply; handleSocketClose
+        // sees wantConnected=false and settles as "disconnected".
+      }
+    },
+
+    async listChannels(): Promise<ChannelInfo[]> {
       if (meshStatus !== "connected") return [];
       const id = randomUUID();
       return request({ t: "channels", id },
@@ -497,7 +624,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       }
       settlePendingReplies();
       state.registered = false;
-      clearReplica();
+      replica.clear();
       meshStatus = "disconnected";
       opts.onStatusChange?.();
     },
@@ -527,17 +654,43 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       return result;
     },
 
-    peers: () => replica.peers.filter((peer) => {
-      if (peer.name === state.agentName) return false;
-      return !state.scopeToFolder || (
-        peer.hostId === LOCAL_HOST_ID && peer.cwd === normalizeCwd(state.cwd)
-      );
-    }),
+    peers(): MeshPeer[] {
+      const byName = new Map<string, MeshPeer>();
+      for (const channel of state.channels) {
+        const entry = replica.get(channel);
+        if (!entry) continue;
+        for (const peer of entry.peers) {
+          if (peer.name === state.agentName) continue;
+          if (state.scopeToFolder && !(peer.hostId === LOCAL_HOST_ID && peer.cwd === normalizeCwd(state.cwd))) continue;
+          const existing = byName.get(peer.name);
+          if (existing) {
+            existing.channels.push(channel);
+            Object.assign(existing, peer);
+          } else {
+            byName.set(peer.name, { ...peer, channels: [channel] });
+          }
+        }
+      }
+      return [...byName.values()];
+    },
     evict: () => {},
 
     async send(to, text, sendOptions?: SendOptions): Promise<SendResult> {
       if (!isValidAgentName(to)) return { ok: false, error: "invalid_name" };
       if (meshStatus !== "connected") return { ok: false, error: "unreachable" };
+
+      let channel: string;
+      if (sendOptions?.channel !== undefined) {
+        if (!state.channels.includes(sendOptions.channel)) return { ok: false, error: "not_found" };
+        channel = sendOptions.channel;
+      } else {
+        const candidates = state.channels.filter(c =>
+          (replica.get(c)?.peers ?? []).some(peer => peer.name === to));
+        if (candidates.length === 0) return { ok: false, error: "not_found" };
+        if (candidates.length > 1) return { ok: false, error: "ambiguous_channel" };
+        channel = candidates[0];
+      }
+
       const id = randomUUID();
       const message = {
         id: randomUUID(),
@@ -546,10 +699,11 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         text,
         timestamp: new Date().toISOString(),
         replyTo: sendOptions?.replyTo ?? null,
+        channel,
         ...(sendOptions?.gentle ? { gentle: true } : {}),
       };
-      return request<SendResult>({ t: "send", id, to, message },
-        (reply) => !Array.isArray(reply) && "ok" in reply
+      return request<SendResult>({ t: "send", id, channel, to, message },
+        (reply) => isSendResult(reply)
           ? reply
           : { ok: false, error: "unreachable" },
         () => ({ ok: false, error: "unreachable" }));
@@ -563,14 +717,37 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       void reconnect();
     },
     drainInbox: () => {},
-    claims: () => replica.claims,
-    completions: () => replica.completions,
 
-    async claim(_ctx, spec, taskId, reason): Promise<ClaimResult> {
+    claims(): AllClaims {
+      const merged: AllClaims = {};
+      for (const channel of [...state.channels].sort()) {
+        const claims = replica.get(channel)?.claims;
+        if (!claims) continue;
+        for (const [spec, tasks] of Object.entries(claims)) {
+          merged[spec] = { ...merged[spec], ...tasks };
+        }
+      }
+      return merged;
+    },
+
+    completions(): AllCompletions {
+      const merged: AllCompletions = {};
+      for (const channel of [...state.channels].sort()) {
+        const completions = replica.get(channel)?.completions;
+        if (!completions) continue;
+        for (const [spec, tasks] of Object.entries(completions)) {
+          merged[spec] = { ...merged[spec], ...tasks };
+        }
+      }
+      return merged;
+    },
+
+    async claim(_ctx, spec, taskId, reason, channel): Promise<ClaimResult> {
+      const target = joinedChannel(channel);
       if (meshStatus !== "connected") throw new Error("mesh unreachable");
       const id = randomUUID();
       const result = await request<ClaimResult>(
-        { t: "claim", id, spec, taskId, ...(reason ? { reason } : {}) },
+        { t: "claim", id, channel: target, spec, taskId, ...(reason ? { reason } : {}) },
         (reply) => {
           if (!Array.isArray(reply) && "success" in reply) {
             if (reply.success && "claimedAt" in reply) return reply;
@@ -583,7 +760,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         () => { throw new Error("mesh unreachable"); },
       );
       if (result.success) {
-        myClaims.set(`${spec}\u0000${taskId}`, {
+        myClaims.set(`${target}\u0000${spec}\u0000${taskId}`, {
+          channel: target,
           spec,
           taskId,
           claimedAt: result.claimedAt,
@@ -593,10 +771,11 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       return result;
     },
 
-    async unclaim(spec, taskId): Promise<UnclaimResult> {
+    async unclaim(spec, taskId, channel): Promise<UnclaimResult> {
+      const target = joinedChannel(channel);
       if (meshStatus !== "connected") throw new Error("mesh unreachable");
       const id = randomUUID();
-      const result = await request<UnclaimResult>({ t: "unclaim", id, spec, taskId },
+      const result = await request<UnclaimResult>({ t: "unclaim", id, channel: target, spec, taskId },
         (reply) => {
           if (!Array.isArray(reply) && "success" in reply) {
             if (reply.success) return { success: true };
@@ -610,15 +789,16 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
           throw new Error("mesh unreachable");
         },
         () => { throw new Error("mesh unreachable"); });
-      if (result.success) myClaims.delete(`${spec}\u0000${taskId}`);
+      if (result.success) myClaims.delete(`${target}\u0000${spec}\u0000${taskId}`);
       return result;
     },
 
-    async complete(spec, taskId, notes): Promise<CompleteResult> {
+    async complete(spec, taskId, notes, channel): Promise<CompleteResult> {
+      const target = joinedChannel(channel);
       if (meshStatus !== "connected") throw new Error("mesh unreachable");
       const id = randomUUID();
       const result = await request<CompleteResult>(
-        { t: "complete", id, spec, taskId, ...(notes ? { notes } : {}) },
+        { t: "complete", id, channel: target, spec, taskId, ...(notes ? { notes } : {}) },
         (reply) => {
           if (!Array.isArray(reply) && "success" in reply) {
             if (reply.success && "completedAt" in reply) return reply;
@@ -634,7 +814,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         },
         () => { throw new Error("mesh unreachable"); },
       );
-      if (result.success) myClaims.delete(`${spec}\u0000${taskId}`);
+      if (result.success) myClaims.delete(`${target}\u0000${spec}\u0000${taskId}`);
       return result;
     },
 
