@@ -64,11 +64,9 @@ interface Delivery {
 function deliveries(pi: MockPi): Delivery[] {
   return pi.sendMessage.mock.calls.flatMap(([msg, opts]) => {
     if (!msg || typeof msg !== "object" || !("customType" in msg) || typeof msg.customType !== "string") return [];
-    if (msg.customType !== "agent_message" && msg.customType !== "irc:incoming") return [];
+    if (msg.customType !== "irc:incoming") return [];
     const details = "details" in msg && msg.details && typeof msg.details === "object" ? msg.details : {};
-    const text = "text" in details && typeof details.text === "string"
-      ? details.text
-      : "message" in details && typeof details.message === "string" ? details.message : "";
+    const text = "message" in details && typeof details.message === "string" ? details.message : "";
     return [{ customType: msg.customType, text, opts }];
   });
 }
@@ -128,11 +126,11 @@ describe("peer message delivery mode", () => {
 
     const delivered = deliveries(pi);
     expect(delivered).toHaveLength(2);
-    expect(delivered.find(d => d.text === "interrupt me")).toMatchObject({ customType: "agent_message", opts: { triggerTurn: true, deliverAs: "steer" } });
-    expect(delivered.find(d => d.text === "when convenient")).toMatchObject({ customType: "agent_message", opts: { triggerTurn: true, deliverAs: "aside" } });
+    expect(delivered.find(d => d.text === "interrupt me")).toMatchObject({ customType: "irc:incoming", opts: { triggerTurn: true, deliverAs: "steer" } });
+    expect(delivered.find(d => d.text === "when convenient")).toMatchObject({ customType: "irc:incoming", opts: { triggerTurn: true, deliverAs: "aside" } });
   });
 
-  it("idle receiver: wakes through omp's irc:incoming aside path (survives a user Esc)", async () => {
+  it("idle receiver: same irc:incoming record, delivered as an aside so an Esc'd session wakes", async () => {
     const { cwd } = createTempCrewDirs();
     const { pi, ctx } = await setupReceiver(cwd, true);
     const sender = await joinSender(cwd);

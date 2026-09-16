@@ -8,7 +8,7 @@
 import { homedir } from "node:os";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
 import type { OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import type { TSchema as PiSchema } from "@oh-my-pi/pi-ai";
@@ -41,9 +41,6 @@ import {
   type AgentRegistration,
   type AgentMailMessage,
   MAX_CHAT_HISTORY,
-  formatRelativeTime,
-  normalizeAgentMailMessage,
-  stripAnsiCodes,
   extractFolder,
   generateAutoStatus,
   computeStatus,
@@ -84,6 +81,18 @@ import * as teamStore from "./crew/team/store.ts";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.ts";
 import { shutdownAllWorkers } from "./crew/agents.ts";
 import { shutdownLobbyWorkers } from "./crew/lobby.ts";
+
+/** Quoted message body in omp's IRC-card style: collapsed to 3 lines unless expanded. */
+function ircBody(body: string, expanded: boolean, theme: Theme, width: number): string[] {
+  if (!body) return [];
+  const lines = body.split("\n");
+  const shown = expanded ? lines : lines.slice(0, 3);
+  const out = shown.map(line => truncateToWidth(`  ${theme.fg("dim", "│")} ${line}`, width));
+  if (!expanded && lines.length > 3) {
+    out.push(truncateToWidth(`  ${theme.fg("dim", `… ${lines.length - 3} more lines`)}`, width));
+  }
+  return out;
+}
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
   const { pi: sdk } = pi;
@@ -188,28 +197,27 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       content = `*(reply to ${msg.replyTo.substring(0, 8)})*\n\n${content}`;
     }
 
-    // Route by receiver state. omp refuses to start a turn from extension messages after the
-    // user pressed Esc (autoResumeSuppressed) — except for its own peer-message record type,
-    // `irc:incoming` delivered as an aside, which is allowed to wake the session. So:
-    //   idle  → irc:incoming aside: wakes an Esc'd/idle session (omp renders its peer card).
+    // One record type for every peer message: omp's own `irc:incoming`, so the transcript
+    // renders the same "IRC ← name" card whether the receiver was busy or idle. The delivery
+    // mode is what changes:
+    //   idle  → aside: the only route omp lets wake a session the user stopped with Esc.
     //   busy  → steer: breaks into the running turn even inside a long-blocking tool call;
     //           `gentle` keeps the non-interrupting aside instead.
     const idle = latestCtx?.isIdle() ?? true;
-    if (idle) {
-      pi.sendMessage(
-        {
-          customType: "irc:incoming",
-          content,
-          display: true,
-          details: { id: msg.id, from: msg.from, message: msg.text, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
-        },
-        { triggerTurn: true, deliverAs: "aside" }
-      );
-      return;
-    }
     pi.sendMessage(
-      { customType: "agent_message", content, display: true, details: msg },
-      msg.gentle
+      {
+        customType: "irc:incoming",
+        content,
+        display: true,
+        details: {
+          id: msg.id,
+          from: msg.from,
+          message: msg.text,
+          ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+          ...(msg.channel ? { channel: msg.channel } : {}),
+        },
+      },
+      idle || msg.gentle
         ? { triggerTurn: true, deliverAs: "aside" }
         : { triggerTurn: true, deliverAs: "steer" }
     );
@@ -555,6 +563,50 @@ Usage (action-based API - preferred):
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }) as unknown as PiSchema,
 
+    // send/broadcast render like omp's own `hub send` cards (glyph + "IRC → name" + quoted body),
+    // so outgoing and incoming peer traffic look identical in the transcript. Other actions keep
+    // the default text rendering.
+    renderCall(args, _options, theme) {
+      const call = args as CrewParams;
+      if (call.action !== "send" && call.action !== "broadcast") return undefined;
+      const target = call.action === "broadcast" ? "all" : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "…";
+      const title = `${theme.styledSymbol("tool.irc", "accent")} ${theme.bold(`IRC ${theme.nav.selected} ${target}`)}`;
+      const body = (call.message ?? "").trim();
+      return {
+        render: (width: number) => [truncateToWidth(title, width), ...ircBody(body, false, theme, width)],
+        invalidate() {},
+      };
+    },
+    renderResult(result, options, theme, args) {
+      const call = args as CrewParams | undefined;
+      if (call?.action !== "send" && call?.action !== "broadcast") return undefined;
+      const details = result.details && typeof result.details === "object" ? result.details : {};
+      const sent = "sent" in details && Array.isArray(details.sent) ? details.sent.filter((s): s is string => typeof s === "string") : [];
+      const failed = "failed" in details && Array.isArray(details.failed) ? details.failed : [];
+      const errorText = result.content.map(c => (c.type === "text" ? c.text : "")).join("").trim();
+      const target = call.action === "broadcast" ? "all" : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "?";
+      const isError = result.isError === true || (sent.length === 0 && failed.length === 0);
+      const glyph = isError ? theme.fg("error", theme.status.error) : theme.styledSymbol("tool.irc", "accent");
+      const meta: string[] = [];
+      if (call.action === "broadcast") meta.push("broadcast");
+      if (sent.length === 1 && failed.length === 0) meta.push(theme.fg("success", "delivered"));
+      else {
+        if (sent.length > 0) meta.push(theme.fg("success", `${sent.length} delivered`));
+        if (failed.length > 0) meta.push(theme.fg("error", `${failed.length} failed`));
+      }
+      if (call.channel) meta.push(theme.fg("dim", `#${call.channel}`));
+      const title = `${glyph} ${theme.bold(`IRC ${theme.nav.selected} ${target}`)}${meta.length ? theme.fg("dim", `  ${meta.join(" · ")}`) : ""}`;
+      return {
+        render: (width: number) => {
+          const out = [truncateToWidth(title, width)];
+          if (isError) out.push(truncateToWidth(`  ${theme.fg("error", errorText || "Send failed.")}`, width));
+          else out.push(...ircBody((call.message ?? "").trim(), options.expanded, theme, width));
+          return out;
+        },
+        invalidate() {},
+      };
+    },
+
     async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
       const params = rawParams as CrewParams;
       captureStatusContext(ctx);
@@ -707,36 +759,6 @@ Usage (action-based API - preferred):
   // Message Renderer
   // ===========================================================================
 
-  pi.registerMessageRenderer<AgentMailMessage>("agent_message", (message, _options, theme) => {
-    if (!message.details) return undefined;
-    const details = normalizeAgentMailMessage(message.details, {
-      id: "",
-      from: "",
-      to: "",
-      timestamp: "",
-    });
-
-    return {
-      render(width: number): string[] {
-        const safeFrom = stripAnsiCodes(details.from);
-        const safeText = stripAnsiCodes(details.text);
-
-        const header = theme.fg("accent", `From ${safeFrom}`);
-        const time = details.timestamp ? theme.fg("dim", ` (${formatRelativeTime(details.timestamp)})`) : "";
-
-        const result: string[] = [];
-        result.push(truncateToWidth(header + time, width));
-        result.push("");
-
-        for (const line of safeText.split("\n")) {
-          result.push(truncateToWidth(line, width));
-        }
-
-        return result;
-      },
-      invalidate() {}
-    };
-  });
 
   // ===========================================================================
   // Activity Tracking
