@@ -109,7 +109,9 @@ function readJsonFile(path: string): Record<string, unknown> | null {
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`[omp-messenger] Warning: Failed to parse ${path} (${msg}); using defaults.`);
     return null;
   }
 }
@@ -151,8 +153,23 @@ export function matchesAutoRegisterPath(cwd: string, paths: string[]): boolean {
 }
 
 const userAgentDir = () => join(homedir(), ".omp", "agent");
-const userConfigPath = () => join(userAgentDir(), "omp-messenger.json");
-const meshTokenPath = () => join(userAgentDir(), "messenger", "mesh.token");
+const legacyUserAgentDir = () => join(homedir(), ".pi", "agent");
+
+/** Primary .omp config path; falls back to legacy .pi location for un-migrated setups. */
+function userConfigPath(): string {
+  const primary = join(userAgentDir(), "omp-messenger.json");
+  if (existsSync(primary)) return primary;
+  const legacy = join(legacyUserAgentDir(), "pi-messenger.json");
+  return existsSync(legacy) ? legacy : primary;
+}
+
+/** Primary .omp token path; falls back to legacy .pi token. */
+function meshTokenPath(): string {
+  const primary = join(userAgentDir(), "messenger", "mesh.token");
+  if (existsSync(primary)) return primary;
+  const legacy = join(legacyUserAgentDir(), "messenger", "mesh.token");
+  return existsSync(legacy) ? legacy : primary;
+}
 
 function readUserConfig(): Record<string, unknown> {
   const configPath = userConfigPath();
@@ -160,7 +177,9 @@ function readUserConfig(): Record<string, unknown> {
   try {
     const parsed = JSON.parse(readFileSync(configPath, "utf-8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`[omp-messenger] Warning: Failed to parse ${configPath} (${msg}); using defaults.`);
     return {};
   }
 }
@@ -201,6 +220,10 @@ export function getStoredMeshSettings(): StoredMeshSettings {
       token = "";
     }
   }
+  // Fall back to a JSON token field if present (README-supported path).
+  if (!token && typeof obj.token === "string") {
+    token = obj.token;
+  }
   return {
     url: typeof obj.url === "string" ? obj.url : "",
     channels: parseChannelList(obj.channels ?? obj.channel),
@@ -216,7 +239,15 @@ export function saveMeshSettings(settings: StoredMeshSettings): void {
   const existing = readUserConfig();
   const url = settings.url.trim();
   const channels = normalizeChannels(settings.channels.filter(isValidChannelName));
-  existing.mesh = { url: url || null, channels };
+  const prevMesh = existing.mesh && typeof existing.mesh === "object" && !Array.isArray(existing.mesh)
+    ? existing.mesh as Record<string, unknown>
+    : {};
+  // Preserve any inline JSON token the user had; overlay edits url/channels/token-file.
+  existing.mesh = {
+    url: url || null,
+    channels,
+    ...(typeof prevMesh.token === "string" ? { token: prevMesh.token } : {}),
+  };
   writeUserConfig(existing);
 
   mkdirSync(join(userAgentDir(), "messenger"), { recursive: true });
@@ -230,7 +261,7 @@ export function saveMeshSettings(settings: StoredMeshSettings): void {
 }
 
 function buildConfig(projectConfig?: Partial<MessengerConfig> | null): MessengerConfig {
-  const extensionGlobalPath = join(homedir(), ".omp", "agent", "omp-messenger.json");
+  const extensionGlobalPath = userConfigPath();
   const mainSettingsPath = join(homedir(), ".omp", "agent", "settings.json");
 
   // Load from main settings.json (lowest priority of the three sources)
@@ -255,8 +286,8 @@ function buildConfig(projectConfig?: Partial<MessengerConfig> | null): Messenger
   const sharedFields = {
     nameTheme: typeof merged.nameTheme === "string" ? merged.nameTheme : DEFAULT_CONFIG.nameTheme,
     nameWords: nameWords && Array.isArray(nameWords.adjectives) && Array.isArray(nameWords.nouns) ? nameWords : undefined,
-    feedRetention: typeof merged.feedRetention === "number" ? merged.feedRetention : DEFAULT_CONFIG.feedRetention,
-    stuckThreshold: typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold,
+    feedRetention: Math.max(1, Math.min(10_000, typeof merged.feedRetention === "number" ? merged.feedRetention : DEFAULT_CONFIG.feedRetention)),
+    stuckThreshold: Math.max(5, Math.min(86_400, typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold)),
     stuckNotify: merged.stuckNotify !== false,
     stuckWakeAgent:
       typeof merged.stuckWakeAgent === "string" && merged.stuckWakeAgent.length > 0
@@ -312,7 +343,9 @@ export function loadGlobalConfig(): MessengerConfig {
 }
 
 export function loadConfig(cwd: string): MessengerConfig {
-  const projectPath = join(cwd, ".omp", "omp-messenger.json");
+  const primary = join(cwd, ".omp", "omp-messenger.json");
+  const legacy = join(cwd, ".pi", "pi-messenger.json");
+  const projectPath = existsSync(primary) ? primary : (existsSync(legacy) ? legacy : primary);
   const projectConfig = readJsonFile(projectPath) as Partial<MessengerConfig> | null;
   return buildConfig(projectConfig);
 }

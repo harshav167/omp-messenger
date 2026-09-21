@@ -352,9 +352,11 @@ function register(
       }
     } else {
       const availableName = findAvailableName(state.agentName, base, channels);
-      if (!availableName) {
+      if (!availableName || !isValidAgentName(availableName)) {
         if (ctx.hasUI) {
-          ctx.ui.notify("Could not find available agent name after 99 attempts", "error");
+          ctx.ui.notify(availableName
+            ? `Generated agent name "${availableName}" is not a valid agent name`
+            : "Could not find available agent name after 99 attempts", "error");
         }
         return false;
       }
@@ -578,6 +580,28 @@ function readCompletionsSync(dirs: Dirs): AllCompletions {
   return {};
 }
 
+/**
+ * Guard for read-modify-write mutations: a store file that exists but does not parse is
+ * corrupt — returning {} would let the next write persist only the new entry and wipe
+ * every other record. Quarantine it and throw instead; lenient display reads keep the
+ * {} fallback.
+ */
+function assertStoreReadable(dirs: Dirs, file: string): void {
+  const path = join(dirs.base, file);
+  if (!fs.existsSync(path)) return;
+  try {
+    JSON.parse(fs.readFileSync(path, "utf-8"));
+  } catch {
+    const quarantine = `${path}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(path, quarantine);
+    } catch {
+      // Leave it in place; the throw below still blocks the mutation.
+    }
+    throw new Error(`${file} is corrupt and was quarantined to ${quarantine}; refusing to overwrite it.`);
+  }
+}
+
 function writeClaimsSync(dirs: Dirs, claims: AllClaims): void {
   ensureDirSync(dirs.base);
   const target = join(dirs.base, CLAIMS_FILE);
@@ -672,6 +696,7 @@ async function claimTask(
   reason?: string
 ): Promise<ClaimResult> {
   return withSwarmLock(dirs.base, () => {
+    assertStoreReadable(dirs, CLAIMS_FILE);
     const claims = readClaimsSync(dirs);
     const removed = cleanupStaleClaims(claims, dirs);
 
@@ -709,6 +734,7 @@ async function unclaimTask(
   agent: string
 ): Promise<UnclaimResult> {
   return withSwarmLock(dirs.base, () => {
+    assertStoreReadable(dirs, CLAIMS_FILE);
     const claims = readClaimsSync(dirs);
     const removed = cleanupStaleClaims(claims, dirs);
 
@@ -740,6 +766,8 @@ async function completeTask(
   notes?: string
 ): Promise<CompleteResult> {
   return withSwarmLock(dirs.base, () => {
+    assertStoreReadable(dirs, CLAIMS_FILE);
+    assertStoreReadable(dirs, COMPLETIONS_FILE);
     const claims = readClaimsSync(dirs);
     const completions = readCompletionsSync(dirs);
     const removed = cleanupStaleClaims(claims, dirs);
@@ -830,14 +858,17 @@ function processAllPendingMessages(
         deliver(msg);
         fs.unlinkSync(msgPath);
       } catch {
-        // On any failure (read, parse, deliver), delete to avoid infinite retry loops
+        // Quarantine instead of deleting: a failed read/parse/deliver must not destroy
+        // mail the sender already persisted. The .dead suffix escapes the .json filter,
+        // so there is no retry loop; dead files are pruned below after a day.
         try {
-          fs.unlinkSync(msgPath);
+          fs.renameSync(msgPath, `${msgPath}.dead`);
         } catch {
-          // Already gone or can't delete
+          // Already gone
         }
       }
     }
+    pruneDeadMessages(inbox);
   } finally {
     runtime.isProcessingMessages = false;
 
@@ -848,6 +879,26 @@ function processAllPendingMessages(
         processAllPendingMessages(state, pendingDirs, deliver, runtime, pendingChannel);
       }
     }
+  }
+}
+
+const DEAD_MESSAGE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Remove quarantined `.dead` messages older than a day. */
+function pruneDeadMessages(inbox: string): void {
+  try {
+    const cutoff = Date.now() - DEAD_MESSAGE_TTL_MS;
+    for (const file of fs.readdirSync(inbox)) {
+      if (!file.endsWith(".json.dead")) continue;
+      const p = join(inbox, file);
+      try {
+        if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+      } catch {
+        // Gone or unreadable
+      }
+    }
+  } catch {
+    // Inbox unreadable
   }
 }
 
@@ -874,9 +925,13 @@ function sendMessageToAgent(
     ...(gentle ? { gentle: true } : {}),
   };
 
-  const random = Math.random().toString(36).substring(2, 8);
-  const msgFile = join(targetInbox, `${Date.now()}-${random}.json`);
-  fs.writeFileSync(msgFile, JSON.stringify(msg, null, 2));
+  // Atomic publish: write to a .tmp sibling the consumer's .json filter ignores, then
+  // rename. Watchers only ever observe complete files, and the uuid filename cannot
+  // clobber an unconsumed message on a timestamp collision or clock rollback.
+  const tmpFile = join(targetInbox, `${msg.id}.tmp`);
+  const msgFile = join(targetInbox, `${msg.id}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify(msg, null, 2));
+  fs.renameSync(tmpFile, msgFile);
 
   return msg;
 }

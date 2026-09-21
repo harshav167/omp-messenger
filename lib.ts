@@ -95,7 +95,7 @@ export function normalizeAgentMailMessage(
     timestamp: stringField(raw.timestamp, stringField(raw.ts, defaults.timestamp)),
     replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
     ...(raw.gentle === true ? { gentle: true } : {}),
-    ...(typeof raw.channel === "string" && raw.channel ? { channel: raw.channel } : {}),
+    ...(typeof raw.channel === "string" && isValidChannelName(raw.channel) ? { channel: raw.channel } : {}),
   };
 }
 
@@ -346,10 +346,16 @@ export function generateMemorableName(themeConfig?: NameThemeConfig): string {
       adjectives = SPACE_ADJECTIVES;
       nouns = SPACE_NOUNS;
       break;
-    case "custom":
-      adjectives = themeConfig?.customWords?.adjectives ?? DEFAULT_ADJECTIVES;
-      nouns = themeConfig?.customWords?.nouns ?? DEFAULT_NOUNS;
+    case "custom": {
+      // Custom words flow into registry/inbox paths unchecked downstream, so keep only
+      // words that are themselves valid name fragments; fall back to defaults otherwise.
+      const safe = (words: string[] | undefined) => (words ?? []).filter(w => /^[A-Za-z][A-Za-z0-9_-]*$/.test(w));
+      const customAdjectives = safe(themeConfig?.customWords?.adjectives);
+      const customNouns = safe(themeConfig?.customWords?.nouns);
+      adjectives = customAdjectives.length > 0 ? customAdjectives : DEFAULT_ADJECTIVES;
+      nouns = customNouns.length > 0 ? customNouns : DEFAULT_NOUNS;
       break;
+    }
     default:
       adjectives = DEFAULT_ADJECTIVES;
       nouns = DEFAULT_NOUNS;

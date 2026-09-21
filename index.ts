@@ -6,7 +6,6 @@
  */
 
 import { homedir } from "node:os";
-import * as fs from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
 import type { OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
@@ -82,16 +81,64 @@ import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.ts";
 import { shutdownAllWorkers } from "./crew/agents.ts";
 import { shutdownLobbyWorkers } from "./crew/lobby.ts";
 
-/** Quoted message body in omp's IRC-card style: collapsed to 3 lines unless expanded. */
-function ircBody(body: string, expanded: boolean, theme: Theme, width: number): string[] {
-  if (!body) return [];
-  const lines = body.split("\n");
-  const shown = expanded ? lines : lines.slice(0, 3);
-  const out = shown.map(line => truncateToWidth(`  ${theme.fg("dim", "│")} ${line}`, width));
-  if (!expanded && lines.length > 3) {
-    out.push(truncateToWidth(`  ${theme.fg("dim", `… ${lines.length - 3} more lines`)}`, width));
+/** Minimal Component wrapper for a fixed set of pre-rendered lines. */
+function statusCard(lines: string[]) {
+  return { render: (width: number) => lines.map(line => truncateToWidth(line, width)), invalidate() {} };
+}
+
+/** Status header line: colored icon, accent title, dim meta — mirrors omp's renderStatusLine. */
+function statusLine(
+	opts: { icon?: "pending" | "success" | "error" | "warning"; glyph?: string; title: string; meta?: string[] },
+	theme: Theme,
+): string {
+	const iconColor = { pending: "dim", success: "success", error: "error", warning: "warning" } as const;
+	const icon = opts.glyph ?? (opts.icon ? theme.fg(iconColor[opts.icon], theme.status[opts.icon]) : "");
+	const meta = opts.meta?.length ? theme.fg("dim", `  ${opts.meta.join(" · ")}`) : "";
+	return `${icon} ${theme.fg("accent", opts.title)}${meta}`.trimEnd();
+}
+
+/** Quoted body lines with a dim border glyph, collapsing long messages (hub renderer parity). */
+function ircQuoteBody(text: string, theme: Theme, collapsedLines = 3): string[] {
+	const lines = text.replace(/\r\n?/g, "\n").split("\n");
+	const collapsed = lines.length > collapsedLines;
+	const visible = collapsed ? lines.slice(0, collapsedLines) : lines;
+	const rows = visible.map((line) => `  ${theme.fg("dim", "│")} ${line}`);
+	if (collapsed) rows.push(theme.fg("dim", `  … +${lines.length - collapsedLines} more lines`));
+	return rows;
+}
+
+/** Display target for send/broadcast: broadcasts read "all", matching hub's card. */
+function hubTarget(call: CrewParams): string {
+  return call.action === "broadcast" ? "all" : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "…";
+}
+
+/** Status-line title for non-messaging actions so every tool call renders visibly. */
+function actionTitle(call: CrewParams | undefined): string {
+  const action = call?.action ?? "";
+  switch (action) {
+    case "": return "IRC status";
+    case "join": return "IRC join";
+    case "leave": return "IRC leave";
+    case "channels": case "channels.join": case "channels.leave": return "IRC channels";
+    case "peers": return "IRC peers";
+    case "whois": return `IRC whois ${call?.name ?? ""}`.trim();
+    case "reserve": return "IRC reserve";
+    case "release": return "IRC release";
+    case "feed": return "IRC feed";
+    default:
+      return action.startsWith("task.") || action.startsWith("team.") || action === "plan" || action === "work" || action === "review"
+        ? `Crew ${action}`
+        : `omp-messenger ${action}`;
   }
-  return out;
+}
+
+/** Status-line meta for non-messaging actions: channels, paths, target name. */
+function actionMeta(call: CrewParams | undefined): string[] {
+  const meta: string[] = [];
+  if (call?.channels?.length) meta.push(call.channels.map(c => `#${c}`).join(" "));
+  else if (call?.channel) meta.push(`#${call.channel}`);
+  if (call?.paths?.length) meta.push(call.paths.join(", "));
+  return meta;
 }
 
 export default function piMessengerExtension(pi: ExtensionAPI) {
@@ -198,12 +245,13 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     }
 
     // One record type for every peer message: omp's own `irc:incoming`, so the transcript
-    // renders the same "IRC ← name" card whether the receiver was busy or idle. The delivery
-    // mode is what changes:
-    //   idle  → aside: the only route omp lets wake a session the user stopped with Esc.
-    //   busy  → steer: breaks into the running turn even inside a long-blocking tool call;
-    //           `gentle` keeps the non-interrupting aside instead.
-    const idle = latestCtx?.isIdle() ?? true;
+    // renders the same "IRC ← name" card whether the receiver was busy or idle.
+    //   default → steer + triggerTurn: interrupts a running turn, and on an idle session
+    //     starts a fresh one — including sessions the user stopped with Esc. omp's SDK
+    //     reserves that wake for real peer IRC records (the irc:incoming carve-out in
+    //     #resumeStrandedIrcAsides); `aside` would fold silently into context there.
+    //   gentle → aside: explicitly non-interrupting; rides the step boundary while busy
+    //     and stays user-driven (folds into context) after a deliberate Esc.
     pi.sendMessage(
       {
         customType: "irc:incoming",
@@ -217,7 +265,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
           ...(msg.channel ? { channel: msg.channel } : {}),
         },
       },
-      idle || msg.gentle
+      msg.gentle
         ? { triggerTurn: true, deliverAs: "aside" }
         : { triggerTurn: true, deliverAs: "steer" }
     );
@@ -563,48 +611,58 @@ Usage (action-based API - preferred):
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
     }) as unknown as PiSchema,
 
-    // send/broadcast render like omp's own `hub send` cards (glyph + "IRC → name" + quoted body),
-    // so outgoing and incoming peer traffic look identical in the transcript. Other actions keep
-    // the default text rendering.
+    // Peer traffic renders in the same visual language as omp's hub cards (IRC ➤ out /
+    // ⟵ in): status header with icon + accent title + dim meta, quoted body with a dim
+    // border glyph. `mergeCallAndResult` makes the completed result frame REPLACE the
+    // pending call frame, so the body shows exactly once. The flag is absent from
+    // ToolDefinition's type, but the TUI reads it off the tool object and the extension
+    // tool proxy (applyToolProxy) forwards own properties, so attach it structurally.
+    ...({ mergeCallAndResult: true } as object),
     renderCall(args, _options, theme) {
       const call = args as CrewParams;
-      if (call.action !== "send" && call.action !== "broadcast") return undefined;
-      const target = call.action === "broadcast" ? "all" : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "…";
-      const title = `${theme.styledSymbol("tool.irc", "accent")} ${theme.bold(`IRC ${theme.nav.selected} ${target}`)}`;
-      const body = (call.message ?? "").trim();
-      return {
-        render: (width: number) => [truncateToWidth(title, width), ...ircBody(body, false, theme, width)],
-        invalidate() {},
-      };
+      if (call.action === "send" || call.action === "broadcast") {
+        const lines = [statusLine({ icon: "pending", title: `IRC ${theme.nav.selected} ${hubTarget(call)}` }, theme)];
+        const preview = call.message?.replace(/\s+/g, " ").trim();
+        if (preview) lines.push(theme.fg("dim", `  │ ${preview}`));
+        return statusCard(lines);
+      }
+      return statusCard([statusLine({ icon: "pending", title: actionTitle(call), meta: actionMeta(call) }, theme)]);
     },
     renderResult(result, options, theme, args) {
       const call = args as CrewParams | undefined;
-      if (call?.action !== "send" && call?.action !== "broadcast") return undefined;
-      const details = result.details && typeof result.details === "object" ? result.details : {};
-      const sent = "sent" in details && Array.isArray(details.sent) ? details.sent.filter((s): s is string => typeof s === "string") : [];
-      const failed = "failed" in details && Array.isArray(details.failed) ? details.failed : [];
-      const errorText = result.content.map(c => (c.type === "text" ? c.text : "")).join("").trim();
-      const target = call.action === "broadcast" ? "all" : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "?";
-      const isError = result.isError === true || (sent.length === 0 && failed.length === 0);
-      const glyph = isError ? theme.fg("error", theme.status.error) : theme.styledSymbol("tool.irc", "accent");
-      const meta: string[] = [];
-      if (call.action === "broadcast") meta.push("broadcast");
-      if (sent.length === 1 && failed.length === 0) meta.push(theme.fg("success", "delivered"));
-      else {
-        if (sent.length > 0) meta.push(theme.fg("success", `${sent.length} delivered`));
-        if (failed.length > 0) meta.push(theme.fg("error", `${failed.length} failed`));
+      if (call && (call.action === "send" || call.action === "broadcast")) {
+        const details = result.details && typeof result.details === "object" ? result.details : {};
+        const sent = "sent" in details && Array.isArray(details.sent) ? details.sent.filter((s): s is string => typeof s === "string") : [];
+        const failed = "failed" in details && Array.isArray(details.failed)
+          ? details.failed.filter((f): f is { name: string; error: string } => typeof f === "object" && f !== null && typeof (f as { name?: unknown }).name === "string")
+          : [];
+        const isBroadcast = call.action === "broadcast" || sent.length + failed.length > 1;
+        const isError = result.isError === true || (sent.length === 0 && failed.length > 0);
+        const meta: string[] = [];
+        if (isBroadcast) {
+          if (sent.length > 0) meta.push(theme.fg("success", `${sent.length} delivered`));
+          if (failed.length > 0) meta.push(theme.fg("error", `${failed.length} failed`));
+        } else if (sent.length === 1) {
+          meta.push(theme.fg("success", "delivered"));
+        }
+        if (call.channel) meta.push(`#${call.channel}`);
+        const glyph = isError ? theme.fg("error", theme.status.error) : theme.styledSymbol("tool.irc", "accent");
+        const lines = [statusLine({ glyph, title: `IRC ${theme.nav.selected} ${hubTarget(call)}`, meta }, theme)];
+        if (isError) {
+          const reason = failed[0]?.error
+            ?? result.content.map(c => (c.type === "text" ? c.text : "")).join(" ").trim()
+            ?? "send failed";
+          lines.push(theme.fg("error", `  ✗ ${reason}`));
+        } else if (call.message) {
+          lines.push(...ircQuoteBody(call.message, theme, options.expanded ? Number.MAX_SAFE_INTEGER : 3));
+        }
+        return statusCard(lines);
       }
-      if (call.channel) meta.push(theme.fg("dim", `#${call.channel}`));
-      const title = `${glyph} ${theme.bold(`IRC ${theme.nav.selected} ${target}`)}${meta.length ? theme.fg("dim", `  ${meta.join(" · ")}`) : ""}`;
-      return {
-        render: (width: number) => {
-          const out = [truncateToWidth(title, width)];
-          if (isError) out.push(truncateToWidth(`  ${theme.fg("error", errorText || "Send failed.")}`, width));
-          else out.push(...ircBody((call.message ?? "").trim(), options.expanded, theme, width));
-          return out;
-        },
-        invalidate() {},
-      };
+      const isError = result.isError === true;
+      const firstLine = result.content.map(c => (c.type === "text" ? c.text : "")).join("").trim().split("\n")[0] ?? "";
+      const lines = [statusLine({ icon: isError ? "error" : "success", title: actionTitle(call), meta: actionMeta(call) }, theme)];
+      if (firstLine) lines.push(`  ${isError ? theme.fg("error", firstLine) : theme.fg("muted", firstLine)}`);
+      return statusCard(lines);
     },
 
     async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
@@ -987,7 +1045,6 @@ Usage (action-based API - preferred):
     }
 
     state.isHuman = ctx.hasUI;
-    try { fs.rmSync(join(state.cwd, ".omp", "messenger", "feed.jsonl"), { force: true }); } catch {}
 
     const shouldAutoRegister = state.isCrewWorker || config.autoRegister ||
       matchesAutoRegisterPath(state.cwd, config.autoRegisterPaths);

@@ -8,7 +8,6 @@ vi.mock("@oh-my-pi/pi-tui", () => ({
   truncateToWidth: (value: string) => value,
   visibleWidth: (value: string) => value.length,
 }));
-
 vi.mock("typebox", () => ({
   Type: {
     Unsafe: (schema: unknown) => schema,

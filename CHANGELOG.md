@@ -1,6 +1,29 @@
 # Changelog
 
-## [Unreleased]
+## [0.16.0] - 2026-09-21
+
+### Breaking changes
+- **Tool rename**: renamed primary tool from `pi_messenger` to `omp_messenger`.
+- **Package rename**: `@earendil-works/pi-messenger` is now `omp-messenger`.
+- **Storage and config relocated**: user config moved from `~/.pi/agent/pi-messenger.json` to `~/.omp/agent/omp-messenger.json`; project config to `.omp/omp-messenger.json`; storage to `.omp/messenger/`. Transparent read-fallback to legacy `.pi` locations is supported for existing installations.
+- **Environment variables**: renamed `PI_MESSENGER_*` to `OMP_MESSENGER_*` (e.g. `OMP_MESSENGER_MESH_TOKEN`, `OMP_MESSENGER_MESH_CHANNELS`).
+- **SDK peer range**: pinned to `@oh-my-pi/*` `^18.2.6`.
+
+### Added
+- **Multi-channel mesh**: agents can join multiple channels (`join { channels }`, `channels.join`, `channels.leave`), route messages per-channel, and broadcast within channels.
+- **Network mesh transport**: optional WebSocket mesh server (`omp-messenger-mesh`) for cross-machine peer communication, with Docker support.
+- **Self-contained hub-style cards**: peer send/broadcast tool calls render using omp's IRC card visual language (`IRC ➤ target`, status header, quoted body), with `mergeCallAndResult` to eliminate duplicated body frames.
+- **Visible fallbacks**: non-messaging actions (join, leave, channels, crew ops) now render a status-line fallback in the transcript instead of executing invisibly.
+- **Stuck-peer wakeup**: configurable `stuckWakeAgent` wakes a coordinator agent when a peer stalls on a task or reservation.
+
+### Fixed
+- **Session-start feed preservation**: removed an unconditional feed wipe at `session_start` so project activity history survives across sessions.
+- **Server identity stamping**: the mesh server now forces `from` to the authenticated WebSocket client identity, preventing sender spoofing.
+- **Atomic message delivery**: mesh writes use atomic temp+rename with UUID filenames to prevent partial reads by fast watchers, and failed deliveries are quarantined (`.dead`) rather than unlinked.
+- **Idle peer delivery**: incoming messages route via `steer + triggerTurn` by default, ensuring peer messages wake idle and Esc'd sessions.
+- **Channel membership reconciliation**: calling `join` with a channel list while already registered now reconciles membership instead of returning an early no-op.
+- **Guarded channel leave**: leaving all channels via `channels.leave` routes through the same safety guards as `action: "leave"`.
+- **Secret leak in npm pack**: tightened package files allowlist to prevent shipping `mesh/.env`.
 
 ## [0.15.2] - 2026-08-27
 

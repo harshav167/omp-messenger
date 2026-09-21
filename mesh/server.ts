@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 // allow: SIZE_OK — Bun's WebSocket lifecycle is one protocol state machine over shared socket and topic state.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { isValidAgentName, isValidChannelName } from "../lib.ts";
@@ -51,6 +52,16 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
   const expectedToken = tokenDigest(opts.token);
   const peerTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const claimTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Authoritative inbox ownership: topic → the socket that registered it. subscriberCount
+   *  alone cannot distinguish a live peer from a zombie socket mid-reap, which used to lock
+   *  a reconnecting agent out with name_taken until manual rejoin. */
+  const inboxOwners = new Map<string, Bun.ServerWebSocket<SocketData>>();
+
+  /** Release ownership held by `ws`, and drop presence for sockets that are gone. */
+  const releaseInbox = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): void => {
+    const topic = inboxTopic(channel, name);
+    if (inboxOwners.get(topic) === ws) inboxOwners.delete(topic);
+  };
   let stopped = false;
 
   const broadcastPeers = (channel: string): void => {
@@ -137,7 +148,23 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
             return;
           }
           const requested = [...new Set(frame.channels)];
-          const taken = requested.find((channel) => server.subscriberCount(inboxTopic(channel, name)) > 0);
+          // name_taken only when a DIFFERENT, still-open socket owns the inbox. A zombie
+          // (partitioned, closing, heartbeat-reap pending) is evicted so a reconnecting
+          // agent can reclaim its own name.
+          let taken: string | undefined;
+          for (const channel of requested) {
+            const topic = inboxTopic(channel, name);
+            const owner = inboxOwners.get(topic);
+            if (owner === undefined || owner.readyState !== WebSocket.OPEN) {
+              if (owner !== undefined && owner !== ws) {
+                inboxOwners.delete(topic);
+                state.dropAgent(channel, name);
+                broadcastPeers(channel);
+              }
+              continue;
+            }
+            if (owner !== ws) taken = channel;
+          }
           if (taken !== undefined) {
             sendFrame(ws, { t: "reject", error: "name_taken", channel: taken });
             return;
@@ -151,6 +178,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
             ws.subscribe(peersTopic(channel));
             ws.subscribe(claimsTopic(channel));
             ws.subscribe(inboxTopic(channel, name));
+            inboxOwners.set(inboxTopic(channel, name), ws);
             state.getOrCreate(channel).presence.set(name, { ...frame.agent, name });
           }
           const claimChannels = new Set<string>();
@@ -187,7 +215,10 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
               return;
             }
             const added = requested.filter((channel) => !ws.data.channels.has(channel));
-            const taken = added.find((channel) => server.subscriberCount(inboxTopic(channel, name)) > 0);
+            const taken = added.find((channel) => {
+              const owner = inboxOwners.get(inboxTopic(channel, name));
+              return owner !== undefined && owner !== ws && owner.readyState === WebSocket.OPEN;
+            });
             if (taken !== undefined) {
               sendReply(ws, frame.id, { ok: false, error: "name_taken", channel: taken });
               return;
@@ -207,6 +238,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
                 ws.subscribe(peersTopic(channel));
                 ws.subscribe(claimsTopic(channel));
                 ws.subscribe(inboxTopic(channel, name));
+                inboxOwners.set(inboxTopic(channel, name), ws);
                 state.getOrCreate(channel).presence.set(name, { ...agent, name });
               }
             }
@@ -224,6 +256,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
               ws.unsubscribe(peersTopic(channel));
               ws.unsubscribe(claimsTopic(channel));
               ws.unsubscribe(inboxTopic(channel, name));
+              releaseInbox(channel, name, ws);
               state.dropAgent(channel, name);
               broadcastPeers(channel);
               broadcastClaims(channel);
@@ -249,7 +282,9 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
               sendReply(ws, frame.id, { ok: false, error: "not_found" });
               return;
             }
-            const message: AgentMailMessage = { ...frame.message, channel: frame.channel };
+            // Stamp the authenticated identity: the token authorizes the connection, not
+            // arbitrary sender names. `from`/`to` come from the handshake, never the frame.
+            const message: AgentMailMessage = { ...frame.message, from: ws.data.name, to: frame.to, channel: frame.channel };
             server.publish(topic, JSON.stringify({ t: "message", channel: frame.channel, message } satisfies ServerFrame));
             sendReply(ws, frame.id, { ok: true, message });
             return;
@@ -264,7 +299,8 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
               return;
             }
             for (const channel of ws.data.channels) {
-              if (server.subscriberCount(inboxTopic(channel, frame.name)) > 0) {
+              const owner = inboxOwners.get(inboxTopic(channel, frame.name));
+              if (owner !== undefined && owner !== ws && owner.readyState === WebSocket.OPEN) {
                 sendReply(ws, frame.id, { success: false, error: "name_taken" });
                 return;
               }
@@ -272,6 +308,8 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
             for (const channel of ws.data.channels) {
               ws.unsubscribe(inboxTopic(channel, name));
               ws.subscribe(inboxTopic(channel, frame.name));
+              inboxOwners.delete(inboxTopic(channel, name));
+              inboxOwners.set(inboxTopic(channel, frame.name), ws);
               state.renameAgent(channel, name, frame.name);
             }
             ws.data.name = frame.name;
@@ -332,7 +370,11 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
         const { name, channels } = ws.data;
         if (name === null) return;
         for (const channel of channels) {
-          state.dropAgent(channel, name);
+          // Guarded by identity: a reclaimed name's new owner must survive the zombie's close.
+          releaseInbox(channel, name, ws);
+          if (!inboxOwners.has(inboxTopic(channel, name))) {
+            state.dropAgent(channel, name);
+          }
           broadcastPeers(channel);
           broadcastClaims(channel);
         }

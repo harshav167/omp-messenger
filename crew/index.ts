@@ -85,7 +85,7 @@ export async function executeCrewAction(
         return handlers.executeJoinChannels(state, mesh, ctx, params.channels);
       }
       if (op === 'leave') {
-        return handlers.executeLeaveChannels(state, mesh, params.channels);
+        return handlers.executeLeaveChannels(state, mesh, ctx, params.channels);
       }
       return handlers.executeChannels(mesh);
 

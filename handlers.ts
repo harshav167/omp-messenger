@@ -89,6 +89,17 @@ export async function executeJoin(
   channels?: string[]
 ) {
   if (state.registered) {
+    // Re-join with a channel set reconciles membership (add-then-leave), as documented
+    // for join { channels }. Without channels it is a pure status no-op.
+    if (channels && channels.length > 0) {
+      if (!await mesh.join(ctx, { channels, nameTheme })) {
+        return result(
+          "Failed to reconcile channel membership. Check logs for details.",
+          { mode: "join", error: "registration_failed" }
+        );
+      }
+      logFeedEvent(ctx.cwd, state.agentName, "join");
+    }
     const agents = mesh.peers();
     return result(
       `Already joined as ${state.agentName}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.\nChannels: ${mesh.channels().join(", ")}`,
@@ -183,8 +194,9 @@ export async function executeJoinChannels(
 }
 
 export async function executeLeaveChannels(
-  _state: MessengerState,
+  state: MessengerState,
   mesh: Mesh,
+  ctx: ExtensionContext,
   channels?: string[]
 ) {
   if (!channels || channels.length === 0) {
@@ -192,6 +204,14 @@ export async function executeLeaveChannels(
       "Error: channels is required",
       { mode: "channels.leave", error: "missing_channels" }
     );
+  }
+
+  // Leaving every joined channel unregisters entirely — that must clear the same
+  // guards as action:"leave" (planning/autonomous/in-progress tasks, claim release,
+  // reservations, feed, status), not slip past them through a channel-shaped door.
+  const leavingEverything = mesh.channels().every(c => channels.includes(c));
+  if (leavingEverything) {
+    return executeLeave(state, mesh, ctx);
   }
 
   await mesh.leaveChannels(channels);

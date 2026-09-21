@@ -99,6 +99,9 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   let ws: WebSocket | null = null;
   let meshStatus: MeshStatus = "disconnected";
   let wantConnected = false;
+  // name_taken on reconnect usually means our own zombie socket is mid-reap server-side;
+  // retry with backoff a few times before accepting that another live agent owns the name.
+  let nameTakenRetries = 0;
   let backoffMs = reconnectBaseMs;
   let staleTimer: Timer | undefined;
   let heartbeatTimer: Timer | undefined;
@@ -389,8 +392,17 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     const outcome = await performHandshake(lastCtx, [state.agentName], false);
     switch (outcome.kind) {
       case "welcome":
+        nameTakenRetries = 0;
         return;
       case "reject":
+        if (outcome.error === "name_taken" && nameTakenRetries < 5) {
+          nameTakenRetries++;
+          meshStatus = "reconnecting";
+          opts.onStatusChange?.();
+          scheduleReconnect();
+          return;
+        }
+        nameTakenRetries = 0;
         leaveAfterReject(lastCtx, outcome.error, outcome.channel);
         return;
       case "failure":

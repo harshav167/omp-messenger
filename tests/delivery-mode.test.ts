@@ -12,7 +12,6 @@ vi.mock("@oh-my-pi/pi-tui", () => ({
   truncateToWidth: (s: string) => s,
   visibleWidth: (s: string) => s.length,
 }));
-
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
 interface MockPi {
@@ -130,7 +129,7 @@ describe("peer message delivery mode", () => {
     expect(delivered.find(d => d.text === "when convenient")).toMatchObject({ customType: "irc:incoming", opts: { triggerTurn: true, deliverAs: "aside" } });
   });
 
-  it("idle receiver: same irc:incoming record, delivered as an aside so an Esc'd session wakes", async () => {
+  it("idle receiver: same irc:incoming record, delivered as steer so an Esc'd session wakes", async () => {
     const { cwd } = createTempCrewDirs();
     const { pi, ctx } = await setupReceiver(cwd, true);
     const sender = await joinSender(cwd);
@@ -139,7 +138,7 @@ describe("peer message delivery mode", () => {
     await pi.handlers.turn_end?.[0]?.({ type: "turn_end" }, ctx);
 
     const [delivered] = deliveries(pi);
-    expect(delivered).toMatchObject({ customType: "irc:incoming", text: "wake up", opts: { triggerTurn: true, deliverAs: "aside" } });
+    expect(delivered).toMatchObject({ customType: "irc:incoming", text: "wake up", opts: { triggerTurn: true, deliverAs: "steer" } });
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload).toMatchObject({ details: { from: "Sender", message: "wake up" } });
   });
