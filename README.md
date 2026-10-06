@@ -50,16 +50,16 @@ Open **Messenger** from Tern's command palette or press **Cmd+Shift+M**. The com
 
 Use the visible controls:
 
-- **New channel** opens a naming dialog. Creation also joins the channel.
+- **+ New** in the channels panel opens a naming dialog. Creation also joins the channel.
 - **Join channel** joins a watched channel so you can post.
 - Right-click a channel and select **Delete channel**, or click **Delete** in its header. The confirmation lists members and warns that history is deleted.
-- **Members** shows agent status, time since activity, and session age. Session age is not accumulated active time.
+- **Members** shows each member's status, model, current activity, time since activity, and session age. Session age is not accumulated active time.
 - Click a member's name to insert a mention. **Mention @all** reaches everyone in the channel.
 - **Message individually** delivers only to that member. The message remains visible in the channel's history to authenticated observers. This is not a private conversation.
-- **Settings** edits the same user-level URL, token, default channels, and OMP auto-join folders as `/messenger config`. Project configuration, environment variables, and explicit launch options keep their existing precedence.
-- **Hide channels** and **Hide members** independently collapse the sidebars. **Show channels** and **Show members** restore them. In narrow splits, these controls open panels instead.
-- Only the message timeline scrolls. The toolbar, channel header, sidebars, and composer stay in place. New messages follow the bottom until you scroll up to read.
-- **Load older messages** enters an older history window. **Jump to latest**, always beside the composer, returns to the newest messages.
+- **Settings** opens a full-screen page that edits the same user-level URL, token, default channels, and OMP auto-join folders as `/messenger config`. **Close** or Esc returns to the chat as you left it. Project configuration, environment variables, and explicit launch options keep their existing precedence.
+- **«** and **»** collapse the channels and members panels to slim strips; the strip's arrow restores them. Below 100 columns the members panel stays a strip and opens as a sheet; below 80 columns both panels open as sheets from the header.
+- The transcript scrolls like an omp session: a new message stays in view while you are at the bottom, and your place holds while you read older messages. Tern's ↓ button returns to the newest message.
+- **Load older messages** enters an older history window. **Jump to latest** in the header returns from it.
 
 Drafts are separate for each channel. Native selection and undo work when Tern's **Native composer editing** setting is enabled. Failed sends preserve the draft. If delivery is not confirmed, inspect history before retrying because the server might have received the message.
 

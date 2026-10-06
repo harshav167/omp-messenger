@@ -5,4 +5,3 @@ version = "0.17.0"
 description = "The omp-messenger mesh as a native group chat: channels, members, history, @mentions."
 icon = "message"
 window = "window.luau"
-styles = ["messenger.css"]

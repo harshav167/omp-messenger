@@ -2,7 +2,8 @@
 /**
  * omp-messenger for Tern: the whole mesh as a native group chat.
  *
- * Runs in a Tern pane and draws over the Tern Surface Protocol (a `screen` surface);
+ * Runs in a Tern pane over the Tern Surface Protocol: the chat is an inline surface (like an omp
+ * session), and settings open as a screen surface over it;
  * talks to the mesh server directly over WebSocket as a human member. It works whether
  * or not any omp session is running: channels, members, history and the live log come
  * from the server.
@@ -18,7 +19,7 @@ import { isValidAgentName, isValidChannelName, type AgentMailMessage, type Histo
 import { loadConfig } from "../../config.ts";
 import type { ChannelInfo } from "../../mesh/types.ts";
 import type { ChannelSnapshot } from "../../mesh/protocol.ts";
-import { connect, type Key, type Session, type Surface, type TspEvent } from "@stencil-hq/tern";
+import { connect, ui, type Key, type Session, type Surface, type TspEvent } from "@stencil-hq/tern";
 import { MessengerMesh, type ConnectionState } from "./mesh.ts";
 import {
   applyCompletion,
@@ -37,10 +38,12 @@ import {
   type ChannelView,
   type Completion,
 } from "./model.ts";
-import { buildView, idPart, STYLESHEET, type ViewState } from "./view.ts";
+import { buildView, COMPOSER_ID, idPart, MEMBERS_COLS, SETTINGS_ID, sidebarLayout, STYLESHEET, type ViewState } from "./view.ts";
 import { MessengerSettings } from "./settings.ts";
 
 const SURFACE = "omp-messenger";
+/** Settings open as a full-screen surface over the inline chat; closing it shows the chat exactly as it was. */
+const SETTINGS_SURFACE = "omp-messenger-settings";
 const VERSION = "0.17.0";
 const NOTICE_MS = 4000;
 /** How often idle / online times are redrawn. */
@@ -86,6 +89,7 @@ class MessengerApp {
   #noticeTimer: Timer | undefined;
   #clock: Timer | undefined;
   #settings: MessengerSettings | undefined;
+  #settingsSurface: Surface | undefined;
 
   constructor(private readonly args: Args) {
     const config = loadConfig(process.cwd());
@@ -148,7 +152,8 @@ class MessengerApp {
     try {
       this.#state.cols = session.caps.cols;
       this.#state.hour12 = session.caps.hour12;
-      this.#surface = session.open({ id: SURFACE, mode: "screen", title: "Messenger", role: "omp.messenger" });
+      // Inline, like omp's own sessions: the pane keeps the newest message in view until you scroll up, and holds your place while you read.
+      this.#surface = session.open({ id: SURFACE, mode: "inline", title: "Messenger", role: "omp.messenger" });
       this.#surface.stylesheet("main", STYLESHEET);
       this.#refocus();
       if (this.#state.url) this.#mesh.connect();
@@ -168,20 +173,19 @@ class MessengerApp {
   }
 
   #render(): void {
-    if (!this.#exiting) {
-      this.#state.settings = this.#settings?.view();
-      this.#surface?.render(buildView(this.#state));
-    }
+    if (this.#exiting) return;
+    this.#surface?.render(buildView(this.#state));
+    if (this.#settings) this.#settingsSurface?.render({ main: ui.col({}, this.#settings.view()) });
   }
 
 
   #onEvent(event: TspEvent): void {
-    if ("sf" in event && event.sf && event.sf !== SURFACE) return;
-    if (this.#settings && "id" in event && event.id === "layer.settings") {
+    if ("sf" in event && event.sf && event.sf !== SURFACE && event.sf !== SETTINGS_SURFACE) return;
+    if (this.#settings && "id" in event && event.id === SETTINGS_ID) {
       if (event.ev === "action" && "act" in event) {
         if (event.act === "close") {
           if (event.value) this.#settings.editing = undefined;
-          else { this.#settings = undefined; this.#refocus(); }
+          else this.#closeSettings();
         } else if (event.act === "page") this.#settings.page = event.value ?? "connection";
         else if (event.act === "settings-save") this.#saveSettings();
         else if (event.act === "settings-add-path") this.#settings.addPath();
@@ -212,7 +216,7 @@ class MessengerApp {
         return;
       }
       case "focus":
-        if ("id" in event && (event.id === "dock.composer" && !this.#state.dialog
+        if ("id" in event && (event.id === COMPOSER_ID && !this.#state.dialog
           || event.id === "layer.dialog.body.input" && this.#state.dialog?.kind === "create")) {
           this.#surface?.focus(event.id);
         }
@@ -225,7 +229,7 @@ class MessengerApp {
         if ("act" in event && "id" in event) this.#onAction(event.act, event.value, event.id);
         return;
       case "send":
-        if ("id" in event && "text" in event && event.id === "dock.composer" && this.#canSend()) {
+        if ("id" in event && "text" in event && event.id === COMPOSER_ID && this.#canSend()) {
           replaceDraft(this.#state.composer, event.text);
           void this.#submit();
         }
@@ -235,7 +239,9 @@ class MessengerApp {
         this.#render();
         return;
       case "gone":
-        if ("ids" in event && event.ids.includes(SURFACE)) void this.#quit(0);
+        if (!("ids" in event)) return;
+        if (event.ids.includes(SURFACE)) void this.#quit(0);
+        else if (event.ids.includes(SETTINGS_SURFACE)) this.#closeSettings();
         return;
       case "error":
         if ("msg" in event) this.#notice(`Tern: ${event.msg}`, "error");
@@ -247,7 +253,7 @@ class MessengerApp {
     if (this.#state.dialog?.kind === "create") {
       return id === "layer.dialog.body.input" && this.#state.dialog.operation.state !== "pending" ? this.#state.dialog.input : undefined;
     }
-    return !this.#state.dialog && !this.#settings && !this.#state.panel && this.#activeChannel()?.joined && id === "dock.composer" ? this.#state.composer : undefined;
+    return !this.#state.dialog && !this.#settings && !this.#state.panel && this.#activeChannel()?.joined && id === COMPOSER_ID ? this.#state.composer : undefined;
   }
 
   #onSelect(listId: string, itemId: string): void {
@@ -291,26 +297,25 @@ class MessengerApp {
       if (channel) channel.recipient = undefined;
       this.#refocus();
     } else if (act === "channels" || act === "members") {
-      const fits = this.#state.cols >= (act === "channels" ? 90 : 125);
-      if (fits) {
+      // A sidebar that can't fit beside the timeline at this pane width opens as a sheet instead.
+      const side = sidebarLayout(this.#state.cols, this.#state.sidebars)[act];
+      if (side === "sheet" || (act === "members" && this.#state.cols < MEMBERS_COLS)) {
+        this.#state.panel = this.#state.panel === act ? null : act;
+        this.#render();
+      } else {
         this.#state.sidebars[act] = !this.#state.sidebars[act];
         this.#state.panel = null;
         this.#refocus();
-      } else {
-        this.#state.panel = this.#state.panel === act ? null : act;
-        this.#render();
       }
     } else if (act === "close-panel") {
       this.#state.panel = null;
       this.#refocus();
     } else if (act === "settings") {
-      this.#settings = new MessengerSettings(process.cwd(), this.#state.url);
-      this.#state.panel = null;
-      this.#render();
+      this.#openSettings();
     } else if (act === "latest") {
+      // Only offered while an older history window is open; Tern's own ↓ returns to the live end otherwise.
       const channel = this.#activeChannel();
-      if (channel?.following && !channel.hasNewer) this.#surface?.scroll("main", "end");
-      else if (channel) void this.#loadHistory(channel, true);
+      if (channel) void this.#loadHistory(channel, true);
     } else if (act === "delete-channel") {
       // From a rail row's context menu (node `ch-<name>`) or the timeline header's trash icon.
       const fromRow = this.#state.channels.find(c => nodeId.endsWith(`.ch-${idPart(c.name)}`));
@@ -332,17 +337,32 @@ class MessengerApp {
     const config = loadConfig(process.cwd());
     const url = this.args.url ?? config.mesh.url;
     if (!url) { this.#settings.error = "The effective configuration has no WebSocket server."; return; }
-    this.#settings = undefined;
+    this.#closeSettings();
     this.#state.url = url;
     this.#state.stuckThresholdMs = config.stuckThreshold * 1000;
     this.#mesh.reconfigure(url, this.args.token ?? config.mesh.token, this.args.channels.length ? this.args.channels : config.mesh.channels);
     this.#notice("Saved user settings. Reconnecting with effective configuration.", "info");
   }
 
+  #openSettings(): void {
+    this.#state.panel = null;
+    this.#settings = new MessengerSettings(process.cwd(), this.#state.url);
+    this.#settingsSurface ??= this.#session?.open({ id: SETTINGS_SURFACE, mode: "screen", title: "Messenger settings", role: "omp.messenger.settings" });
+    this.#render();
+  }
+
+  #closeSettings(): void {
+    if (!this.#settings) return;
+    this.#settings = undefined;
+    void this.#settingsSurface?.close({ keep: false });
+    this.#settingsSurface = undefined;
+    this.#refocus();
+  }
+
   // -- create / delete channel -------------------------------------------------
 
   #openCreate(initial = ""): void {
-    this.#settings = undefined;
+    this.#closeSettings();
     this.#state.panel = null;
     const input = createComposer();
     insertText(input, initial);
@@ -354,7 +374,7 @@ class MessengerApp {
 
   #openDelete(name: string | undefined): void {
     if (!name) return;
-    this.#settings = undefined;
+    this.#closeSettings();
     this.#state.panel = null;
     if (name === "main") return this.#notice("#main can't be deleted", "error");
     const channel = this.#state.channels.find(c => c.name === name);
@@ -455,7 +475,7 @@ class MessengerApp {
   #onKey(key: Key): void {
     if (this.#settings) {
       const result = this.#settings.key(key);
-      if (result === "close") { this.#settings = undefined; this.#refocus(); }
+      if (result === "close") this.#closeSettings();
       else if (result === "save") this.#saveSettings();
       this.#render();
       return;
@@ -504,12 +524,6 @@ class MessengerApp {
       insertText(composer, " ");
     } else if (key.name === "up" || key.name === "down") {
       if (!recallHistory(composer, key.name === "up" ? -1 : 1)) return;
-    } else if (key.name === "page_up") {
-      this.#surface?.scroll("main", "page-up");
-      return;
-    } else if (key.name === "page_down") {
-      this.#surface?.scroll("main", "page-down");
-      return;
     } else if (!editComposer(composer, key)) {
       return;
     }
@@ -547,7 +561,7 @@ class MessengerApp {
 
   #refocus(): void {
     this.#render();
-    this.#surface?.focus("dock.composer");
+    this.#surface?.focus(COMPOSER_ID);
   }
 
   async #submit(): Promise<void> {
@@ -610,8 +624,7 @@ class MessengerApp {
         return;
       }
       case "settings":
-        this.#settings = new MessengerSettings(process.cwd(), this.#state.url);
-        this.#render();
+        this.#openSettings();
         return;
       case "help":
         return this.#notice("/create <channel> · /join <channel> · /delete <channel> · /dm <name> <msg> · @name · @all · ⌥↑↓ switch channel", "info");
@@ -647,7 +660,6 @@ class MessengerApp {
     }
     this.#state.completion = null;
     this.#refocus();
-    if (channel?.following) this.#surface?.scroll("main", "end");
   }
 
   #cycleChannel(delta: number): void {
@@ -697,7 +709,6 @@ class MessengerApp {
       channel.hasMore = page.hasMore;
     } else channel.historyError = page?.ok === false ? page.error : "Couldn't load history. Check the connection and retry.";
     this.#render();
-    if (newest && channel.name === this.#state.active) this.#surface?.scroll("main", "end");
   }
 
   // -- mesh ------------------------------------------------------------------
