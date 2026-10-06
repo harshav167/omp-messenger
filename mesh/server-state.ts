@@ -1,5 +1,5 @@
 import { findAgentClaim } from "../lib.ts";
-import type { AgentRegistration, AllClaims, AllCompletions, ClaimEntry, CompletionEntry } from "../lib.ts";
+import type { AgentRegistration, AllClaims, AllCompletions, ClaimEntry, CompletionEntry, HistoryEntry } from "../lib.ts";
 import type { Persist } from "./persist.ts";
 import type { ChannelInfo, ClaimResult, CompleteResult, UnclaimResult } from "./types.ts";
 
@@ -13,13 +13,23 @@ export interface ChannelState {
 export interface ServerState {
   readonly channels: Map<string, ChannelState>;
   getOrCreate(channel: string): ChannelState;
+  isDeleted(channel: string): boolean;
   claim(channel: string, agent: string, spec: string, taskId: string, reason?: string): ClaimResult;
   unclaim(channel: string, agent: string, spec: string, taskId: string): UnclaimResult;
   complete(channel: string, agent: string, spec: string, taskId: string, notes?: string): CompleteResult;
   dropAgent(channel: string, name: string): void;
   renameAgent(channel: string, oldName: string, newName: string): void;
   listChannels(): ChannelInfo[];
+  /** Record a delivered message in its channel's log and assign its sequence number. */
+  appendLog(entry: Omit<HistoryEntry, "seq">): HistoryEntry;
+  /** Up to `limit` log entries of `channel` older than `before` (newest when omitted), oldest first. */
+  history(channel: string, before: number | undefined, limit: number): { entries: HistoryEntry[]; hasMore: boolean };
+  /** Remove a channel for good: presence, claims, completions and its message log. */
+  deleteChannel(channel: string): void;
 }
+
+/** Entries kept per channel when the server runs without a data dir. */
+const MEMORY_LOG_LIMIT = 2000;
 
 class MissingPresenceError extends Error {
   constructor(agent: string) {
@@ -39,6 +49,7 @@ function purgeStaleClaims(channel: ChannelState): void {
 
 export function createServerState(persist?: Persist): ServerState {
   const channels = new Map<string, ChannelState>();
+  const deleted = new Set(persist?.loadDeletedChannels() ?? []);
   for (const saved of persist?.loadChannels() ?? []) {
     channels.set(saved.name, {
       createdAt: saved.createdAt,
@@ -47,6 +58,10 @@ export function createServerState(persist?: Persist): ServerState {
       completions: persist?.loadCompletions(saved.name) ?? {},
     });
   }
+  // Without persistence the log lives in memory, outside ChannelState, so it survives a
+  // channel emptying out (dropAgent deletes the channel) for the life of the process.
+  const memoryLog = new Map<string, HistoryEntry[]>();
+  let memorySeq = 0;
 
   const getOrCreate = (channel: string): ChannelState => {
     const existing = channels.get(channel);
@@ -58,14 +73,16 @@ export function createServerState(persist?: Persist): ServerState {
       claims: {},
       completions: persist?.loadCompletions(channel) ?? {},
     };
-    channels.set(channel, created);
     persist?.saveChannel(channel, createdAt);
+    deleted.delete(channel);
+    channels.set(channel, created);
     return created;
   };
 
   return {
     channels,
     getOrCreate,
+    isDeleted: channel => deleted.has(channel),
     claim(channel, agent, spec, taskId, reason) {
       const current = getOrCreate(channel);
       purgeStaleClaims(current);
@@ -126,7 +143,7 @@ export function createServerState(persist?: Persist): ServerState {
       if (!current) return;
       current.presence.delete(name);
       purgeStaleClaims(current);
-      if (channel !== "main" && current.presence.size === 0 && Object.keys(current.claims).length === 0) {
+      if (!persist && channel !== "main" && current.presence.size === 0 && Object.keys(current.claims).length === 0) {
         channels.delete(channel);
       }
     },
@@ -145,10 +162,36 @@ export function createServerState(persist?: Persist): ServerState {
         }
       }
     },
+    deleteChannel(channel) {
+      persist?.deleteChannel(channel);
+      channels.delete(channel);
+      memoryLog.delete(channel);
+      deleted.add(channel);
+    },
     listChannels() {
       return [...channels.entries()]
         .map(([name, channel]) => ({ name, members: channel.presence.size, createdAt: channel.createdAt }))
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.name.localeCompare(right.name));
+    },
+    appendLog(entry) {
+      if (persist) return { ...entry, seq: persist.appendMessage(entry) };
+      const logged: HistoryEntry = { ...entry, seq: ++memorySeq };
+      const log = memoryLog.get(entry.channel) ?? [];
+      log.push(logged);
+      if (log.length > MEMORY_LOG_LIMIT) log.splice(0, log.length - MEMORY_LOG_LIMIT);
+      memoryLog.set(entry.channel, log);
+      return logged;
+    },
+    history(channel, before, limit) {
+      // One extra row tells whether an older page exists.
+      if (persist) {
+        const rows = persist.pageMessages(channel, before, limit + 1);
+        const hasMore = rows.length > limit;
+        return { entries: hasMore ? rows.slice(1) : rows, hasMore };
+      }
+      const log = memoryLog.get(channel) ?? [];
+      const older = before === undefined ? log : log.filter((entry) => entry.seq < before);
+      return { entries: older.slice(-limit), hasMore: older.length > limit };
     },
   };
 }

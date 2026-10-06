@@ -44,6 +44,7 @@ import {
   generateAutoStatus,
   computeStatus,
   agentHasTask,
+  isMentioned,
   findReservationConflicts,
   LOCAL_HOST_ID,
 } from "./lib.ts";
@@ -83,28 +84,28 @@ import { shutdownLobbyWorkers } from "./crew/lobby.ts";
 
 /** Minimal Component wrapper for a fixed set of pre-rendered lines. */
 function statusCard(lines: string[]) {
-  return { render: (width: number) => lines.map(line => truncateToWidth(line, width)), invalidate() {} };
+  return { render: (width: number) => lines.map(line => truncateToWidth(line, width)), invalidate() { } };
 }
 
 /** Status header line: colored icon, accent title, dim meta — mirrors omp's renderStatusLine. */
 function statusLine(
-	opts: { icon?: "pending" | "success" | "error" | "warning"; glyph?: string; title: string; meta?: string[] },
-	theme: Theme,
+  opts: { icon?: "pending" | "success" | "error" | "warning"; glyph?: string; title: string; meta?: string[] },
+  theme: Theme,
 ): string {
-	const iconColor = { pending: "dim", success: "success", error: "error", warning: "warning" } as const;
-	const icon = opts.glyph ?? (opts.icon ? theme.fg(iconColor[opts.icon], theme.status[opts.icon]) : "");
-	const meta = opts.meta?.length ? theme.fg("dim", `  ${opts.meta.join(" · ")}`) : "";
-	return `${icon} ${theme.fg("accent", opts.title)}${meta}`.trimEnd();
+  const iconColor = { pending: "dim", success: "success", error: "error", warning: "warning" } as const;
+  const icon = opts.glyph ?? (opts.icon ? theme.fg(iconColor[opts.icon], theme.status[opts.icon]) : "");
+  const meta = opts.meta?.length ? theme.fg("dim", `  ${opts.meta.join(" · ")}`) : "";
+  return `${icon} ${theme.fg("accent", opts.title)}${meta}`.trimEnd();
 }
 
 /** Quoted body lines with a dim border glyph, collapsing long messages (hub renderer parity). */
 function ircQuoteBody(text: string, theme: Theme, collapsedLines = 3): string[] {
-	const lines = text.replace(/\r\n?/g, "\n").split("\n");
-	const collapsed = lines.length > collapsedLines;
-	const visible = collapsed ? lines.slice(0, collapsedLines) : lines;
-	const rows = visible.map((line) => `  ${theme.fg("dim", "│")} ${line}`);
-	if (collapsed) rows.push(theme.fg("dim", `  … +${lines.length - collapsedLines} more lines`));
-	return rows;
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const collapsed = lines.length > collapsedLines;
+  const visible = collapsed ? lines.slice(0, collapsedLines) : lines;
+  const rows = visible.map((line) => `  ${theme.fg("dim", "│")} ${line}`);
+  if (collapsed) rows.push(theme.fg("dim", `  … +${lines.length - collapsedLines} more lines`));
+  return rows;
 }
 
 /** Display target for send/broadcast: broadcasts read "all", matching hub's card. */
@@ -119,7 +120,7 @@ function actionTitle(call: CrewParams | undefined): string {
     case "": return "IRC status";
     case "join": return "IRC join";
     case "leave": return "IRC leave";
-    case "channels": case "channels.join": case "channels.leave": return "IRC channels";
+    case "channels": case "channels.join": case "channels.leave": case "channels.delete": return "IRC channels";
     case "peers": return "IRC peers";
     case "whois": return `IRC whois ${call?.name ?? ""}`.trim();
     case "reserve": return "IRC reserve";
@@ -233,12 +234,18 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       content += `*${msg.from} is in ${locationPart} (${sender.model})*\n\n`;
     }
 
-    // Add reply hint
-    const replyHint = config.replyHint
-      ? ` — reply: omp_messenger({ action: "send", to: "${msg.from}", message: "..." })`
-      : "";
+    const isPost = msg.kind === "post";
+    const channelName = msg.channel ?? "main";
+    const replyHint = !config.replyHint
+      ? ""
+      : isPost
+        ? ` — reply in #${channelName}: omp_messenger({ action: "broadcast", channel: "${channelName}", message: "@${msg.from} ..." })`
+        : ` — reply: omp_messenger({ action: "send", to: "${msg.from}", message: "..." })`;
+    const heading = isPost
+      ? `**#${channelName} · ${msg.from}**${isMentioned(msg.mentions, state.agentName) ? " (mentions you)" : ""}`
+      : `**Message from ${msg.from}**`;
 
-    content += `**Message from ${msg.from}**${replyHint}\n\n${msg.text}`;
+    content += `${heading}${replyHint}\n\n${msg.text}`;
 
     if (msg.replyTo) {
       content = `*(reply to ${msg.replyTo.substring(0, 8)})*\n\n${content}`;
@@ -252,6 +259,22 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     //     #resumeStrandedIrcAsides); `aside` would fold silently into context there.
     //   gentle → aside: explicitly non-interrupting; rides the step boundary while busy
     //     and stays user-driven (folds into context) after a deliberate Esc.
+    //   channel post that doesn't mention us → ambient: it must neither interrupt nor
+    //     wake. `aside` starts a turn on an idle session, so an idle receiver gets a plain
+    //     display append without a turn instead; a busy one gets `aside`. When the session
+    //     state is unknown (stale ctx), `aside` errs toward not interrupting work.
+    let delivery: { triggerTurn: boolean; deliverAs?: "steer" | "aside" };
+    if (isPost && msg.gentle) {
+      let idle = false;
+      try {
+        idle = latestCtx?.isIdle() ?? false;
+      } catch {
+        idle = false;
+      }
+      delivery = idle ? { triggerTurn: false } : { triggerTurn: false, deliverAs: "aside" };
+    } else {
+      delivery = msg.gentle ? { triggerTurn: true, deliverAs: "aside" } : { triggerTurn: true, deliverAs: "steer" };
+    }
     pi.sendMessage(
       {
         customType: "irc:incoming",
@@ -263,11 +286,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
           message: msg.text,
           ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
           ...(msg.channel ? { channel: msg.channel } : {}),
+          ...(isPost ? { kind: "post", mentions: msg.mentions ?? [] } : {}),
         },
       },
-      msg.gentle
-        ? { triggerTurn: true, deliverAs: "aside" }
-        : { triggerTurn: true, deliverAs: "steer" }
+      delivery,
     );
   }
 
@@ -374,13 +396,13 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       const channelList = mesh.channels().join(",");
       const meshStr = mesh.kind === "mesh"
         ? theme.fg(
-            mesh.status() === "connected" ? "dim" : "warning",
-            mesh.status() === "connected"
-              ? ` ⚡${channelList}`
-              : mesh.status() === "reconnecting"
-                ? ` ⚡${channelList}…`
-                : ` ⚡${channelList}✗`,
-          )
+          mesh.status() === "connected" ? "dim" : "warning",
+          mesh.status() === "connected"
+            ? ` ⚡${channelList}`
+            : mesh.status() === "reconnecting"
+              ? ` ⚡${channelList}…`
+              : ` ⚡${channelList}✗`,
+        )
         : channelList !== "main"
           ? theme.fg("dim", ` #${channelList}`)
           : "";
@@ -390,9 +412,9 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       const planningStr =
         isPlanningForCwd(planningCwd)
           ? theme.fg(
-              "warning",
-              ` · plan ${planningState.pass}/${planningState.maxPasses} ${planningState.phase}${isPlanningStalled(planningCwd) ? " stalled" : ""}`,
-            )
+            "warning",
+            ` · plan ${planningState.pass}/${planningState.maxPasses} ${planningState.phase}${isPlanningStalled(planningCwd) ? " stalled" : ""}`,
+          )
           : "";
 
       const activityStr = !planningStr && state.activity.currentActivity
@@ -521,6 +543,7 @@ Usage (action-based API - preferred):
   omp_messenger({ action: "channels" })                          → List mesh channels
   omp_messenger({ action: "channels.join", channels: ["blue"] }) → Join additional channels
   omp_messenger({ action: "channels.leave", channels: ["blue"] })→ Leave channels (last one leaves the mesh)
+  omp_messenger({ action: "channels.delete", channel: "test" }) → Delete a channel and its history; notify members. WebSocket only. main is protected.
   omp_messenger({ action: "leave" })                             → Leave mesh for this session
   omp_messenger({ action: "status" })                            → Get status
   omp_messenger({ action: "list" })                              → List agents with presence
@@ -528,7 +551,10 @@ Usage (action-based API - preferred):
   omp_messenger({ action: "whois", name: "AgentName" })          → Agent details
   omp_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
   omp_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
-  omp_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
+  omp_messenger({ action: "send", to: "Agent", message: "hi" })  → Direct message
+  omp_messenger({ action: "broadcast", channel: "main", message: "@Storm take the parser" })
+                                                                  → Post to a channel's group chat: @name / @all
+                                                                    interrupt those members, the rest read it quietly
   
   // Crew: Plan from PRD
   omp_messenger({ action: "plan" })                              → Auto-discover PRD
@@ -595,7 +621,7 @@ Usage (action-based API - preferred):
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
       name: Type.Optional(Type.String({ description: "Name for rename action or Team setup/profile/charter commands" })),
-      channel: Type.Optional(Type.String({ description: "Channel to route a send/claim through when the recipient or claim is in several channels" })),
+      channel: Type.Optional(Type.String({ description: "Channel for send/claim routing or channels.delete. Deletion removes history and notifies members; main is protected." })),
       channels: Type.Optional(Type.Array(Type.String(), { description: "Mesh channels for join / channels.join / channels.leave" })),
 
       // ═══════════════════════════════════════════════════════════════════════
@@ -711,7 +737,7 @@ Usage (action-based API - preferred):
     config = loadConfig(state.cwd);
     const wasRegistered = state.registered;
     if (wasRegistered) {
-      try { await mesh.leave(); } catch {}
+      try { await mesh.leave(); } catch { }
     }
     mesh.close();
     state.channels = config.mesh.channels;
@@ -1345,7 +1371,7 @@ Usage (action-based API - preferred):
     if (recentTestTimer) { clearTimeout(recentTestTimer); recentTestTimer = null; }
     if (recentEditTimer) { clearTimeout(recentEditTimer); recentEditTimer = null; }
     mesh.close();
-    try { await mesh.leave(); } catch {}
+    try { await mesh.leave(); } catch { }
   });
 
   // ===========================================================================

@@ -26,6 +26,7 @@ import {
 import {
   type Mesh,
   type MeshPeer,
+  type PostError,
   type SendError,
   isClaimSuccess,
   isClaimAlreadyHaveClaim,
@@ -49,6 +50,15 @@ const SEND_ERROR_TEXT: Record<SendError, string> = {
   write_failed: "write failed",
   unreachable: "mesh unreachable",
   ambiguous_channel: "recipient is in several channels — pass channel",
+};
+
+const POST_ERROR_TEXT: Record<PostError, string> = {
+  not_joined: "not a member of that channel",
+  empty: "message is empty",
+  invalid_channel: "invalid channel name",
+  ambiguous_channel: "you are in several channels — pass channel",
+  unreachable: "mesh unreachable",
+  write_failed: "write failed",
 };
 
 // =============================================================================
@@ -222,6 +232,19 @@ export async function executeLeaveChannels(
   });
 }
 
+export async function executeDeleteChannel(mesh: Mesh, channel?: string) {
+  if (!channel) return result("Error: channel is required for channels.delete.", { mode: "channels.delete", error: "missing_channel" });
+  const deleted = await mesh.deleteChannel(channel);
+  if (deleted.ok === false) {
+    const reason = deleted.error === "unsupported" ? "Channel deletion requires the WebSocket mesh server."
+      : deleted.error === "protected" ? "#main cannot be deleted."
+        : deleted.error === "unreachable" ? "Deletion was not confirmed. Check the channel list before retrying."
+          : `Channel deletion failed: ${deleted.error}.`;
+    return result(reason, { mode: "channels.delete", channel, error: deleted.error });
+  }
+  return result(`Deleted #${deleted.deleted} and its history.${deleted.removed.length ? ` Removed and notified: ${deleted.removed.join(", ")}.` : ""}`, { mode: "channels.delete", ...deleted });
+}
+
 export async function executeLeave(
   state: MessengerState,
   mesh: Mesh,
@@ -326,9 +349,9 @@ export async function executeLeave(
       releasedReservations,
       releasedClaim: releasedClaim
         ? {
-            ...releasedClaim,
-            spec: displaySpecPath(releasedClaim.spec, cwd),
-          }
+          ...releasedClaim,
+          spec: displaySpecPath(releasedClaim.spec, cwd),
+        }
         : undefined,
     }
   );
@@ -521,13 +544,20 @@ export async function executeSend(
         { mode: "send", sent: ["feed"], failed: [] }
       );
     }
-    recipients = mesh.peers().map(agent => agent.name);
-    if (recipients.length === 0) {
-      return result(
-        "No active agents to broadcast to.",
-        { mode: "send", error: "no_recipients" }
-      );
+    // A channel post: one logged message every member receives; members it mentions
+    // (@name, @all) are interrupted, everyone else gets it without interruption.
+    const posted = await mesh.post(message, { channel, replyTo });
+    if (posted.ok === false) {
+      return result(`Failed to post: ${POST_ERROR_TEXT[posted.error]}`, { mode: "send", error: posted.error, sent: [], failed: [] });
     }
+    state.messagesSent++;
+    const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
+    logFeedEvent(cwd, state.agentName, "message", undefined, preview);
+    const mentionText = posted.mentions.length > 0 ? ` Mentioned: ${posted.mentions.map(m => `@${m}`).join(", ")}.` : "";
+    return result(
+      `Posted to #${posted.channel} (${posted.delivered.length} member${posted.delivered.length === 1 ? "" : "s"}).${mentionText}${remainingText()}`,
+      { mode: "send", channel: posted.channel, sent: posted.delivered, failed: [], mentions: posted.mentions },
+    );
   } else if (to) {
     recipients = [...new Set(Array.isArray(to) ? to : [to])];
     if (recipients.length === 0) {
@@ -1132,7 +1162,7 @@ export function executeAutoRegisterPath(
         { mode: "autoRegisterPath", action: "list", paths: [], currentFolder: cwd, isCurrentInList: false }
       );
     }
-    
+
     const isCurrentInList = matchesAutoRegisterPath(cwd, paths);
     const lines = ["Auto-register paths:", ""];
     for (const p of paths) {
@@ -1142,7 +1172,7 @@ export function executeAutoRegisterPath(
     lines.push("");
     lines.push(`Current folder: ${cwd}`);
     lines.push(`Status: ${isCurrentInList ? "Will auto-register here" : "Will NOT auto-register here"}`);
-    
+
     return result(lines.join("\n"), {
       mode: "autoRegisterPath",
       action: "list",
@@ -1159,10 +1189,10 @@ export function executeAutoRegisterPath(
         { mode: "autoRegisterPath", action: "add", alreadyExists: true, path: cwd }
       );
     }
-    
+
     const newPaths = [...paths, cwd];
     saveAutoRegisterPaths(newPaths);
-    
+
     return result(
       `Added to auto-register paths:\n  ${cwd}\n\nAgents starting in this folder will now auto-join the mesh.`,
       { mode: "autoRegisterPath", action: "add", path: cwd, paths: newPaths }
@@ -1184,10 +1214,10 @@ export function executeAutoRegisterPath(
         { mode: "autoRegisterPath", action: "remove", notFound: true, path: cwd }
       );
     }
-    
+
     const newPaths = paths.filter(p => p !== cwd);
     saveAutoRegisterPaths(newPaths);
-    
+
     return result(
       `Removed from auto-register paths:\n  ${cwd}\n\nAgents starting in this folder will no longer auto-join.`,
       { mode: "autoRegisterPath", action: "remove", path: cwd, paths: newPaths }

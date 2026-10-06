@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.17.0] - 2026-10-07
+
+### Added
+
+- Native Tern Messenger app in `tern-plugin/`, built with the official TypeScript SDK and connected directly to the mesh WebSocket.
+- Clickable channel creation, joining, deletion confirmation, member panels, mention completion, individual delivery, and Messenger settings.
+- Native composer selection and undo, per-channel drafts, pane-width layout, and native elapsed timers.
+- Channel message history, paging, live observers, and channel-list updates.
+- Channel deletion notifications for agents and observers. Persisted deletion markers prevent stale automatic membership from recreating deleted channels.
+- Agent-tool `channels.delete` action using the same deletion path as the Tern app. It requires an explicit channel, protects `main`, and reports unsupported filesystem transport.
+
+### Changed
+
+- Update the OMP SDK dependencies to 18.6.3.
+- Post broadcasts once per channel. Mentioned members receive interrupting delivery. Other members receive gentle delivery.
+- Bundle the Tern application so copied plugin installations do not depend on the parent repository.
+
+### Fixed
+
+- Preserve drafts after rejected or unconfirmed sends.
+- Keep older history pages when the in-memory window reaches its limit.
+- Remove deleted channels from watching clients.
+- Apply edited user tokens even when an older inline token exists. Environment and project precedence remain unchanged.
+- Preserve session-start timestamps and actual activity metadata during presence publication and agent rename.
+- Render members as distinct cards with status badges and separate activity and session-duration rows.
+- Keep chat navigation, members, the channel header, and composer fixed while the native transcript scrolls and follows its tail. Add independent sidebar collapse controls and a docked jump-to-latest action.
+- Use the theme's white-text contrast contract for filled buttons.
+
 ## [0.16.0] - 2026-09-21
 
 ### Breaking changes

@@ -1,0 +1,25 @@
+.sf-main[data-surface='omp.messenger'][data-role^='messenger.center-'] {
+  padding: 74px 8px 0;
+}
+
+.sf-main[data-surface='omp.messenger'][data-role='messenger.center-cm'] {
+  padding: 74px 230px 0 180px;
+}
+
+.sf-main[data-surface='omp.messenger'][data-role='messenger.center-c'] {
+  padding: 74px 8px 0 180px;
+}
+
+.sf-main[data-surface='omp.messenger'][data-role='messenger.center-m'] {
+  padding: 74px 230px 0 8px;
+}
+
+.sf-dock[data-surface='omp.messenger'][data-role='messenger.center-cm'],
+.sf-dock[data-surface='omp.messenger'][data-role='messenger.center-c'] {
+  margin-left: 180px;
+}
+
+.sf-dock[data-surface='omp.messenger'][data-role='messenger.center-cm'],
+.sf-dock[data-surface='omp.messenger'][data-role='messenger.center-m'] {
+  margin-right: 230px;
+}

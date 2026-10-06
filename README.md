@@ -25,6 +25,72 @@ omp plugin link .
 
 Crew agents ship with the plugin (`agents/*.md`) and are discovered automatically — by crew and by omp's own `task` tool. The `omp-messenger-crew` skill is auto-loaded from the plugin. Workers can load domain-specific [crew skills](#crew-skills) on demand during task execution.
 
+Delete one WebSocket mesh channel through the agent tool:
+
+```typescript
+omp_messenger({ action: "channels.delete", channel: "test" })
+```
+
+This removes the channel and its history and notifies its members. It is not the same as `channels.leave`. The `main` channel is protected. Filesystem meshes return an explicit unsupported error. Delete only a channel the user has authorised you to remove. `channels` lists channels and their member counts before you choose one.
+
+### Tern Messenger
+
+The Tern app connects directly to the WebSocket mesh. It does not need a running OMP session. It uses the official `@stencil-hq/tern` SDK to draw native controls.
+
+Build and link the local checkout:
+
+```bash
+bun install
+bun run build:tern
+tern plugin link ./tern-plugin
+omp --profile=debug plugin link .
+```
+
+Open **Messenger** from Tern's command palette or press **Cmd+Shift+M**. The command opens a right-hand split. If a Messenger pane already exists, it focuses that pane. Close an old Messenger pane and reopen it after rebuilding the app. The bundled `tern-plugin/dist/messenger.js` includes its dependencies and shared Messenger code, so a copied plugin does not depend on its parent repository.
+
+Use the visible controls:
+
+- **New channel** opens a naming dialog. Creation also joins the channel.
+- **Join channel** joins a watched channel so you can post.
+- Right-click a channel and select **Delete channel**, or click **Delete** in its header. The confirmation lists members and warns that history is deleted.
+- **Members** shows agent status, time since activity, and session age. Session age is not accumulated active time.
+- Click a member's name to insert a mention. **Mention @all** reaches everyone in the channel.
+- **Message individually** delivers only to that member. The message remains visible in the channel's history to authenticated observers. This is not a private conversation.
+- **Settings** edits the same user-level URL, token, default channels, and OMP auto-join folders as `/messenger config`. Project configuration, environment variables, and explicit launch options keep their existing precedence.
+- **Hide channels** and **Hide members** independently collapse the sidebars. **Show channels** and **Show members** restore them. In narrow splits, these controls open panels instead.
+- Only the message timeline scrolls. The toolbar, channel header, sidebars, and composer stay in place. New messages follow the bottom until you scroll up to read.
+- **Load older messages** enters an older history window. **Jump to latest**, always beside the composer, returns to the newest messages.
+
+Drafts are separate for each channel. Native selection and undo work when Tern's **Native composer editing** setting is enabled. Failed sends preserve the draft. If delivery is not confirmed, inspect history before retrying because the server might have received the message.
+
+The optional slash commands have completion. They are shortcuts, not requirements for the GUI.
+
+Deleting a channel removes its history and task completions. Connected agents receive a message through their existing WebSocket. Agents with no remaining channel move to `main` when their name is available there. A persisted deletion marker prevents an offline agent's stale automatic membership from recreating the channel. An explicit join can recreate it. The `main` channel cannot be deleted.
+
+The server must run the updated code before the new channel lifecycle works. Upgrade the existing deployment without replacing `mesh/.env` or deleting its volume:
+
+```bash
+docker compose -f mesh/docker-compose.yml --env-file mesh/.env up -d --build
+```
+
+In the local development setup, Docker Compose runs this service in OrbStack. The compose file maps port `8765` and mounts the named `mesh-data` volume at `/data`. Message history is stored in SQLite there. Without a data directory, the server retains a bounded in-memory log for its process lifetime.
+
+The Tern plugin is linked independently from the OMP extension. Linked launcher and stylesheet files hot-reload. The already-running Bun Messenger application does not; reopen it after rebuilding. Restart existing OMP sessions to load an updated extension.
+
+### Tern acceptance checks
+
+After rebuilding the app and upgrading the server, check these interactions in Tern:
+
+1. Open Messenger beside the focused pane and resize the split.
+2. Open Settings, edit a field, cancel it, and confirm that no configuration changed.
+3. Create a disposable channel through **New channel**.
+4. Join it from an OMP session. Confirm that membership updates without restarting the app.
+5. Type a draft, replace a selection, undo, and switch channels. Confirm that both drafts remain separate.
+6. Send a group post, a mention, and an individual message. Confirm delivery and the displayed visibility warning.
+7. Load older history. Confirm that new traffic does not pull you to the latest messages.
+8. Delete only the disposable channel. Confirm the agent notification and the removal from another watching app.
+
+
 ### Multi-machine mesh
 
 Run the mesh server once on any host (Docker):

@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["bun"]
   },
-  "include": ["*.ts", "mesh/**/*.ts", "crew/**/*.ts"]
+  "include": ["*.ts", "mesh/**/*.ts", "crew/**/*.ts", "tern-plugin/**/*.ts"]
 }

@@ -46,7 +46,6 @@ export function buildRegistration(
   name: string,
 ): AgentRegistration {
   const cwd = normalizeCwd(ctx.cwd);
-  const now = new Date().toISOString();
 
   return {
     name,
@@ -55,13 +54,13 @@ export function buildRegistration(
     sessionId: ctx.sessionManager.getSessionId(),
     cwd,
     model: ctx.model?.id ?? "unknown",
-    startedAt: now,
+    startedAt: state.sessionStartedAt,
     reservations: state.reservations.length > 0 ? state.reservations : undefined,
     gitBranch: getGitBranch(cwd),
     spec: state.spec,
     isHuman: state.isHuman,
     session: { ...state.session },
-    activity: { lastActivityAt: now },
+    activity: { ...state.activity },
     statusMessage: state.statusMessage,
   };
 }

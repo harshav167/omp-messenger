@@ -379,7 +379,7 @@ describe("executeSend broadcast filtering", () => {
         replyTo: options?.replyTo ?? null,
       },
     }));
-    vi.spyOn(feedModule, "logFeedEvent").mockImplementation(() => {});
+    vi.spyOn(feedModule, "logFeedEvent").mockImplementation(() => { });
   });
 
   afterEach(() => {
@@ -409,10 +409,11 @@ describe("executeSend broadcast filtering", () => {
     );
   });
 
-  it("non-worker broadcast delivers to mesh recipients", async () => {
+  it("non-worker broadcast posts once to the channel instead of messaging each peer", async () => {
     state.isCrewWorker = false;
+    vi.spyOn(mesh, "post").mockResolvedValue({ ok: true, channel: "main", delivered: ["OakBear", "PineFox"], mentions: [] });
 
-    await executeSend(
+    const response = await executeSend(
       state,
       mesh,
       dirs.cwd,
@@ -421,17 +422,10 @@ describe("executeSend broadcast filtering", () => {
       "Team-wide update"
     );
 
-    expect(mesh.send).toHaveBeenCalledTimes(2);
-    expect(mesh.send).toHaveBeenCalledWith(
-      "OakBear",
-      "Team-wide update",
-      { replyTo: undefined },
-    );
-    expect(mesh.send).toHaveBeenCalledWith(
-      "PineFox",
-      "Team-wide update",
-      { replyTo: undefined },
-    );
+    expect(mesh.post).toHaveBeenCalledTimes(1);
+    expect(mesh.post).toHaveBeenCalledWith("Team-wide update", { channel: undefined, replyTo: undefined });
+    expect(mesh.send).not.toHaveBeenCalled();
+    expect(response.details).toMatchObject({ channel: "main", sent: ["OakBear", "PineFox"], failed: [] });
   });
 
   it("worker direct message still delivers", async () => {

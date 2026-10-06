@@ -20,10 +20,12 @@ import {
   type NameThemeConfig,
   type SpecClaims,
   generateMemorableName,
+  isMentioned,
   isProcessAlive,
   isValidAgentName,
   normalizeAgentMailMessage,
   normalizeChannels,
+  parseMentions,
 } from "../lib.ts";
 import { buildRegistration, normalizeCwd } from "./registration.ts";
 import type {
@@ -34,6 +36,8 @@ import type {
   MeshPeer,
   RenameResult,
   SendError,
+  PostOptions,
+  PostOutcome,
   SendOptions,
   UnclaimResult,
 } from "./types.ts";
@@ -370,7 +374,7 @@ function register(
       state.model = registration.model;
       state.cwd = registration.cwd;
       state.gitBranch = registration.gitBranch;
-      state.activity.lastActivityAt = registration.startedAt;
+      state.activity.lastActivityAt = registration.activity.lastActivityAt;
       invalidateAgentsCache();
       return true;
     }
@@ -413,6 +417,7 @@ function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionCon
     reg.model = currentModel;
     state.model = currentModel;
     reg.cwd = state.cwd;
+    reg.startedAt = state.sessionStartedAt;
     reg.reservations = state.reservations.length > 0 ? state.reservations : undefined;
     if (state.spec) {
       reg.spec = state.spec;
@@ -541,7 +546,7 @@ function renameAgent(
   state.cwd = registration.cwd;
   state.gitBranch = registration.gitBranch;
   state.sessionStartedAt = registration.startedAt;
-  state.activity.lastActivityAt = registration.startedAt;
+  state.activity.lastActivityAt = registration.activity.lastActivityAt;
   invalidateAgentsCache();
   return { success: true, oldName, newName };
 }
@@ -910,12 +915,13 @@ function sendMessageToAgent(
   replyTo: string | null,
   gentle: boolean,
   channel: string,
+  post?: { id: string; mentions: string[] },
 ): AgentMailMessage {
   const targetInbox = join(dirs.inbox, to);
   ensureDirSync(targetInbox);
 
   const msg: AgentMailMessage = {
-    id: randomUUID(),
+    id: post?.id ?? randomUUID(),
     from,
     to,
     text,
@@ -923,11 +929,13 @@ function sendMessageToAgent(
     replyTo,
     channel,
     ...(gentle ? { gentle: true } : {}),
+    ...(post ? { kind: "post" as const, mentions: post.mentions } : {}),
   };
 
   // Atomic publish: write to a .tmp sibling the consumer's .json filter ignores, then
   // rename. Watchers only ever observe complete files, and the uuid filename cannot
-  // clobber an unconsumed message on a timestamp collision or clock rollback.
+  // clobber an unconsumed message on a timestamp collision or clock rollback. A post
+  // shares one id across recipients, but each lands in its own inbox directory.
   const tmpFile = join(targetInbox, `${msg.id}.tmp`);
   const msgFile = join(targetInbox, `${msg.id}.json`);
   fs.writeFileSync(tmpFile, JSON.stringify(msg, null, 2));
@@ -1129,6 +1137,7 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
     kind: "fs",
     status: () => "local",
     channels: () => (state.registered ? [...state.channels] : []),
+    deleteChannel: async () => ({ ok: false, error: "unsupported" }),
 
     async join(ctx, opts) {
       let channels: string[];
@@ -1318,6 +1327,35 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
       } catch {
         return { ok: false, error: "write_failed" };
       }
+    },
+
+    async post(text, opts?: PostOptions): Promise<PostOutcome> {
+      let channel: string;
+      if (opts?.channel !== undefined) {
+        if (!state.channels.includes(opts.channel)) return { ok: false, error: "not_joined" };
+        channel = opts.channel;
+      } else if (state.channels.length === 1) {
+        channel = state.channels[0];
+      } else {
+        return { ok: false, error: "ambiguous_channel" };
+      }
+      const body = text.trim();
+      if (body === "") return { ok: false, error: "empty" };
+      // The filesystem mesh keeps no channel log: a post is a fan-out of direct deliveries.
+      const dirs = channelDirs(base, channel);
+      const members = readAliveAgents(dirs.registry).map(agent => agent.name).filter(name => name !== state.agentName);
+      const mentions = parseMentions(body, [...members, state.agentName]);
+      const id = randomUUID();
+      const delivered: string[] = [];
+      try {
+        for (const member of members) {
+          sendMessageToAgent(dirs, member, body, state.agentName, opts?.replyTo ?? null, !isMentioned(mentions, member), channel, { id, mentions });
+          delivered.push(member);
+        }
+      } catch {
+        return { ok: false, error: "write_failed" };
+      }
+      return { ok: true, channel, delivered, mentions };
     },
 
     recoverInbox() {

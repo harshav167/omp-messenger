@@ -60,6 +60,60 @@ export interface AgentMailMessage {
   gentle?: boolean;
   /** Channel the message travelled through (set by the mesh on delivery). */
   channel?: string;
+  /** `post`: a channel message every member receives; absent: a direct message. */
+  kind?: "post";
+  /** Members a post names (`@name`), plus `all` for `@all`/`@everyone`. */
+  mentions?: string[];
+}
+
+/**
+ * One entry of a channel's message log, as the mesh server records it: every
+ * direct message and channel post that travelled through the channel.
+ */
+export interface HistoryEntry {
+  /** Server-assigned, increasing across the whole log; pages and ordering use it. */
+  seq: number;
+  id: string;
+  channel: string;
+  kind: "dm" | "post";
+  from: string;
+  /** The recipient of a direct message; null for a post. */
+  to: string | null;
+  mentions: string[];
+  text: string;
+  timestamp: string;
+  replyTo: string | null;
+}
+
+/** The mention token that addresses every member of a channel. */
+export const MENTION_ALL = "all";
+
+const MENTION_PATTERN = /(^|[^A-Za-z0-9_@-])@([A-Za-z0-9_][A-Za-z0-9_-]*)/g;
+
+/**
+ * Members `text` mentions: `@all`/`@everyone` yield {@link MENTION_ALL}, and
+ * `@name` yields `name` when it matches one of `members` (case-insensitive,
+ * returned with the member's own spelling). Unknown names are dropped, so an
+ * email address or a stray `@` never addresses anyone.
+ */
+export function parseMentions(text: string, members: readonly string[]): string[] {
+  const byLower = new Map(members.map(name => [name.toLowerCase(), name]));
+  const found = new Set<string>();
+  for (const match of text.matchAll(MENTION_PATTERN)) {
+    const token = match[2].toLowerCase();
+    if (token === "all" || token === "everyone") {
+      found.add(MENTION_ALL);
+      continue;
+    }
+    const member = byLower.get(token);
+    if (member) found.add(member);
+  }
+  return [...found];
+}
+
+/** Whether a post with `mentions` addresses `member` directly (by name or `@all`). */
+export function isMentioned(mentions: readonly string[] | undefined, member: string): boolean {
+  return !!mentions && (mentions.includes(MENTION_ALL) || mentions.includes(member));
 }
 
 interface AgentMailMessageInput {
@@ -73,6 +127,8 @@ interface AgentMailMessageInput {
   replyTo?: unknown;
   gentle?: unknown;
   channel?: unknown;
+  kind?: unknown;
+  mentions?: unknown;
 }
 
 function stringField(value: unknown, fallback: string): string {
@@ -96,6 +152,10 @@ export function normalizeAgentMailMessage(
     replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
     ...(raw.gentle === true ? { gentle: true } : {}),
     ...(typeof raw.channel === "string" && isValidChannelName(raw.channel) ? { channel: raw.channel } : {}),
+    ...(raw.kind === "post" ? { kind: "post" as const } : {}),
+    ...(Array.isArray(raw.mentions)
+      ? { mentions: raw.mentions.filter((m): m is string => typeof m === "string") }
+      : {}),
   };
 }
 

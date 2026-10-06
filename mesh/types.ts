@@ -45,6 +45,18 @@ export interface SendOptions {
   channel?: string;
 }
 
+export type PostError = "not_joined" | "empty" | "invalid_channel" | "ambiguous_channel" | "unreachable" | "write_failed";
+
+export type PostOutcome =
+  | { ok: true; channel: string; delivered: string[]; mentions: string[] }
+  | { ok: false; error: PostError };
+
+export interface PostOptions {
+  /** Channel to post in; required when this agent is in more than one. */
+  channel?: string;
+  replyTo?: string;
+}
+
 export type DeliverFn = (msg: AgentMailMessage) => void;
 
 export interface ChannelInfo {
@@ -52,6 +64,10 @@ export interface ChannelInfo {
   members: number;
   createdAt: string;
 }
+
+export type DeleteChannelResult =
+  | { ok: true; deleted: string; removed: string[] }
+  | { ok: false; error: "invalid_channel" | "protected" | "storage_failed" | "unsupported" | "unreachable" };
 
 export type RenameResult =
   | { success: true; oldName: string; newName: string }
@@ -132,6 +148,7 @@ export interface Mesh {
   leaveChannels(channels: string[]): Promise<void>;
   /** Channels known to the mesh (joined or not). */
   listChannels(): Promise<ChannelInfo[]>;
+  deleteChannel(channel: string): Promise<DeleteChannelResult>;
   /** Push the full registration to every joined channel. */
   publish(ctx: ExtensionContext): void;
   /** Unregister from every channel; throws when a registration could not be removed. */
@@ -146,6 +163,12 @@ export interface Mesh {
   /** Drop a dead local worker's registration eagerly (every joined channel). */
   evict(name: string): void;
   send(to: string, text: string, opts?: SendOptions): Promise<SendResult>;
+  /**
+   * Post `text` to a channel: every other member receives it, members it mentions
+   * (`@name`, `@all`) as an interrupting delivery and the rest gently. The mesh server
+   * also records it in the channel's history.
+   */
+  post(text: string, opts?: PostOptions): Promise<PostOutcome>;
   /** Idempotent: make sure inbox delivery is running. */
   recoverInbox(): void;
   /** Synchronous pull of anything pending (filesystem); no-op for the mesh client. */

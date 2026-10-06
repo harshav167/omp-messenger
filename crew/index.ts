@@ -87,6 +87,10 @@ export async function executeCrewAction(
       if (op === 'leave') {
         return handlers.executeLeaveChannels(state, mesh, ctx, params.channels);
       }
+      if (op === 'delete') {
+        return handlers.executeDeleteChannel(mesh, params.channel);
+      }
+      if (op !== null) return result(`Unknown channel operation: ${op}.`, { mode: action, error: "unknown_action" });
       return handlers.executeChannels(mesh);
 
     case 'leave':

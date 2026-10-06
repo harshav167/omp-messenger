@@ -197,6 +197,16 @@ describe("mesh config", () => {
     expect(loadConfig(dirs.cwd).mesh).toEqual({ url: null, token: "", channels: ["main"] });
   });
 
+  it("applies a token edit when user config already contains an inline token", async () => {
+    const home = path.join(dirs.root, ".omp-home");
+    writeJson(path.join(home, ".omp", "agent", "omp-messenger.json"), { mesh: { url: "ws://host:8765", token: "old", channels: ["main"] } });
+    const { saveMeshSettings, getStoredMeshSettings, loadConfig } = await loadConfigModule();
+    saveMeshSettings({ ...getStoredMeshSettings(), token: "new" });
+    expect(loadConfig(dirs.cwd).mesh.token).toBe("new");
+    process.env.OMP_MESSENGER_MESH_TOKEN = "environment";
+    expect(loadConfig(dirs.cwd).mesh.token).toBe("environment");
+  });
+
   it("reads the legacy channel key in stored mesh settings", async () => {
     const { getStoredMeshSettings } = await loadConfigModule();
     const home = path.join(dirs.root, ".omp-home");

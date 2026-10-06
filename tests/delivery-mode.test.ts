@@ -142,4 +142,29 @@ describe("peer message delivery mode", () => {
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload).toMatchObject({ details: { from: "Sender", message: "wake up" } });
   });
+
+  it("channel post: interrupts when it mentions the receiver, otherwise never interrupts or wakes", async () => {
+    for (const idle of [false, true]) {
+      const { cwd } = createTempCrewDirs();
+      const { pi, ctx } = await setupReceiver(cwd, idle);
+      const sender = await joinSender(cwd);
+
+      expect((await sender.post("@receiver review please")).ok).toBe(true);
+      expect((await sender.post("@all standup in 5")).ok).toBe(true);
+      expect((await sender.post("just thinking out loud")).ok).toBe(true);
+      await pi.handlers.turn_end?.[0]?.({ type: "turn_end" }, ctx);
+
+      const delivered = deliveries(pi);
+      expect(delivered).toHaveLength(3);
+      expect(delivered.find(d => d.text === "@receiver review please")?.opts).toEqual({ triggerTurn: true, deliverAs: "steer" });
+      expect(delivered.find(d => d.text === "@all standup in 5")?.opts).toEqual({ triggerTurn: true, deliverAs: "steer" });
+      // Busy: aside rides the step boundary. Idle: aside would start a turn, so a plain append.
+      expect(delivered.find(d => d.text === "just thinking out loud")?.opts).toEqual(
+        idle ? { triggerTurn: false } : { triggerTurn: false, deliverAs: "aside" },
+      );
+      const ambient = pi.sendMessage.mock.calls.find(([msg]) => msg?.details?.message === "just thinking out loud")?.[0];
+      expect(ambient).toMatchObject({ details: { kind: "post", channel: "main", mentions: [] } });
+      expect(ambient.content).toContain("#main · Sender");
+    }
+});
 });

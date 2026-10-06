@@ -9,6 +9,7 @@ import type { Mesh } from "../../mesh/types.ts";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createMockContext } from "../helpers/mock-context.ts";
 import { createTestMesh } from "../helpers/mesh.ts";
+import { executeCrewAction } from "../../crew/index.ts";
 
 interface Participant {
   mesh: Mesh;
@@ -102,7 +103,7 @@ async function makeClient(): Promise<ContractHarness> {
     b,
     ctx,
     add,
-    flush: () => {},
+    flush: () => { },
     async stop() {
       for (const participant of meshes) participant.mesh.close();
       await server.stop();
@@ -135,6 +136,34 @@ describe.each(implementations)("%s mesh contract", (_kind, factory) => {
       harness.a.mesh.publish(harness.ctx);
       await waitUntil(() => harness.b.mesh.peers()[0]?.reservations?.[0]?.pattern === "src/x.ts");
       expect(harness.b.mesh.peers()[0]?.reservations?.[0]?.pattern).toBe("src/x.ts");
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("preserves session age and real activity through repeated presence publication", async () => {
+    const harness = await factory();
+    try {
+      harness.a.state.sessionStartedAt = "2026-01-01T00:00:00.000Z";
+      harness.a.state.activity = { lastActivityAt: "2026-01-01T00:03:00.000Z", currentActivity: "reading", lastToolCall: "read" };
+      harness.a.state.reservations = [{ pattern: "src/presence.ts", since: "2026-01-01T00:00:00.000Z" }];
+      harness.a.mesh.publish(harness.ctx);
+      await waitUntil(() => harness.b.mesh.peers().find(peer => peer.name === "A")?.reservations?.[0]?.pattern === "src/presence.ts");
+      const first = harness.b.mesh.peers().find(peer => peer.name === "A");
+      expect(first?.startedAt).toBe("2026-01-01T00:00:00.000Z");
+      expect(first?.activity).toEqual({ lastActivityAt: "2026-01-01T00:03:00.000Z", currentActivity: "reading", lastToolCall: "read" });
+      harness.a.state.reservations[0].reason = "updated";
+      harness.a.mesh.publish(harness.ctx);
+      await waitUntil(() => harness.b.mesh.peers().find(peer => peer.name === "A")?.reservations?.[0]?.reason === "updated", 1500);
+      const second = harness.b.mesh.peers().find(peer => peer.name === "A");
+      expect(second?.startedAt).toBe("2026-01-01T00:00:00.000Z");
+      expect(second?.activity.lastActivityAt).toBe("2026-01-01T00:03:00.000Z");
+      expect((await harness.a.mesh.rename(harness.ctx, "Renamed")).success).toBe(true);
+      harness.a.mesh.publish(harness.ctx);
+      await waitUntil(() => harness.b.mesh.peers().some(peer => peer.name === "Renamed"), 1500);
+      const renamed = harness.b.mesh.peers().find(peer => peer.name === "Renamed");
+      expect(renamed?.startedAt).toBe("2026-01-01T00:00:00.000Z");
+      expect(renamed?.activity.lastActivityAt).toBe("2026-01-01T00:03:00.000Z");
     } finally {
       await harness.stop();
     }
@@ -284,6 +313,80 @@ describe.each(implementations)("%s mesh contract", (_kind, factory) => {
       expect(bridge.mesh.claims()[spec]?.T1?.agent).toBe("A");
       expect(bridge.mesh.claims()[spec]?.T2?.agent).toBe("Blue");
       expect(harness.b.mesh.claims()[spec]?.T2).toBeUndefined();
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("posts to the channel: mentioned members are interrupted, the rest receive it gently", async () => {
+    const harness = await factory();
+    try {
+      const c = await harness.add(["main"], "C");
+      await waitUntil(() => harness.a.mesh.peers().length === 2);
+      const posted = await harness.a.mesh.post("@b take a look");
+      expect(posted).toMatchObject({ ok: true, channel: "main", mentions: ["B"] });
+      expect(posted.ok && [...posted.delivered].sort()).toEqual(["B", "C"]);
+
+      harness.flush(harness.b);
+      harness.flush(c);
+      await waitUntil(() => harness.b.delivered.length === 1 && c.delivered.length === 1);
+      expect(harness.b.delivered[0]).toMatchObject({ kind: "post", from: "A", text: "@b take a look", channel: "main" });
+      expect(harness.b.delivered[0]?.gentle).toBeUndefined();
+      expect(c.delivered[0]?.gentle).toBe(true);
+      expect(c.delivered[0]?.id).toBe(harness.b.delivered[0]?.id);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("requires a channel for a post when in several channels", async () => {
+    const harness = await factory();
+    try {
+      const bridge = await harness.add(["main", "blue"], "Bridge");
+      expect(await bridge.mesh.post("hi")).toEqual({ ok: false, error: "ambiguous_channel" });
+      expect(await bridge.mesh.post("hi", { channel: "green" })).toEqual({ ok: false, error: "not_joined" });
+      expect(await bridge.mesh.post("hi", { channel: "blue" })).toMatchObject({ ok: true, channel: "blue", delivered: [] });
+    } finally {
+      await harness.stop();
+    }
+  });
+});
+
+describe("channel deletion action", () => {
+  it("deletes through the dispatcher, notifies members, and protects main", async () => {
+    const harness = await makeClient();
+    try {
+      const worker = await harness.add(["test"], "Worker");
+      const dispatch = (channel?: string) => executeCrewAction(
+        "channels.delete", { channel }, harness.a.state, harness.a.mesh, harness.ctx, () => { }, () => { }, () => { },
+      );
+      const missing = await dispatch();
+      expect(missing.details.error).toBe("missing_channel");
+      const unknown = await executeCrewAction(
+        "channels.typo", {}, harness.a.state, harness.a.mesh, harness.ctx, () => { }, () => { }, () => { },
+      );
+      expect(unknown.details.error).toBe("unknown_action");
+      const protectedMain = await dispatch("main");
+      expect(protectedMain.details.error).toBe("protected");
+      const deleted = await dispatch("test");
+      expect(deleted.details).toMatchObject({ mode: "channels.delete", ok: true, deleted: "test", removed: ["Worker"] });
+      await waitUntil(() => worker.delivered.some(message => message.text.startsWith("#test was deleted by A")));
+      expect(worker.mesh.channels()).toEqual(["main"]);
+      expect(worker.delivered.find(message => message.text.startsWith("#test was deleted by A"))?.from).toBe("A");
+      expect((await harness.a.mesh.listChannels()).map(channel => channel.name)).toEqual(["main"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it("reports the filesystem limitation without deleting or leaving anything", async () => {
+    const harness = await makeFs();
+    try {
+      const response = await executeCrewAction(
+        "channels.delete", { channel: "test" }, harness.a.state, harness.a.mesh, harness.ctx, () => { }, () => { }, () => { },
+      );
+      expect(response.details.error).toBe("unsupported");
+      expect(harness.a.mesh.channels()).toEqual(["main"]);
     } finally {
       await harness.stop();
     }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRegistration } from "../../lib.ts";
-import { MESH_CLOSE, MESH_SUBPROTOCOL, parseFrame, type ChannelSnapshot, type ClientFrame, type ServerFrame } from "../../mesh/protocol.ts";
+import { MESH_CLOSE, MESH_SUBPROTOCOL, parseFrame, type ChannelSnapshot, type ClientFrame, type HistoryPage, type PostResult, type ServerFrame } from "../../mesh/protocol.ts";
 import { startMeshServer, type MeshServer } from "../../mesh/server.ts";
 
 type FrameWaiter = {
@@ -84,7 +84,7 @@ function registration(name: string): AgentRegistration {
     model: "test",
     startedAt: now,
     isHuman: false,
-    session: { turns: 0, toolCalls: 0, tokens: 0, filesModified: [] },
+    session: { toolCalls: 0, tokens: 0, filesModified: [] },
     activity: { lastActivityAt: now },
   };
 }
@@ -398,5 +398,227 @@ describe("mesh server", () => {
     expect(mainClaims.t === "claims" && mainClaims.claims.spec?.T1).toBeUndefined();
     expect(mainOnly.frames.some((frame) => frame.t === "claims" && frame.channel === "blue")).toBeFalse();
     expect(mainOnly.frames.some((frame) => frame.t === "claims" && frame.claims.spec?.T1 !== undefined)).toBeFalse();
+  });
+});
+
+function replyResult<T>(frame: ServerFrame): T {
+  if (frame.t !== "reply") throw new Error(`expected a reply, got ${frame.t}`);
+  return frame.result as T;
+}
+
+function inboxMessage(client: TestClient, id: string) {
+  return client.next((frame) => frame.t === "message" && frame.message.id === id);
+}
+
+describe("mesh server group chat", () => {
+  it("pushes the channel list to every member when a channel appears and when it empties", async () => {
+    const server = start();
+    const observer = connect(server);
+    const agent = connect(server);
+    await hello(observer, "harsha", ["main"]);
+
+    await hello(agent, "A", ["test"]);
+    const created = await observer.next((frame) => frame.t === "channel_list" && frame.channels.some((c) => c.name === "test"));
+    expect(created.t === "channel_list" && created.channels.find((c) => c.name === "test")?.members).toBe(1);
+
+    agent.close();
+    await observer.next((frame) => frame.t === "channel_list" && !frame.channels.some((c) => c.name === "test"));
+  });
+
+  it("notifies a watcher about deletion and does not recreate it from a stale hello after restart", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "mesh-delete-reconnect-"));
+    tempDirs.push(dataDir);
+    const server = start(dataDir);
+    const owner = connect(server);
+    const watcher = connect(server);
+    const offline = connect(server);
+    await hello(owner, "Owner", ["main", "doomed"]);
+    await hello(watcher, "Watcher", ["main"]);
+    await hello(offline, "Offline", ["doomed"]);
+    watcher.send({ t: "watch", id: "watch", channels: ["doomed"] });
+    await watcher.next(frame => isReply(frame, "watch"));
+    offline.close();
+    await offline.closed;
+    owner.send({ t: "delete_channel", id: "delete", channel: "doomed" });
+    await owner.next(frame => isReply(frame, "delete"));
+    expect(await watcher.next(frame => frame.t === "channel_deleted")).toEqual({ t: "channel_deleted", channel: "doomed", by: "Owner" });
+    await server.stop();
+    const restarted = start(dataDir);
+    const returning = connect(restarted);
+    const welcome = await hello(returning, "Offline", ["doomed"]);
+    expect(welcome.t === "welcome" && welcome.channels.map(channel => channel.channel)).toEqual(["main"]);
+    const notice = await returning.next(frame => frame.t === "message" && frame.message.text.includes("disconnected"));
+    expect(notice.t === "message" && notice.message.to).toBe("Offline");
+    returning.send({ t: "channels", id: "list" });
+    const listed = await returning.next(frame => isReply(frame, "list"));
+    expect(listed.t === "reply" && listed.result).toEqual([expect.objectContaining({ name: "main", members: 1 })]);
+    returning.send({ t: "join", id: "recreate", channels: ["doomed"] });
+    const recreated = await returning.next(frame => isReply(frame, "recreate"));
+    expect(replyChannels(recreated, "recreate")?.map(channel => typeof channel === "string" ? channel : channel.channel)).toEqual(["doomed"]);
+  });
+
+  it("delivers a direct message only to its recipient and records it for the channel observer", async () => {
+    const server = start();
+    const human = connect(server);
+    const recipient = connect(server);
+    const observer = connect(server);
+    await hello(human, "Human", ["main"]);
+    await hello(recipient, "Recipient", ["main"]);
+    await hello(observer, "Observer", ["main"]);
+    observer.send({ t: "watch", id: "watch", channels: ["main"] });
+    await observer.next(frame => isReply(frame, "watch"));
+    human.send({
+      t: "send", id: "direct", channel: "main", to: "Recipient", message: {
+        id: "direct-message", from: "Human", to: "Recipient", text: "individual delivery", timestamp: new Date().toISOString(), replyTo: null,
+      }
+    });
+    const delivered = await recipient.next(frame => frame.t === "message" && frame.message.id === "direct-message");
+    expect(delivered.t === "message" && delivered.message).toMatchObject({ from: "Human", to: "Recipient", text: "individual delivery" });
+    const logged = await observer.next(frame => frame.t === "log" && frame.entry.id === "direct-message");
+    expect(logged.t === "log" && logged.entry).toMatchObject({ kind: "dm", from: "Human", to: "Recipient", text: "individual delivery" });
+    expect(observer.frames.filter(frame => frame.t === "message")).toEqual([]);
+  });
+
+  it("deletes a channel with agents in it: removes and tells them, moves the stranded to main, drops the history", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "mesh-delete-"));
+    tempDirs.push(dataDir);
+    const server = start(dataDir);
+    const human = connect(server);
+    const stranded = connect(server);
+    const bridged = connect(server);
+    await hello(human, "harsha", ["main", "test"]);
+    await hello(stranded, "Storm", ["test"]);
+    await hello(bridged, "Rogue", ["test", "blue"]);
+    human.send({ t: "post", id: "p1", channel: "test", text: "doomed" });
+    await human.next((frame) => isReply(frame, "p1"));
+
+    human.send({ t: "delete_channel", id: "d1", channel: "test" });
+    const reply = await human.next((frame) => isReply(frame, "d1"));
+    expect(reply.t === "reply" && reply.result).toEqual({ ok: true, deleted: "test", removed: expect.arrayContaining(["Storm", "Rogue"]) });
+
+    const stormRemoved = await stranded.next((frame) => frame.t === "removed");
+    expect(stormRemoved).toMatchObject({ t: "removed", channel: "test", by: "harsha", channels: ["main"] });
+    const stormTold = await stranded.next((frame) => frame.t === "message" && frame.message.text.startsWith("#test was deleted by harsha"));
+    expect(stormTold.t === "message" && stormTold.message).toMatchObject({ from: "harsha", to: "Storm", channel: "main" });
+    expect(stormTold.t === "message" && stormTold.message.text).toContain("#test was deleted by harsha");
+
+    const rogueRemoved = await bridged.next((frame) => frame.t === "removed");
+    expect(rogueRemoved).toMatchObject({ channel: "test", channels: ["blue"], added: [] });
+
+    await human.next((frame) => frame.t === "peers" && frame.channel === "main" && frame.peers.some((peer) => peer.name === "Storm"));
+    await human.next((frame) => frame.t === "channel_list" && !frame.channels.some((c) => c.name === "test"));
+    human.send({ t: "history", id: "h1", channel: "test" });
+    const history = await human.next((frame) => isReply(frame, "h1"));
+    expect(history.t === "reply" && history.result).toMatchObject({ ok: true, entries: [] });
+
+    human.send({ t: "delete_channel", id: "d2", channel: "main" });
+    const refused = await human.next((frame) => isReply(frame, "d2"));
+    expect(refused.t === "reply" && refused.result).toEqual({ ok: false, error: "protected" });
+  });
+
+  it("delivers a post to every other member, interrupting only the ones it mentions", async () => {
+    const server = start();
+    const human = connect(server);
+    const storm = connect(server);
+    const rogue = connect(server);
+    await hello(human, "harsha");
+    await hello(storm, "Storm");
+    await hello(rogue, "Rogue");
+
+    human.send({ t: "post", id: "p1", channel: "main", text: "@storm can you take the parser?" });
+    const posted = replyResult<PostResult>(await human.next((frame) => isReply(frame, "p1")));
+    if (!posted.ok) throw new Error(posted.error);
+    expect(posted.entry.mentions).toEqual(["Storm"]);
+    expect(posted.delivered.sort()).toEqual(["Rogue", "Storm"]);
+
+    const toStorm = await inboxMessage(storm, posted.entry.id);
+    const toRogue = await inboxMessage(rogue, posted.entry.id);
+    expect(toStorm.t === "message" && toStorm.message).toMatchObject({ kind: "post", from: "harsha", channel: "main", mentions: ["Storm"] });
+    expect(toStorm.t === "message" && toStorm.message.gentle).toBeUndefined();
+    expect(toRogue.t === "message" && toRogue.message.gentle).toBe(true);
+    expect(human.frames.some((frame) => frame.t === "message")).toBeFalse();
+  });
+
+  it("interrupts every member for @all and rejects posts from non-members and empty posts", async () => {
+    const server = start();
+    const a = connect(server);
+    const b = connect(server);
+    await hello(a, "A", ["main", "blue"]);
+    await hello(b, "B", ["main"]);
+
+    a.send({ t: "post", id: "p1", channel: "main", text: "@all standup" });
+    const posted = replyResult<PostResult>(await a.next((frame) => isReply(frame, "p1")));
+    if (!posted.ok) throw new Error(posted.error);
+    const toB = await inboxMessage(b, posted.entry.id);
+    expect(toB.t === "message" && toB.message.gentle).toBeUndefined();
+
+    b.send({ t: "post", id: "p2", channel: "blue", text: "hi" });
+    expect(replyResult<PostResult>(await b.next((frame) => isReply(frame, "p2")))).toEqual({ ok: false, error: "not_joined" });
+    b.send({ t: "post", id: "p3", channel: "main", text: "   " });
+    expect(replyResult<PostResult>(await b.next((frame) => isReply(frame, "p3")))).toEqual({ ok: false, error: "empty" });
+  });
+
+  it("logs posts and direct messages per channel, pages them oldest first, and keeps them across a restart", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "mesh-history-"));
+    tempDirs.push(dataDir);
+    const first = start(dataDir);
+    const a = connect(first);
+    const b = connect(first);
+    await hello(a, "A");
+    await hello(b, "B");
+    for (let i = 1; i <= 3; i++) {
+      a.send({ t: "post", id: `p${i}`, channel: "main", text: `post ${i}` });
+      await a.next((frame) => isReply(frame, `p${i}`));
+    }
+    const dm = { id: "dm-1", from: "A", to: "B", text: "psst", timestamp: new Date().toISOString(), replyTo: null };
+    a.send({ t: "send", id: "s1", channel: "main", to: "B", message: dm });
+    await a.next((frame) => isReply(frame, "s1"));
+
+    a.send({ t: "history", id: "h1", channel: "main", limit: 2 });
+    const newest = replyResult<HistoryPage>(await a.next((frame) => isReply(frame, "h1")));
+    if (!newest.ok) throw new Error(newest.error);
+    expect(newest.hasMore).toBeTrue();
+    expect(newest.entries.map((entry) => [entry.kind, entry.text, entry.to])).toEqual([["post", "post 3", null], ["dm", "psst", "B"]]);
+
+    a.send({ t: "history", id: "h2", channel: "main", before: newest.entries[0]!.seq, limit: 10 });
+    const older = replyResult<HistoryPage>(await a.next((frame) => isReply(frame, "h2")));
+    if (!older.ok) throw new Error(older.error);
+    expect(older.hasMore).toBeFalse();
+    expect(older.entries.map((entry) => entry.text)).toEqual(["post 1", "post 2"]);
+
+    await first.stop();
+    servers.splice(servers.indexOf(first), 1);
+    const second = start(dataDir);
+    const c = connect(second);
+    await hello(c, "C");
+    c.send({ t: "history", id: "h3", channel: "main" });
+    const restored = replyResult<HistoryPage>(await c.next((frame) => isReply(frame, "h3")));
+    if (!restored.ok) throw new Error(restored.error);
+    expect(restored.entries.map((entry) => entry.text)).toEqual(["post 1", "post 2", "post 3", "psst"]);
+  });
+
+  it("streams a watched channel's log and presence to a non-member that cannot post there", async () => {
+    const server = start();
+    const observer = connect(server);
+    const a = connect(server);
+    const b = connect(server);
+    await hello(observer, "harsha", ["main"]);
+    await hello(a, "A", ["blue"]);
+    await hello(b, "B", ["blue"]);
+
+    observer.send({ t: "watch", id: "w1", channels: ["blue"] });
+    const watched = replyResult<{ ok: true; watching: ChannelSnapshot[] }>(await observer.next((frame) => isReply(frame, "w1")));
+    expect(watched.watching[0]?.peers.map((peer) => peer.name).sort()).toEqual(["A", "B"]);
+
+    const dm = { id: "dm-2", from: "A", to: "B", text: "between us", timestamp: new Date().toISOString(), replyTo: null };
+    a.send({ t: "send", id: "s1", channel: "blue", to: "B", message: dm });
+    const logged = await observer.next((frame) => frame.t === "log" && frame.entry.kind === "dm");
+    expect(logged.t === "log" && logged.entry).toMatchObject({ channel: "blue", from: "A", to: "B", text: "between us" });
+
+    b.close();
+    await observer.next((frame) => frame.t === "peers" && frame.channel === "blue" && !frame.peers.some((peer) => peer.name === "B"));
+
+    observer.send({ t: "post", id: "p1", channel: "blue", text: "hello" });
+    expect(replyResult<PostResult>(await observer.next((frame) => isReply(frame, "p1")))).toEqual({ ok: false, error: "not_joined" });
   });
 });

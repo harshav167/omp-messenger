@@ -8,3 +8,4 @@ npm-shrinkwrap.json
 progress.md
 dist/
 mesh/.env
+.audit/

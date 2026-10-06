@@ -125,10 +125,10 @@ function expandHome(p: string): string {
 
 export function matchesAutoRegisterPath(cwd: string, paths: string[]): boolean {
   const normalizedCwd = cwd.replace(/\/+$/, ""); // Remove trailing slashes
-  
+
   for (const pattern of paths) {
     const expanded = expandHome(pattern).replace(/\/+$/, "");
-    
+
     // Simple glob support: trailing /* matches any subdirectory
     if (expanded.endsWith("/*")) {
       const base = expanded.slice(0, -2);
@@ -148,7 +148,7 @@ export function matchesAutoRegisterPath(cwd: string, paths: string[]): boolean {
       }
     }
   }
-  
+
   return false;
 }
 
@@ -220,10 +220,7 @@ export function getStoredMeshSettings(): StoredMeshSettings {
       token = "";
     }
   }
-  // Fall back to a JSON token field if present (README-supported path).
-  if (!token && typeof obj.token === "string") {
-    token = obj.token;
-  }
+  if (typeof obj.token === "string") token = obj.token;
   return {
     url: typeof obj.url === "string" ? obj.url : "",
     channels: parseChannelList(obj.channels ?? obj.channel),
@@ -242,11 +239,11 @@ export function saveMeshSettings(settings: StoredMeshSettings): void {
   const prevMesh = existing.mesh && typeof existing.mesh === "object" && !Array.isArray(existing.mesh)
     ? existing.mesh as Record<string, unknown>
     : {};
-  // Preserve any inline JSON token the user had; overlay edits url/channels/token-file.
+  // Keep an existing inline token in sync because it takes precedence over the token file.
   existing.mesh = {
     url: url || null,
     channels,
-    ...(typeof prevMesh.token === "string" ? { token: prevMesh.token } : {}),
+    ...(typeof prevMesh.token === "string" ? { token: settings.token.trim() } : {}),
   };
   writeUserConfig(existing);
 
@@ -274,11 +271,11 @@ function buildConfig(projectConfig?: Partial<MessengerConfig> | null): Messenger
   // Load extension-specific global config
   const extensionConfig = readJsonFile(extensionGlobalPath) as Partial<MessengerConfig> | null;
 
-  const merged = { 
-    ...DEFAULT_CONFIG, 
+  const merged = {
+    ...DEFAULT_CONFIG,
     ...settingsConfig,
-    ...(extensionConfig ?? {}), 
-    ...(projectConfig ?? {}) 
+    ...(extensionConfig ?? {}),
+    ...(projectConfig ?? {})
   };
 
   const nameWords = (merged as Record<string, unknown>).nameWords as { adjectives: string[]; nouns: string[] } | undefined;
