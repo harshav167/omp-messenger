@@ -3,6 +3,8 @@ import { MessengerMesh, type MeshClientEvents } from "../../tern-plugin/app/mesh
 import { startMeshServer } from "../../mesh/server.ts";
 import type { AgentMailMessage } from "../../lib.ts";
 
+const KEY = "k".repeat(43);
+
 it("the app joins, delivers individually, reads history, and applies deletion through the real WebSocket client", async () => {
   const server = startMeshServer({ port: 0, hostname: "127.0.0.1", token: "test" });
   const meshes: MessengerMesh[] = [];
@@ -17,7 +19,7 @@ it("the app joins, delivers individually, reads history, and applies deletion th
       removed(_channel, _by, channels) { removed.resolve(channels); },
       deleted(channel) { deleted.resolve(channel); },
     };
-    const mesh = new MessengerMesh({ url: `ws://127.0.0.1:${server.port}`, token: "test", name, channels: ["main"], cwd: "/test" }, events);
+    const mesh = new MessengerMesh({ url: `ws://127.0.0.1:${server.port}`, token: "test", name, channels: ["main"], cwd: "/test", identityKey: KEY }, events);
     meshes.push(mesh);
     mesh.connect();
     return { mesh, ready: ready.promise, message: message.promise, removed: removed.promise, deleted: deleted.promise };
@@ -48,6 +50,27 @@ it("the app joins, delivers individually, reads history, and applies deletion th
     expect(channels?.map(channel => channel.name)).toEqual(["main"]);
   } finally {
     for (const mesh of meshes) mesh.close();
+    await server.stop();
+  }
+});
+
+it("two app windows of one person both connect under their name through the real WebSocket client", async () => {
+  const server = startMeshServer({ port: 0, hostname: "127.0.0.1", token: "test" });
+  const windows: MessengerMesh[] = [];
+  const open = (): Promise<string> => {
+    const welcomed = Promise.withResolvers<string>();
+    const events: MeshClientEvents = {
+      state() { }, welcome(name) { welcomed.resolve(name); }, peers() { }, log() { }, channels() { }, direct() { }, removed() { }, deleted() { },
+    };
+    const mesh = new MessengerMesh({ url: `ws://127.0.0.1:${server.port}`, token: "test", name: "harsha", channels: ["main"], cwd: "/test", identityKey: KEY }, events);
+    windows.push(mesh);
+    mesh.connect();
+    return welcomed.promise;
+  };
+  try {
+    expect(await Promise.all([open(), open()])).toEqual(["harsha", "harsha"]);
+  } finally {
+    for (const mesh of windows) mesh.close();
     await server.stop();
   }
 });

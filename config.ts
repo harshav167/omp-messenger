@@ -8,7 +8,8 @@
  * 4. Defaults
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, linkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isValidChannelName, normalizeChannels } from "./lib.ts";
@@ -169,6 +170,28 @@ function meshTokenPath(): string {
   if (existsSync(primary)) return primary;
   const legacy = join(legacyUserAgentDir(), "messenger", "mesh.token");
   return existsSync(legacy) ? legacy : primary;
+}
+
+/**
+ * This machine's Messenger identity key (`~/.omp/agent/messenger/identity.key`, 0600), created on first
+ * use. Tern Messenger windows present it so the mesh server lets one person's windows share their name.
+ */
+export function messengerIdentityKey(): string {
+  const keyPath = join(userAgentDir(), "messenger", "identity.key");
+  if (!existsSync(keyPath)) {
+    mkdirSync(join(userAgentDir(), "messenger"), { recursive: true });
+    // Written aside and linked in, so a window starting at the same moment never reads a half-written key.
+    const draft = `${keyPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(draft, randomBytes(32).toString("base64url") + "\n", { mode: 0o600 });
+      linkSync(draft, keyPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      rmSync(draft, { force: true });
+    }
+  }
+  return readFileSync(keyPath, "utf-8").trim();
 }
 
 function readUserConfig(): Record<string, unknown> {

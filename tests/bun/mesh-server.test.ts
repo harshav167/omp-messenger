@@ -44,8 +44,9 @@ class TestClient {
     this.socket.send(JSON.stringify(frame));
   }
 
-  next(predicate: (frame: ServerFrame) => boolean): Promise<ServerFrame> {
-    const existing = this.frames.find(predicate);
+  /** The first frame matching `predicate`, ignoring the `from` frames that already arrived. */
+  next(predicate: (frame: ServerFrame) => boolean, from = 0): Promise<ServerFrame> {
+    const existing = this.frames.slice(from).find(predicate);
     if (existing) return Promise.resolve(existing);
     const pending = Promise.withResolvers<ServerFrame>();
     this.waiters.push({ predicate, resolve: pending.resolve });
@@ -89,9 +90,9 @@ function registration(name: string): AgentRegistration {
   };
 }
 
-async function hello(client: TestClient, name: string, channels: string[] = ["main"], token = "t"): Promise<ServerFrame> {
+async function hello(client: TestClient, agent: string | AgentRegistration, channels: string[] = ["main"], token = "t", identityKey?: string): Promise<ServerFrame> {
   await client.opened;
-  client.send({ t: "hello", token, channels, agent: registration(name), claims: [] });
+  client.send({ t: "hello", token, channels, agent: typeof agent === "string" ? registration(agent) : agent, claims: [], ...(identityKey ? { identityKey } : {}) });
   return client.next((frame) => frame.t === "welcome" || frame.t === "reject");
 }
 
@@ -620,5 +621,53 @@ describe("mesh server group chat", () => {
 
     observer.send({ t: "post", id: "p1", channel: "blue", text: "hello" });
     expect(replyResult<PostResult>(await observer.next((frame) => isReply(frame, "p1")))).toEqual({ ok: false, error: "not_joined" });
+  });
+});
+
+describe("mesh server shared human identity", () => {
+  const KEY = "k".repeat(43);
+  const human = (hostId: string, statusMessage?: string): AgentRegistration => ({ ...registration("harsha"), hostId, isHuman: true, statusMessage });
+  const taken: ServerFrame = { t: "reject", error: "name_taken", channel: "main" };
+  const harsha = (frame: ServerFrame) => frame.t === "peers" ? frame.peers.find((peer) => peer.name === "harsha") : undefined;
+
+  it("lets one person's windows on one machine share their name, and nobody who can't prove it's them", async () => {
+    const server = start();
+    expect((await hello(connect(server), human("mac"), ["main"], "t", KEY)).t).toBe("welcome");
+    expect((await hello(connect(server), human("mac"), ["main"], "t", KEY)).t).toBe("welcome");
+    // hostId and isHuman are broadcast to every peer, so copying them is not enough without the key.
+    expect(await hello(connect(server), human("mac"))).toEqual(taken);
+    expect(await hello(connect(server), human("mac"), ["main"], "t", "x".repeat(43))).toEqual(taken);
+    expect(await hello(connect(server), human("other-mac"), ["main"], "t", KEY)).toEqual(taken);
+    expect(await hello(connect(server), { ...registration("harsha"), hostId: "mac" }, ["main"], "t", KEY)).toEqual(taken);
+  });
+
+  it("keeps a name exclusive between interactive omp sessions, which are human but present no key", async () => {
+    const server = start();
+    expect((await hello(connect(server), human("mac"))).t).toBe("welcome");
+    expect(await hello(connect(server), human("mac"))).toEqual(taken);
+  });
+
+  it("delivers to every window, shows a remaining window when one closes, and drops the person with the last", async () => {
+    const server = start();
+    const agent = connect(server);
+    await hello(agent, "Storm");
+    const first = connect(server);
+    const second = connect(server);
+    await hello(first, human("mac", "first window"), ["main"], "t", KEY);
+    await hello(second, human("mac", "second window"), ["main"], "t", KEY);
+    await agent.next((frame) => harsha(frame)?.statusMessage === "second window");
+
+    const message = { id: "dm", from: "Storm", to: "harsha", text: "both windows", timestamp: new Date().toISOString(), replyTo: null };
+    agent.send({ t: "send", id: "s1", channel: "main", to: "harsha", message });
+    await inboxMessage(first, "dm");
+    await inboxMessage(second, "dm");
+
+    let seen = agent.frames.length;
+    second.close();
+    await agent.next((frame) => harsha(frame)?.statusMessage === "first window", seen);
+
+    seen = agent.frames.length;
+    first.close();
+    await agent.next((frame) => frame.t === "peers" && frame.channel === "main" && !harsha(frame), seen);
   });
 });

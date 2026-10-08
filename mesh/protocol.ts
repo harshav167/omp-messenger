@@ -27,7 +27,8 @@ export interface ClaimAssertion {
 }
 
 export type ClientFrame =
-  | { t: "hello"; token: string; channels: string[]; agent: AgentRegistration; claims: ClaimAssertion[] }
+  /** `identityKey` is a per-machine secret (never broadcast) that lets one person's windows share a human name. */
+  | { t: "hello"; token: string; channels: string[]; agent: AgentRegistration; claims: ClaimAssertion[]; identityKey?: string }
   | { t: "publish"; agent: AgentRegistration }
   /** Add channels to this socket's membership (idempotent). */
   | { t: "join"; id: string; channels: string[] }

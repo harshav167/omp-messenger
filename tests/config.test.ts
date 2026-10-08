@@ -108,6 +108,15 @@ describe("mesh config", () => {
     });
   });
 
+  it("creates a private per-machine identity key once and keeps it", async () => {
+    const { messengerIdentityKey } = await loadConfigModule();
+    const key = messengerIdentityKey();
+    expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(messengerIdentityKey()).toBe(key);
+    const file = path.join(dirs.root, ".omp-home", ".omp", "agent", "messenger", "identity.key");
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
   it("resolves an environment-indirected token", async () => {
     process.env.X = "abc";
     writeJson(path.join(dirs.cwd, ".omp", "omp-messenger.json"), {

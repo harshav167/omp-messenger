@@ -16,6 +16,10 @@ interface SocketData {
   /** Channels observed with `watch` (log, presence and claims, without membership). */
   watching: Set<string>;
   helloTimer: Timer | null;
+  /** This socket's own registration; one person's windows share a name but each keeps its own. */
+  registration: AgentRegistration | null;
+  /** The hello's per-machine secret, proving which sockets are one person's windows. */
+  identityKey: string | null;
 }
 
 export interface MeshServer {
@@ -57,16 +61,55 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
   const expectedToken = tokenDigest(opts.token);
   const peerTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const claimTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Authoritative inbox ownership: topic → the socket that registered it. subscriberCount
-   *  alone cannot distinguish a live peer from a zombie socket mid-reap, which used to lock
-   *  a reconnecting agent out with name_taken until manual rejoin. */
-  const inboxOwners = new Map<string, Bun.ServerWebSocket<SocketData>>();
+  /** Authoritative inbox ownership: topic → the live sockets holding that name in that channel.
+   *  subscriberCount alone cannot distinguish a live peer from a zombie socket mid-reap, which
+   *  used to lock a reconnecting agent out with name_taken until manual rejoin. A name has one
+   *  holder, except that one person's windows (human registrations on one machine) share it. */
+  const inboxOwners = new Map<string, Set<Bun.ServerWebSocket<SocketData>>>();
   const sockets = new Set<Bun.ServerWebSocket<SocketData>>();
 
-  /** Release ownership held by `ws`, and drop presence for sockets that are gone. */
-  const releaseInbox = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): void => {
+  /** Live sockets other than `ws` holding `name` in `channel`; closed holders are dropped first. */
+  const otherHolders = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): Bun.ServerWebSocket<SocketData>[] => {
     const topic = inboxTopic(channel, name);
-    if (inboxOwners.get(topic) === ws) inboxOwners.delete(topic);
+    const holders = inboxOwners.get(topic);
+    if (!holders) return [];
+    for (const holder of holders) if (holder !== ws && holder.readyState !== WebSocket.OPEN) holders.delete(holder);
+    if (holders.size === 0) inboxOwners.delete(topic);
+    return [...holders].filter(holder => holder !== ws);
+  };
+
+  /**
+   * Whether a live socket other than `ws` holds `name` in `channel` and isn't the same person's other
+   * window: every holder must be human on the same host and present the same identity key. hostId and
+   * isHuman are broadcast to every peer, so only the key proves it; omp sessions send none and stay exclusive.
+   */
+  const nameTaken = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>, registration: AgentRegistration | null | undefined): boolean => {
+    const others = otherHolders(channel, name, ws);
+    const key = ws.data.identityKey;
+    return others.length > 0 && !(registration?.isHuman && key !== null && others.every(other =>
+      other.data.identityKey === key && other.data.registration?.isHuman && other.data.registration.hostId === registration.hostId));
+  };
+
+  const holdInbox = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): void => {
+    const topic = inboxTopic(channel, name);
+    ws.subscribe(topic);
+    const holders = inboxOwners.get(topic) ?? new Set();
+    holders.add(ws);
+    inboxOwners.set(topic, holders);
+  };
+
+  /**
+   * Release `ws`'s hold on `name` in `channel`; true when no live window holds it any more. Otherwise the
+   * member's presence switches to a remaining window, since the newest window's registration had replaced it.
+   */
+  const releaseInbox = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): boolean => {
+    ws.unsubscribe(inboxTopic(channel, name));
+    inboxOwners.get(inboxTopic(channel, name))?.delete(ws);
+    const others = otherHolders(channel, name, ws);
+    if (others.length === 0) return true;
+    const remaining = others[0]!.data.registration;
+    if (remaining) state.channels.get(channel)?.presence.set(name, { ...remaining, name });
+    return false;
   };
   let stopped = false;
   let channelsTimer: Timer | null = null;
@@ -135,7 +178,6 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
     registration: AgentRegistration,
   ): boolean => {
     sock.data.channels.delete(channel);
-    sock.unsubscribe(inboxTopic(channel, member));
     releaseInbox(channel, member, sock);
     if (!sock.data.watching.has(channel)) {
       sock.unsubscribe(peersTopic(channel));
@@ -143,13 +185,11 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
     }
     const added: ChannelSnapshot[] = [];
     if (sock.data.channels.size === 0) {
-      const owner = inboxOwners.get(inboxTopic("main", member));
-      if (owner === undefined || owner === sock || owner.readyState !== WebSocket.OPEN) {
+      if (!nameTaken("main", member, sock, registration)) {
         sock.data.channels.add("main");
         sock.subscribe(peersTopic("main"));
         sock.subscribe(claimsTopic("main"));
-        sock.subscribe(inboxTopic("main", member));
-        inboxOwners.set(inboxTopic("main", member), sock);
+        holdInbox("main", member, sock);
         state.getOrCreate("main").presence.set(member, { ...registration, name: member });
         added.push(snapshot("main"));
         broadcastPeers("main");
@@ -171,7 +211,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
       }
       const upgraded = bunServer.upgrade(request, {
         headers: { "Sec-WebSocket-Protocol": MESH_SUBPROTOCOL },
-        data: { name: null, channels: new Set<string>(), watching: new Set<string>(), helloTimer: null },
+        data: { name: null, channels: new Set<string>(), watching: new Set<string>(), helloTimer: null, registration: null, identityKey: null },
       });
       return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
     },
@@ -218,22 +258,19 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
           const deleted = [...new Set(frame.channels)].filter(channel => state.isDeleted(channel));
           const requested = [...new Set(frame.channels)].filter(channel => !state.isDeleted(channel));
           if (!requested.length) requested.push("main");
-          // name_taken only when a DIFFERENT, still-open socket owns the inbox. A zombie
-          // (partitioned, closing, heartbeat-reap pending) is evicted so a reconnecting
-          // agent can reclaim its own name.
+          // name_taken only when another live socket holds the name and isn't the same person's
+          // other window. A zombie holder (partitioned, closing, heartbeat-reap pending) is
+          // dropped so a reconnecting agent can reclaim its own name.
+          // Keys shorter than a random 32-byte base64url secret are treated as absent.
+          ws.data.identityKey = typeof frame.identityKey === "string" && frame.identityKey.length >= 43 ? frame.identityKey : null;
           let taken: string | undefined;
           for (const channel of requested) {
-            const topic = inboxTopic(channel, name);
-            const owner = inboxOwners.get(topic);
-            if (owner === undefined || owner.readyState !== WebSocket.OPEN) {
-              if (owner !== undefined && owner !== ws) {
-                inboxOwners.delete(topic);
-                state.dropAgent(channel, name);
-                broadcastPeers(channel);
-              }
-              continue;
+            const held = inboxOwners.has(inboxTopic(channel, name));
+            if (nameTaken(channel, name, ws, frame.agent)) taken = channel;
+            else if (held && !inboxOwners.has(inboxTopic(channel, name))) {
+              state.dropAgent(channel, name);
+              broadcastPeers(channel);
             }
-            if (owner !== ws) taken = channel;
           }
           if (taken !== undefined) {
             sendFrame(ws, { t: "reject", error: "name_taken", channel: taken });
@@ -243,14 +280,14 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
           clearTimeout(ws.data.helloTimer);
           ws.data.helloTimer = null;
           ws.data.name = name;
+          ws.data.registration = { ...frame.agent, name };
           ws.subscribe(CHANNELS_TOPIC);
           for (const channel of requested) {
             ws.data.channels.add(channel);
             ws.subscribe(peersTopic(channel));
             ws.subscribe(claimsTopic(channel));
-            ws.subscribe(inboxTopic(channel, name));
-            inboxOwners.set(inboxTopic(channel, name), ws);
-            state.getOrCreate(channel).presence.set(name, { ...frame.agent, name });
+            holdInbox(channel, name, ws);
+            state.getOrCreate(channel).presence.set(name, { ...ws.data.registration });
           }
           const claimChannels = new Set<string>();
           for (const assertion of Array.isArray(frame.claims) ? frame.claims : []) {
@@ -277,8 +314,9 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
         const name = ws.data.name;
         switch (frame.t) {
           case "publish": {
+            ws.data.registration = { ...frame.agent, name };
             for (const channel of ws.data.channels) {
-              state.getOrCreate(channel).presence.set(name, { ...frame.agent, name });
+              state.getOrCreate(channel).presence.set(name, { ...ws.data.registration });
               broadcastPeers(channel);
             }
             return;
@@ -295,20 +333,14 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
               return;
             }
             const added = requested.filter((channel) => !ws.data.channels.has(channel));
-            const taken = added.find((channel) => {
-              const owner = inboxOwners.get(inboxTopic(channel, name));
-              return owner !== undefined && owner !== ws && owner.readyState === WebSocket.OPEN;
-            });
+            // A socket left with no channel (evicted while its name was taken in main) has nothing to join from.
+            const agent = ws.data.channels.size > 0 ? ws.data.registration : null;
+            const taken = added.find((channel) => nameTaken(channel, name, ws, agent));
             if (taken !== undefined) {
               sendReply(ws, frame.id, { ok: false, error: "name_taken", channel: taken });
               return;
             }
             if (added.length > 0) {
-              let agent: AgentRegistration | undefined;
-              for (const channel of ws.data.channels) {
-                agent = state.channels.get(channel)?.presence.get(name);
-                if (agent) break;
-              }
               if (!agent) {
                 sendReply(ws, frame.id, { ok: false, error: "not_joined", channel: added[0] });
                 return;
@@ -317,8 +349,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
                 ws.data.channels.add(channel);
                 ws.subscribe(peersTopic(channel));
                 ws.subscribe(claimsTopic(channel));
-                ws.subscribe(inboxTopic(channel, name));
-                inboxOwners.set(inboxTopic(channel, name), ws);
+                holdInbox(channel, name, ws);
                 state.getOrCreate(channel).presence.set(name, { ...agent, name });
               }
             }
@@ -338,9 +369,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
                 ws.unsubscribe(peersTopic(channel));
                 ws.unsubscribe(claimsTopic(channel));
               }
-              ws.unsubscribe(inboxTopic(channel, name));
-              releaseInbox(channel, name, ws);
-              state.dropAgent(channel, name);
+              if (releaseInbox(channel, name, ws)) state.dropAgent(channel, name);
               broadcastPeers(channel);
               broadcastClaims(channel);
             }
@@ -500,22 +529,23 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
             claimTimers.delete(channel);
             const removed: string[] = [];
             for (const [member, registration] of members) {
-              const sock = inboxOwners.get(inboxTopic(channel, member));
-              if (!sock) continue;
-              const rehomed = evict(sock, member, channel, name, registration);
-              if (member === name) continue;
-              removed.push(member);
-              // Same path as a peer message: interrupts the agent's session so it knows why.
-              const notice: AgentMailMessage = {
-                id: randomUUID(),
-                from: name,
-                to: member,
-                text: `#${channel} was deleted by ${name}. You're no longer in it${rehomed ? " — you've been moved to #main so you stay reachable" : ""}.`,
-                timestamp: new Date().toISOString(),
-                replyTo: null,
-                channel: rehomed ? "main" : channel,
-              };
-              sendFrame(sock, { t: "message", channel: notice.channel ?? channel, message: notice });
+              const holders = [...(inboxOwners.get(inboxTopic(channel, member)) ?? [])];
+              if (holders.length > 0 && member !== name) removed.push(member);
+              for (const sock of holders) {
+                const rehomed = evict(sock, member, channel, name, registration);
+                if (member === name) continue;
+                // Same path as a peer message: interrupts the agent's session so it knows why.
+                const notice: AgentMailMessage = {
+                  id: randomUUID(),
+                  from: name,
+                  to: member,
+                  text: `#${channel} was deleted by ${name}. You're no longer in it${rehomed ? " — you've been moved to #main so you stay reachable" : ""}.`,
+                  timestamp: new Date().toISOString(),
+                  replyTo: null,
+                  channel: rehomed ? "main" : channel,
+                };
+                sendFrame(sock, { t: "message", channel: notice.channel ?? channel, message: notice });
+              }
             }
             for (const socket of sockets) {
               socket.data.watching.delete(channel);
@@ -538,20 +568,21 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
               return;
             }
             for (const channel of ws.data.channels) {
-              const owner = inboxOwners.get(inboxTopic(channel, frame.name));
-              if (owner !== undefined && owner !== ws && owner.readyState === WebSocket.OPEN) {
+              if (otherHolders(channel, frame.name, ws).length > 0) {
                 sendReply(ws, frame.id, { success: false, error: "name_taken" });
                 return;
               }
             }
+            const renamed = ws.data.registration ? { ...ws.data.registration, name: frame.name } : null;
             for (const channel of ws.data.channels) {
-              ws.unsubscribe(inboxTopic(channel, name));
-              ws.subscribe(inboxTopic(channel, frame.name));
-              inboxOwners.delete(inboxTopic(channel, name));
-              inboxOwners.set(inboxTopic(channel, frame.name), ws);
-              state.renameAgent(channel, name, frame.name);
+              const vacated = releaseInbox(channel, name, ws);
+              holdInbox(channel, frame.name, ws);
+              // The person's other windows keep the old name; only this window moves.
+              if (vacated) state.renameAgent(channel, name, frame.name);
+              else if (renamed) state.getOrCreate(channel).presence.set(frame.name, { ...renamed });
             }
             ws.data.name = frame.name;
+            ws.data.registration = renamed;
             sendReply(ws, frame.id, { success: true, oldName: name, newName: frame.name });
             for (const channel of ws.data.channels) {
               broadcastPeers(channel);
@@ -611,10 +642,7 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
         if (name === null) return;
         for (const channel of channels) {
           // Guarded by identity: a reclaimed name's new owner must survive the zombie's close.
-          releaseInbox(channel, name, ws);
-          if (!inboxOwners.has(inboxTopic(channel, name))) {
-            state.dropAgent(channel, name);
-          }
+          if (releaseInbox(channel, name, ws)) state.dropAgent(channel, name);
           broadcastPeers(channel);
           broadcastClaims(channel);
         }

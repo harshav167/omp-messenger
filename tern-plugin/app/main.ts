@@ -16,7 +16,7 @@
 
 import { userInfo } from "node:os";
 import { isValidAgentName, isValidChannelName, type AgentMailMessage, type HistoryEntry } from "../../lib.ts";
-import { loadConfig } from "../../config.ts";
+import { loadConfig, messengerIdentityKey } from "../../config.ts";
 import type { ChannelInfo } from "../../mesh/types.ts";
 import type { ChannelSnapshot } from "../../mesh/protocol.ts";
 import { connect, ui, type Key, type Session, type Surface, type TspEvent } from "@stencil-hq/tern";
@@ -113,7 +113,7 @@ class MessengerApp {
       sidebars: { channels: true, members: true },
     };
     this.#state.composer = this.#state.channels[0]?.draft ?? createComposer();
-    this.#mesh = new MessengerMesh({ url, token, name, channels, cwd: process.cwd() }, {
+    this.#mesh = new MessengerMesh({ url, token, name, channels, cwd: process.cwd(), identityKey: messengerIdentityKey() }, {
       state: (state, detail) => this.#onConnection(state, detail),
       welcome: (self, snapshots) => {
         for (const channel of this.#state.channels) channel.joined = snapshots.some(snapshot => snapshot.channel === channel.name);

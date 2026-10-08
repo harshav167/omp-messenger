@@ -47,6 +47,8 @@ export interface MeshClientOptions {
   name: string;
   channels: string[];
   cwd: string;
+  /** This machine's secret (`messengerIdentityKey()`): lets the server tell your other windows from someone taking your name. */
+  identityKey: string;
 }
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -124,7 +126,7 @@ export class MessengerMesh {
     }
     this.#ws = ws;
     ws.addEventListener("open", () => {
-      this.#send({ t: "hello", token: this.opts.token, channels: this.#channels, agent: this.#agent, claims: [] });
+      this.#send({ t: "hello", token: this.opts.token, channels: this.#channels, agent: this.#agent, claims: [], identityKey: this.opts.identityKey });
     });
     ws.addEventListener("message", (event) => {
       if (this.#ws !== ws) return;
