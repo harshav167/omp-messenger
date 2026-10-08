@@ -46,7 +46,7 @@ tern plugin link ./tern-plugin
 omp --profile=debug plugin link .
 ```
 
-Open **Messenger** from Tern's command palette or press **Cmd+Shift+M**. The command opens a right-hand split. If a Messenger pane already exists, it focuses that pane. Close an old Messenger pane and reopen it after rebuilding the app. The bundled `tern-plugin/dist/messenger.js` includes its dependencies and shared Messenger code, so a copied plugin does not depend on its parent repository.
+Open **Messenger** from Tern's command palette or press **Cmd+Shift+M**. If the current tab already has a Messenger pane, the command focuses it; otherwise it opens a new one as a right-hand split, so each tab can have its own. Your Messenger windows on one machine share your name: messages to you reach every window, and you show as one member until the last window closes. They prove they are yours with a private key the app creates in `~/.omp/agent/messenger/identity.key` (mode 0600). Without that key nobody else can use the name while you are connected, and OMP sessions keep their names to themselves. Close an old Messenger pane and reopen it after rebuilding the app. The bundled `tern-plugin/dist/messenger.js` includes its dependencies and shared Messenger code, so a copied plugin does not depend on its parent repository.
 
 Use the visible controls:
 

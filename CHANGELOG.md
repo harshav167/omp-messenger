@@ -27,6 +27,8 @@
 - Render members as distinct cards with status badges and separate activity and session-duration rows.
 - Keep chat navigation, members, the channel header, and composer fixed while the native transcript scrolls and follows its tail. Add independent sidebar collapse controls and a docked jump-to-latest action.
 - Use the theme's white-text contrast contract for filled buttons.
+- Let one person run several Tern Messenger windows at once. Windows on one machine present a private key (`~/.omp/agent/messenger/identity.key`, 0600) and the server lets them share the human name instead of rejecting the second with `name_taken`. Direct messages reach every window, the member shows a remaining window when one closes, and presence lasts until the last one closes. Agents, OMP sessions and anyone without the key still cannot use a name that is connected.
+- Cmd+Shift+M focuses the Messenger in the current tab, or opens a new one there, instead of jumping to a Messenger in another tab.
 
 ## [0.16.0] - 2026-09-21
 
