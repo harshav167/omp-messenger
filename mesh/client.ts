@@ -12,7 +12,12 @@ import {
   normalizeAgentMailMessage,
   normalizeChannels,
 } from "../lib.ts";
-import { buildRegistration, getGitBranch, normalizeCwd } from "./registration.ts";
+import {
+  buildRegistration,
+  currentModelIdentity,
+  getGitBranch,
+  normalizeCwd,
+} from "./registration.ts";
 import {
   MESH_SUBPROTOCOL,
   parseFrame,
@@ -69,8 +74,13 @@ function isJoinReply(result: ReplyResult): result is JoinReply {
 }
 
 function isPartReply(result: ReplyResult): result is PartReply {
-  return !Array.isArray(result) && "ok" in result && result.ok === true
-    && "channels" in result && result.channels.every(c => typeof c === "string");
+  return (
+    !Array.isArray(result) &&
+    "ok" in result &&
+    result.ok === true &&
+    "channels" in result &&
+    result.channels.every((c) => typeof c === "string")
+  );
 }
 
 function isSendResult(result: ReplyResult): result is SendResult {
@@ -85,7 +95,6 @@ function isPostResult(result: ReplyResult): result is PostResult {
   return "error" in result && !("channel" in result);
 }
 
-
 type RequestFrame = Extract<ClientFrame, { id: string }>;
 type WelcomeFrame = Extract<ServerFrame, { t: "welcome" }>;
 type RejectFrame = Extract<ServerFrame, { t: "reject" }>;
@@ -95,6 +104,7 @@ type HandshakeOutcome =
   | { kind: "failure"; reason: string };
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_UNCONFIRMED_ATTEMPTS = 2;
 const HEARTBEAT_MS = 15_000;
 const STALE_CONNECTION_MS = 45_000;
 const STALE_PEERS_MS = 30_000;
@@ -105,6 +115,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   const replica = new Map<string, ChannelReplica>();
   const pendingReplies = new Map<string, PendingReply>();
   const myClaims = new Map<string, ClaimAssertion>();
+  const unconfirmedMessages = new Map<string, Extract<RequestFrame, { t: "send" | "post" }>>();
+  const connectionWaiters = new Set<() => void>();
 
   let ws: WebSocket | null = null;
   let meshStatus: MeshStatus = "disconnected";
@@ -118,6 +130,14 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   let reconnectTimer: Timer | undefined;
   let lastFrameAt = 0;
   let lastCtx: ExtensionContext | null = null;
+
+  function notifyStatus(): void {
+    try {
+      opts.onStatusChange?.();
+    } catch (error) {
+      console.error("omp-messenger mesh status callback failed", error);
+    }
+  }
 
   function notify(ctx: ExtensionContext, message: string): void {
     if (ctx.hasUI) ctx.ui.notify(message, "error");
@@ -166,6 +186,25 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     pendingReplies.clear();
   }
 
+  function wakeConnectionWaiters(): void {
+    for (const wake of connectionWaiters) wake();
+  }
+
+  function waitForConnectionChange(): Promise<boolean> {
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    const timer = setTimeout(() => {
+      connectionWaiters.delete(wake);
+      resolve(false);
+    }, REQUEST_TIMEOUT_MS);
+    const wake = (): void => {
+      clearTimeout(timer);
+      connectionWaiters.delete(wake);
+      resolve(true);
+    };
+    connectionWaiters.add(wake);
+    return promise;
+  }
+
   function startHeartbeat(): void {
     clearHeartbeat();
     heartbeatTimer = setInterval(() => {
@@ -182,12 +221,12 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
   function acceptWelcome(frame: WelcomeFrame, ctx: ExtensionContext, initial: boolean): void {
     const now = new Date().toISOString();
     state.agentName = frame.name;
-    state.channels = frame.channels.map(snapshot => snapshot.channel).sort();
+    state.channels = frame.channels.map((snapshot) => snapshot.channel).sort();
     state.registered = true;
     if (initial) {
       state.cwd = normalizeCwd(ctx.cwd);
       state.gitBranch = getGitBranch(state.cwd);
-      state.model = ctx.model?.id ?? "unknown";
+      state.model = currentModelIdentity(ctx) ?? "unknown";
       state.activity.lastActivityAt = now;
       state.sessionStartedAt = now;
     }
@@ -199,8 +238,9 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     lastFrameAt = Date.now();
     wantConnected = true;
     meshStatus = "connected";
+    wakeConnectionWaiters();
     startHeartbeat();
-    opts.onStatusChange?.();
+    notifyStatus();
   }
 
   function handleServerFrame(frame: ServerFrame): void {
@@ -208,19 +248,19 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       case "welcome":
         replica.clear();
         applySnapshots(frame.channels);
-        opts.onStatusChange?.();
+        notifyStatus();
         return;
       case "peers":
         channelReplica(frame.channel).peers = frame.peers;
-        opts.onStatusChange?.();
+        notifyStatus();
         return;
       case "claims":
         channelReplica(frame.channel).claims = frame.claims;
-        opts.onStatusChange?.();
+        notifyStatus();
         return;
       case "completions":
         channelReplica(frame.channel).completions = frame.completions;
-        opts.onStatusChange?.();
+        notifyStatus();
         return;
       case "message": {
         const message = normalizeAgentMailMessage(frame.message, {
@@ -249,7 +289,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         }
         applySnapshots(frame.added);
         state.channels = [...frame.channels].sort();
-        opts.onStatusChange?.();
+        notifyStatus();
         return;
       case "pong":
       case "reject":
@@ -271,7 +311,9 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     backoffMs = Math.min(backoffMs * 2, 30_000);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      void reconnect();
+      void reconnect().catch(() => {
+        if (wantConnected) scheduleReconnect();
+      });
     }, delay);
   }
 
@@ -282,16 +324,17 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     settlePendingReplies();
     if (!wantConnected) {
       meshStatus = "disconnected";
-      opts.onStatusChange?.();
+      notifyStatus();
+      wakeConnectionWaiters();
       return;
     }
     meshStatus = "reconnecting";
-    opts.onStatusChange?.();
+    notifyStatus();
     if (!staleTimer) {
       staleTimer = setTimeout(() => {
         staleTimer = null;
         for (const entry of replica.values()) entry.peers = [];
-        opts.onStatusChange?.();
+        notifyStatus();
       }, STALE_PEERS_MS);
     }
     scheduleReconnect();
@@ -306,7 +349,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     try {
       socket = new WebSocket(opts.url, [MESH_SUBPROTOCOL]);
     } catch (error) {
-      if (error instanceof Error) return Promise.resolve({ kind: "failure", reason: error.message });
+      if (error instanceof Error)
+        return Promise.resolve({ kind: "failure", reason: error.message });
       throw error;
     }
     ws = socket;
@@ -329,15 +373,26 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     }
 
     function sendHello(): void {
-      const name = candidates[candidateIndex];
-      if (!name || !sendFrame(socket, {
-        t: "hello",
-        token: opts.token,
-        channels: state.channels,
-        agent: buildRegistration(state, ctx, name),
-        claims: [...myClaims.values()],
-      })) {
-        finish({ kind: "failure", reason: "connection closed" });
+      try {
+        const name = candidates[candidateIndex];
+        if (
+          !name ||
+          !sendFrame(socket, {
+            t: "hello",
+            token: opts.token,
+            channels: state.channels,
+            agent: buildRegistration(state, ctx, name),
+            claims: [...myClaims.values()],
+          })
+        ) {
+          finish({ kind: "failure", reason: "connection closed" });
+        }
+      } catch (error) {
+        finish({
+          kind: "failure",
+          reason: error instanceof Error ? error.message : "registration failed",
+        });
+        socket.close();
       }
     }
 
@@ -352,7 +407,11 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
           sendHello();
           return;
         }
-        finish({ kind: "reject", error: frame.error, ...(frame.channel ? { channel: frame.channel } : {}) });
+        finish({
+          kind: "reject",
+          error: frame.error,
+          ...(frame.channel ? { channel: frame.channel } : {}),
+        });
         socket.close();
         return;
       }
@@ -365,10 +424,13 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       if (settled && accepted) handleServerFrame(frame);
     });
     socket.addEventListener("error", (event) => {
-      const detail = (event as { message?: unknown; error?: { message?: unknown } });
-      const message = typeof detail.message === "string" ? detail.message
-        : typeof detail.error?.message === "string" ? detail.error.message
-          : "connection error";
+      const detail = event as { message?: unknown; error?: { message?: unknown } };
+      const message =
+        typeof detail.message === "string"
+          ? detail.message
+          : typeof detail.error?.message === "string"
+            ? detail.error.message
+            : "connection error";
       if (!settled) finish({ kind: "failure", reason: message });
     });
     socket.addEventListener("close", (event) => {
@@ -384,14 +446,21 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     return promise;
   }
 
-  function leaveAfterReject(ctx: ExtensionContext, error: RejectFrame["error"], channel?: string): void {
+  function leaveAfterReject(
+    ctx: ExtensionContext,
+    error: RejectFrame["error"],
+    channel?: string,
+  ): void {
     state.registered = false;
     wantConnected = false;
     meshStatus = "disconnected";
     replica.clear();
     switch (error) {
       case "name_taken":
-        notify(ctx, `Mesh: agent name ${state.agentName} was taken${channel ? ` in #${channel}` : ""} while reconnecting; left the mesh`);
+        notify(
+          ctx,
+          `Mesh: agent name ${state.agentName} was taken${channel ? ` in #${channel}` : ""} while reconnecting; left the mesh`,
+        );
         break;
       case "invalid_name":
         notify(ctx, "Mesh rejected agent name");
@@ -407,7 +476,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         return exhaustive;
       }
     }
-    opts.onStatusChange?.();
+    notifyStatus();
+    wakeConnectionWaiters();
   }
 
   async function reconnect(): Promise<void> {
@@ -421,7 +491,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         if (outcome.error === "name_taken" && nameTakenRetries < 5) {
           nameTakenRetries++;
           meshStatus = "reconnecting";
-          opts.onStatusChange?.();
+          notifyStatus();
           scheduleReconnect();
           return;
         }
@@ -431,7 +501,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       case "failure":
         if (wantConnected) {
           meshStatus = "reconnecting";
-          opts.onStatusChange?.();
+          notifyStatus();
           scheduleReconnect();
         }
         return;
@@ -464,6 +534,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       disconnect: finishDisconnected,
       resolve: (result) => {
         try {
+          unconfirmedMessages.delete(frame.id);
           resolve(decode(result));
         } catch (error) {
           reject(error);
@@ -477,6 +548,32 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       finishDisconnected();
     }
     return promise;
+  }
+
+  async function retryUnconfirmedMessage<T>(
+    frame: Extract<RequestFrame, { t: "send" | "post" }>,
+    decode: (result: ReplyResult) => T,
+    disconnected: () => T,
+  ): Promise<T> {
+    unconfirmedMessages.set(frame.id, frame);
+    let result = await request(frame, decode, disconnected);
+    let attempts = 1;
+    while (
+      wantConnected &&
+      unconfirmedMessages.has(frame.id) &&
+      attempts < MAX_UNCONFIRMED_ATTEMPTS
+    ) {
+      if (meshStatus !== "connected") {
+        if (!(await waitForConnectionChange())) break;
+        continue;
+      }
+      attempts++;
+      // Every attempt uses the exact frame and id, so the server can return the
+      // original accepted result without delivering the message a second time.
+      result = await request(frame, decode, disconnected);
+    }
+    unconfirmedMessages.delete(frame.id);
+    return result;
   }
 
   /** Channel for a claim operation; must be one we joined. */
@@ -502,8 +599,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         return false;
       }
       if (state.registered) {
-        const added = channels.filter(c => !state.channels.includes(c));
-        const removed = state.channels.filter(c => !channels.includes(c));
+        const added = channels.filter((c) => !state.channels.includes(c));
+        const removed = state.channels.filter((c) => !channels.includes(c));
         if (added.length > 0 && !(await mesh.joinChannels(ctx, added))) return false;
         if (removed.length > 0) await mesh.leaveChannels(removed);
         return true;
@@ -519,7 +616,10 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         return false;
       }
       if (state.explicitName && !isValidAgentName(state.agentName)) {
-        notify(ctx, `Invalid agent name "${state.agentName}" - use only letters, numbers, underscore, hyphen`);
+        notify(
+          ctx,
+          `Invalid agent name "${state.agentName}" - use only letters, numbers, underscore, hyphen`,
+        );
         return false;
       }
 
@@ -537,9 +637,12 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         case "reject":
           switch (outcome.error) {
             case "name_taken":
-              notify(ctx, state.explicitName
-                ? `Mesh rejected agent name: name is already taken${outcome.channel ? ` in #${outcome.channel}` : ""}`
-                : "Could not find available agent name after 99 attempts");
+              notify(
+                ctx,
+                state.explicitName
+                  ? `Mesh rejected agent name: name is already taken${outcome.channel ? ` in #${outcome.channel}` : ""}`
+                  : "Could not find available agent name after 99 attempts",
+              );
               return false;
             case "invalid_name":
               notify(ctx, "Mesh rejected agent name");
@@ -570,7 +673,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         notify(ctx, err instanceof Error ? err.message : "Invalid channel name");
         return false;
       }
-      const added = next.filter(c => !state.channels.includes(c));
+      const added = next.filter((c) => !state.channels.includes(c));
       if (added.length === 0) {
         state.channels = next;
         return true;
@@ -594,9 +697,12 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         return false;
       }
       if (reply.ok === false) {
-        notify(ctx, reply.error === "name_taken"
-          ? `Agent name "${state.agentName}" already in use in #${reply.channel}`
-          : `Mesh rejected channel ${reply.channel}: ${reply.error}`);
+        notify(
+          ctx,
+          reply.error === "name_taken"
+            ? `Agent name "${state.agentName}" already in use in #${reply.channel}`
+            : `Mesh rejected channel ${reply.channel}: ${reply.error}`,
+        );
         return false;
       }
       applySnapshots(reply.channels);
@@ -605,7 +711,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     },
 
     async leaveChannels(chs): Promise<void> {
-      const leaving = chs.filter(c => state.channels.includes(c));
+      const leaving = chs.filter((c) => state.channels.includes(c));
       if (leaving.length === 0) return;
       const id = randomUUID();
       const reply = await request<PartReply | null>(
@@ -613,7 +719,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         (result) => (isPartReply(result) ? result : null),
         () => null,
       );
-      const remaining = reply ? reply.channels : state.channels.filter(c => !leaving.includes(c));
+      const remaining = reply ? reply.channels : state.channels.filter((c) => !leaving.includes(c));
       for (const channel of leaving) replica.delete(channel);
       for (const key of myClaims.keys()) {
         if (leaving.includes(key.split("\u0000")[0] ?? "")) myClaims.delete(key);
@@ -631,23 +737,32 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
     async listChannels(): Promise<ChannelInfo[]> {
       if (meshStatus !== "connected") return [];
       const id = randomUUID();
-      return request({ t: "channels", id },
-        (result) => Array.isArray(result) ? result : [],
-        () => []);
+      return request(
+        { t: "channels", id },
+        (result) => (Array.isArray(result) ? result : []),
+        () => [],
+      );
     },
 
     async deleteChannel(channel): Promise<DeleteChannelResult> {
       if (meshStatus !== "connected") return { ok: false, error: "unreachable" };
-      return request({ t: "delete_channel", id: randomUUID(), channel },
+      return request(
+        { t: "delete_channel", id: randomUUID(), channel },
         (reply): DeleteChannelResult => {
           if (Array.isArray(reply) || !("ok" in reply)) return { ok: false, error: "unreachable" };
           if (reply.ok === true && "deleted" in reply && "removed" in reply) return reply;
-          if (reply.ok === false && "error" in reply && (
-            reply.error === "invalid_channel" || reply.error === "protected" || reply.error === "storage_failed"
-          )) return { ok: false, error: reply.error };
+          if (
+            reply.ok === false &&
+            "error" in reply &&
+            (reply.error === "invalid_channel" ||
+              reply.error === "protected" ||
+              reply.error === "storage_failed")
+          )
+            return { ok: false, error: reply.error };
           return { ok: false, error: "unreachable" };
         },
-        () => ({ ok: false, error: "unreachable" }));
+        () => ({ ok: false, error: "unreachable" }),
+      );
     },
 
     publish(ctx): void {
@@ -660,6 +775,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
 
     async leave(): Promise<void> {
       wantConnected = false;
+      wakeConnectionWaiters();
       clearTimeout(reconnectTimer);
       clearTimeout(staleTimer);
       reconnectTimer = undefined;
@@ -675,7 +791,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       state.registered = false;
       replica.clear();
       meshStatus = "disconnected";
-      opts.onStatusChange?.();
+      notifyStatus();
     },
 
     async rename(_ctx, newName): Promise<RenameResult> {
@@ -684,18 +800,28 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       if (newName === state.agentName) return { success: false, error: "same_name" };
       if (meshStatus !== "connected") return { success: false, error: "race_lost" };
       const id = randomUUID();
-      const result = await request<RenameResult>({ t: "rename", id, name: newName },
+      const result = await request<RenameResult>(
+        { t: "rename", id, name: newName },
         (reply) => {
           if (!Array.isArray(reply) && "success" in reply) {
             if (reply.success && "newName" in reply) return reply;
-            if (!reply.success && "error" in reply && (
-              reply.error === "not_registered" || reply.error === "invalid_name" ||
-              reply.error === "name_taken" || reply.error === "same_name" || reply.error === "race_lost"
-            )) return reply;
+            if (
+              !reply.success &&
+              "error" in reply &&
+              (reply.error === "not_registered" ||
+                reply.error === "invalid_name" ||
+                reply.error === "name_taken" ||
+                reply.error === "same_name" ||
+                reply.error === "race_lost")
+            )
+              return reply;
           }
           throw new Error("mesh unreachable");
         },
-        () => { throw new Error("mesh unreachable"); });
+        () => {
+          throw new Error("mesh unreachable");
+        },
+      );
       if (result.success) {
         state.agentName = newName;
       }
@@ -709,7 +835,11 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         if (!entry) continue;
         for (const peer of entry.peers) {
           if (peer.name === state.agentName) continue;
-          if (state.scopeToFolder && !(peer.hostId === LOCAL_HOST_ID && peer.cwd === normalizeCwd(state.cwd))) continue;
+          if (
+            state.scopeToFolder &&
+            !(peer.hostId === LOCAL_HOST_ID && peer.cwd === normalizeCwd(state.cwd))
+          )
+            continue;
           const existing = byName.get(peer.name);
           if (existing) {
             existing.channels.push(channel);
@@ -721,7 +851,7 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       }
       return [...byName.values()];
     },
-    evict: () => { },
+    evict: () => {},
 
     async send(to, text, sendOptions?: SendOptions): Promise<SendResult> {
       if (!isValidAgentName(to)) return { ok: false, error: "invalid_name" };
@@ -732,8 +862,9 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         if (!state.channels.includes(sendOptions.channel)) return { ok: false, error: "not_found" };
         channel = sendOptions.channel;
       } else {
-        const candidates = state.channels.filter(c =>
-          (replica.get(c)?.peers ?? []).some(peer => peer.name === to));
+        const candidates = state.channels.filter((c) =>
+          (replica.get(c)?.peers ?? []).some((peer) => peer.name === to),
+        );
         if (candidates.length === 0) return { ok: false, error: "not_found" };
         if (candidates.length > 1) return { ok: false, error: "ambiguous_channel" };
         channel = candidates[0];
@@ -750,18 +881,19 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         channel,
         ...(sendOptions?.gentle ? { gentle: true } : {}),
       };
-      return request<SendResult>({ t: "send", id, channel, to, message },
-        (reply) => isSendResult(reply)
-          ? reply
-          : { ok: false, error: "unreachable" },
-        () => ({ ok: false, error: "unreachable" }));
+      return retryUnconfirmedMessage<SendResult>(
+        { t: "send", id, channel, to, message },
+        (reply) => (isSendResult(reply) ? reply : { ok: false, error: "unreachable" }),
+        () => ({ ok: false, error: "unreachable" }),
+      );
     },
 
     async post(text, postOptions?: PostOptions): Promise<PostOutcome> {
       if (meshStatus !== "connected") return { ok: false, error: "unreachable" };
       let channel: string;
       if (postOptions?.channel !== undefined) {
-        if (!state.channels.includes(postOptions.channel)) return { ok: false, error: "not_joined" };
+        if (!state.channels.includes(postOptions.channel))
+          return { ok: false, error: "not_joined" };
         channel = postOptions.channel;
       } else if (state.channels.length === 1) {
         channel = state.channels[0];
@@ -769,8 +901,16 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         return { ok: false, error: "ambiguous_channel" };
       }
       const id = randomUUID();
-      const reply = await request<PostResult | null>(
-        { t: "post", id, channel, text, ...(postOptions?.replyTo ? { replyTo: postOptions.replyTo } : {}) },
+      const messageId = randomUUID();
+      const reply = await retryUnconfirmedMessage<PostResult | null>(
+        {
+          t: "post",
+          id,
+          channel,
+          text,
+          messageId,
+          ...(postOptions?.replyTo ? { replyTo: postOptions.replyTo } : {}),
+        },
         (result) => (isPostResult(result) ? result : null),
         () => null,
       );
@@ -781,12 +921,9 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
 
     recoverInbox(): void {
       if (!wantConnected || ws) return;
-      clearTimeout(reconnectTimer);
-      reconnectTimer = undefined;
-      backoffMs = reconnectBaseMs;
-      void reconnect();
+      scheduleReconnect();
     },
-    drainInbox: () => { },
+    drainInbox: () => {},
 
     claims(): AllClaims {
       const merged: AllClaims = {};
@@ -821,13 +958,18 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
         (reply) => {
           if (!Array.isArray(reply) && "success" in reply) {
             if (reply.success && "claimedAt" in reply) return reply;
-            if (!reply.success && "error" in reply && (
-              reply.error === "already_claimed" || reply.error === "already_have_claim"
-            )) return reply;
+            if (
+              !reply.success &&
+              "error" in reply &&
+              (reply.error === "already_claimed" || reply.error === "already_have_claim")
+            )
+              return reply;
           }
           throw new Error("mesh unreachable");
         },
-        () => { throw new Error("mesh unreachable"); },
+        () => {
+          throw new Error("mesh unreachable");
+        },
       );
       if (result.success) {
         myClaims.set(`${target}\u0000${spec}\u0000${taskId}`, {
@@ -845,7 +987,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
       const target = joinedChannel(channel);
       if (meshStatus !== "connected") throw new Error("mesh unreachable");
       const id = randomUUID();
-      const result = await request<UnclaimResult>({ t: "unclaim", id, channel: target, spec, taskId },
+      const result = await request<UnclaimResult>(
+        { t: "unclaim", id, channel: target, spec, taskId },
         (reply) => {
           if (!Array.isArray(reply) && "success" in reply) {
             if (reply.success) return { success: true };
@@ -858,7 +1001,10 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
           }
           throw new Error("mesh unreachable");
         },
-        () => { throw new Error("mesh unreachable"); });
+        () => {
+          throw new Error("mesh unreachable");
+        },
+      );
       if (result.success) myClaims.delete(`${target}\u0000${spec}\u0000${taskId}`);
       return result;
     },
@@ -878,11 +1024,15 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
                 return { success: false, error: "not_your_claim", claimedBy: reply.claimedBy };
               }
               if (reply.error === "already_completed" && "completion" in reply) return reply;
+              if (reply.error === "storage_failed")
+                return { success: false, error: "storage_failed" };
             }
           }
           throw new Error("mesh unreachable");
         },
-        () => { throw new Error("mesh unreachable"); },
+        () => {
+          throw new Error("mesh unreachable");
+        },
       );
       if (result.success) myClaims.delete(`${target}\u0000${spec}\u0000${taskId}`);
       return result;
@@ -890,6 +1040,8 @@ export function createMeshClient(opts: MeshClientOptions): Mesh {
 
     close(): void {
       wantConnected = false;
+      unconfirmedMessages.clear();
+      wakeConnectionWaiters();
       clearTimeout(reconnectTimer);
       clearTimeout(staleTimer);
       reconnectTimer = undefined;

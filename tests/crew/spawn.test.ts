@@ -14,7 +14,9 @@ const lobbyMock = vi.hoisted(() => {
       counter++;
       return { name: `SpawnedWorker${counter}` };
     }),
-    reset: () => { counter = 0; },
+    reset: () => {
+      counter = 0;
+    },
   };
 });
 
@@ -88,6 +90,26 @@ describe("spawnWorkersForReadyTasks", () => {
 
     expect(result.assigned).toBe(2);
     expect(lobbyMock.spawnWorkerForTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not assign or launch workers after its owner is cancelled", async () => {
+    const owner = new AbortController();
+    owner.abort();
+
+    const result = await spawn.spawnWorkersForReadyTasks(
+      dirs.cwd,
+      5,
+      stubMesh,
+      undefined,
+      undefined,
+      "session-a",
+      owner.signal,
+    );
+
+    expect(result).toEqual({ assigned: 0, firstWorkerName: null });
+    expect(lobbyMock.assignTaskToLobbyWorker).not.toHaveBeenCalled();
+    expect(lobbyMock.spawnWorkerForTask).not.toHaveBeenCalled();
+    expect(store.getTasks(dirs.cwd).every((task) => task.status === "todo")).toBe(true);
   });
 
   it("caps lobby assignments by config.concurrency.max", async () => {

@@ -25,13 +25,20 @@ export async function executeRevise(
   prompt: string | undefined,
   agentName: string,
   sessionModel?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
 ): Promise<ReviseResult> {
+  if (ownerSignal?.aborted) return { success: false, message: "Revision cancelled" };
   const task = store.getTask(cwd, taskId);
   if (!task) return { success: false, message: `Task ${taskId} not found` };
-  if (task.status === "in_progress") return { success: false, message: `Task ${taskId} is in_progress` };
-  if (getLiveWorkers(cwd).has("__reviser__")) return { success: false, message: "A revision is already running" };
+  if (task.status === "in_progress")
+    return { success: false, message: `Task ${taskId} is in_progress` };
+  if (getLiveWorkers(cwd).has("__reviser__"))
+    return { success: false, message: "A revision is already running" };
   if (isPlanningForCwd(cwd)) return { success: false, message: "Cannot revise during planning" };
-  if (isAutonomousForCwd(cwd)) return { success: false, message: "Cannot revise during autonomous work" };
+  if (isAutonomousForCwd(cwd))
+    return { success: false, message: "Cannot revise during autonomous work" };
 
   if (prompt) {
     store.appendTaskProgress(cwd, taskId, agentName, `Revision requested: "${prompt}"`);
@@ -47,12 +54,18 @@ export async function executeRevise(
 
   let output: string;
   try {
-    const [agentResult] = await spawnAgents([{
-      agent: "crew-planner",
-      task: revisePrompt,
-      taskId: "__reviser__",
-      modelOverride: config.models?.planner ?? sessionModel,
-    }], cwd);
+    const [agentResult] = await spawnAgents(
+      [
+        {
+          agent: "crew-planner",
+          task: revisePrompt,
+          taskId: "__reviser__",
+          modelOverride: config.models?.planner,
+        },
+      ],
+      cwd,
+      { parentAgentId, ownerSessionId, ownerSignal },
+    );
 
     if (agentResult.exitCode !== 0) {
       const msg = `Revision failed: ${agentResult.error ?? "planner exited with error"}`;
@@ -81,11 +94,31 @@ export async function executeRevise(
   return { success: true, message: `Revised ${taskId}${parsed.title ? `: ${parsed.title}` : ""}` };
 }
 
-export async function taskRevise(cwd: string, params: CrewParams, state: MessengerState) {
+export async function taskRevise(
+  cwd: string,
+  params: CrewParams,
+  state: MessengerState,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
+) {
   const { id, prompt } = params;
-  if (!id) return result("Error: id required for task.revise", { mode: "task.revise", error: "missing_id" });
+  if (!id)
+    return result("Error: id required for task.revise", {
+      mode: "task.revise",
+      error: "missing_id",
+    });
 
-  const r = await executeRevise(cwd, id, prompt ?? undefined, state.agentName || "unknown", state.model || undefined);
+  const r = await executeRevise(
+    cwd,
+    id,
+    prompt ?? undefined,
+    state.agentName || "unknown",
+    state.model || undefined,
+    parentAgentId,
+    ownerSessionId,
+    ownerSignal,
+  );
   if (!r.success) {
     return result(`Error: ${r.message}`, { mode: "task.revise", error: "revision_failed", id });
   }
@@ -102,25 +135,34 @@ export async function executeReviseTree(
   prompt: string | undefined,
   agentName: string,
   sessionModel?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
 ): Promise<ReviseResult> {
+  if (ownerSignal?.aborted) return { success: false, message: "Tree revision cancelled" };
   const target = store.getTask(cwd, taskId);
   if (!target) return { success: false, message: `Task ${taskId} not found` };
-  if (getLiveWorkers(cwd).has("__reviser__")) return { success: false, message: "A revision is already running" };
+  if (getLiveWorkers(cwd).has("__reviser__"))
+    return { success: false, message: "A revision is already running" };
   if (isPlanningForCwd(cwd)) return { success: false, message: "Cannot revise during planning" };
-  if (isAutonomousForCwd(cwd)) return { success: false, message: "Cannot revise during autonomous work" };
+  if (isAutonomousForCwd(cwd))
+    return { success: false, message: "Cannot revise during autonomous work" };
 
   const dependents = store.getTransitiveDependents(cwd, taskId);
   const subtreeAll = [target, ...dependents];
-  const subtreeIds = new Set(subtreeAll.map(t => t.id));
+  const subtreeIds = new Set(subtreeAll.map((t) => t.id));
 
   const liveWorkers = getLiveWorkers(cwd);
-  const liveTasks = subtreeAll.filter(t => liveWorkers.has(t.id));
+  const liveTasks = subtreeAll.filter((t) => liveWorkers.has(t.id));
   if (liveTasks.length > 0) {
-    return { success: false, message: `Cannot revise: ${liveTasks.map(t => t.id).join(", ")} have live workers` };
+    return {
+      success: false,
+      message: `Cannot revise: ${liveTasks.map((t) => t.id).join(", ")} have live workers`,
+    };
   }
 
-  const doneTasks = subtreeAll.filter(t => t.status === "done");
-  const revisable = subtreeAll.filter(t => t.status !== "done");
+  const doneTasks = subtreeAll.filter((t) => t.status === "done");
+  const revisable = subtreeAll.filter((t) => t.status !== "done");
 
   if (prompt) {
     store.appendTaskProgress(cwd, taskId, agentName, `Tree revision requested: "${prompt}"`);
@@ -132,12 +174,18 @@ export async function executeReviseTree(
 
   let output: string;
   try {
-    const [agentResult] = await spawnAgents([{
-      agent: "crew-planner",
-      task: revisePrompt,
-      taskId: "__reviser__",
-      modelOverride: config.models?.planner ?? sessionModel,
-    }], cwd);
+    const [agentResult] = await spawnAgents(
+      [
+        {
+          agent: "crew-planner",
+          task: revisePrompt,
+          taskId: "__reviser__",
+          modelOverride: config.models?.planner,
+        },
+      ],
+      cwd,
+      { parentAgentId, ownerSessionId, ownerSignal },
+    );
 
     if (agentResult.exitCode !== 0) {
       const msg = `Tree revision failed: ${agentResult.error ?? "planner exited with error"}`;
@@ -158,8 +206,8 @@ export async function executeReviseTree(
     return { success: false, message: msg };
   }
 
-  const existingEntries = parsed.filter(e => e.id);
-  const newEntries = parsed.filter(e => !e.id && e.title);
+  const existingEntries = parsed.filter((e) => e.id);
+  const newEntries = parsed.filter((e) => !e.id && e.title);
 
   for (const entry of existingEntries) {
     if (!subtreeIds.has(entry.id!)) {
@@ -198,7 +246,8 @@ export async function executeReviseTree(
 
     const resolvedDeps: string[] = [];
     for (const dep of entry.dependsOn) {
-      const resolved = titleToId.get(dep.toLowerCase()) ?? (dep.startsWith("task-") ? dep : undefined);
+      const resolved =
+        titleToId.get(dep.toLowerCase()) ?? (dep.startsWith("task-") ? dep : undefined);
       if (resolved && resolved !== entryId) resolvedDeps.push(resolved);
     }
     if (resolvedDeps.length > 0) {
@@ -221,17 +270,47 @@ export async function executeReviseTree(
   }
 
   const preview = prompt ? prompt.slice(0, 60) : "revised tree";
-  logFeedEvent(cwd, agentName, "task.revise-tree", taskId, `${taskId} + ${dependents.length} dependents — ${preview}`);
+  logFeedEvent(
+    cwd,
+    agentName,
+    "task.revise-tree",
+    taskId,
+    `${taskId} + ${dependents.length} dependents — ${preview}`,
+  );
   return { success: true, message: `Revised ${taskId} + ${dependents.length} dependents` };
 }
 
-export async function taskReviseTree(cwd: string, params: CrewParams, state: MessengerState) {
+export async function taskReviseTree(
+  cwd: string,
+  params: CrewParams,
+  state: MessengerState,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
+) {
   const { id, prompt } = params;
-  if (!id) return result("Error: id required for task.revise-tree", { mode: "task.revise-tree", error: "missing_id" });
+  if (!id)
+    return result("Error: id required for task.revise-tree", {
+      mode: "task.revise-tree",
+      error: "missing_id",
+    });
 
-  const r = await executeReviseTree(cwd, id, prompt ?? undefined, state.agentName || "unknown", state.model || undefined);
+  const r = await executeReviseTree(
+    cwd,
+    id,
+    prompt ?? undefined,
+    state.agentName || "unknown",
+    state.model || undefined,
+    parentAgentId,
+    ownerSessionId,
+    ownerSignal,
+  );
   if (!r.success) {
-    return result(`Error: ${r.message}`, { mode: "task.revise-tree", error: "revision_failed", id });
+    return result(`Error: ${r.message}`, {
+      mode: "task.revise-tree",
+      error: "revision_failed",
+      id,
+    });
   }
   return result(r.message, { mode: "task.revise-tree", id });
 }
@@ -245,7 +324,11 @@ function readPrd(cwd: string): string {
   if (!plan) return "";
   if (plan.prompt) return plan.prompt;
   const prdPath = path.isAbsolute(plan.prd) ? plan.prd : path.join(cwd, plan.prd);
-  try { return fs.readFileSync(prdPath, "utf-8"); } catch { return ""; }
+  try {
+    return fs.readFileSync(prdPath, "utf-8");
+  } catch {
+    return "";
+  }
 }
 
 function buildRevisePrompt(
@@ -266,12 +349,16 @@ function buildRevisePrompt(
   if (progress) parts.push("", "## Progress", progress);
   if (blockContext) parts.push("", "## Block Context", blockContext);
   if (prdContent) {
-    const truncated = prdContent.length > 20000 ? prdContent.slice(0, 20000) + "\n[truncated]" : prdContent;
+    const truncated =
+      prdContent.length > 20000 ? prdContent.slice(0, 20000) + "\n[truncated]" : prdContent;
     parts.push("", "## PRD", truncated);
   }
   if (prompt) parts.push("", "## Revision Instructions", prompt);
 
-  parts.push("", "## Output Format", `Return a single \`revised-task\` fenced block:
+  parts.push(
+    "",
+    "## Output Format",
+    `Return a single \`revised-task\` fenced block:
 
 \`\`\`revised-task
 {
@@ -280,7 +367,8 @@ function buildRevisePrompt(
 }
 \`\`\`
 
-The spec should be complete (not a diff). Include all sections the task needs.`);
+The spec should be complete (not a diff). Include all sections the task needs.`,
+  );
 
   return parts.join("\n");
 }
@@ -298,14 +386,17 @@ function buildReviseTreePrompt(
   ];
 
   for (const task of subtree) {
-    const isDone = doneTasks.some(d => d.id === task.id);
+    const isDone = doneTasks.some((d) => d.id === task.id);
     const spec = store.getTaskSpec(cwd, task.id) ?? "(no spec)";
     const deps = task.depends_on.length > 0 ? `\nDependencies: ${task.depends_on.join(", ")}` : "";
-    parts.push(`### ${task.id}: ${task.title} [${isDone ? "DONE - context only" : "REVISABLE"}]${deps}\n${spec}\n`);
+    parts.push(
+      `### ${task.id}: ${task.title} [${isDone ? "DONE - context only" : "REVISABLE"}]${deps}\n${spec}\n`,
+    );
   }
 
   if (prdContent) {
-    const truncated = prdContent.length > 20000 ? prdContent.slice(0, 20000) + "\n[truncated]" : prdContent;
+    const truncated =
+      prdContent.length > 20000 ? prdContent.slice(0, 20000) + "\n[truncated]" : prdContent;
     parts.push("## PRD", truncated, "");
   }
   if (prompt) parts.push("## Revision Instructions", prompt, "");
@@ -338,7 +429,8 @@ function parseRevisedTask(output: string): { title?: string; spec: string } | nu
     const parsed = JSON.parse(match[1]);
     if (typeof parsed.spec !== "string" || !parsed.spec.trim()) return null;
     return {
-      title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : undefined,
+      title:
+        typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : undefined,
       spec: parsed.spec,
     };
   } catch {
@@ -366,7 +458,9 @@ function parseRevisionTaskBlock(output: string): RevisionEntry[] | null {
         id: typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : undefined,
         title: typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : undefined,
         spec: raw.spec,
-        dependsOn: Array.isArray(raw.dependsOn) ? raw.dependsOn.filter((d: unknown) => typeof d === "string") : [],
+        dependsOn: Array.isArray(raw.dependsOn)
+          ? raw.dependsOn.filter((d: unknown) => typeof d === "string")
+          : [],
       });
     }
     return entries.length > 0 ? entries : null;

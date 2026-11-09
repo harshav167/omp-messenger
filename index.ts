@@ -6,39 +6,16 @@
  */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
 import type { OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import type { TSchema as PiSchema } from "@oh-my-pi/pi-ai";
-import { Type, type TSchema } from "typebox";
-
-function StringEnum<T extends readonly string[]>(
-  values: T,
-  options?: { description?: string; default?: T[number] },
-): TSchema {
-  const unsafe = (Type as unknown as {
-    Unsafe?: (schema: Record<string, unknown>) => TSchema;
-  }).Unsafe;
-
-  if (typeof unsafe === "function") {
-    return unsafe({
-      type: "string",
-      enum: [...values],
-      ...(options?.description && { description: options.description }),
-      ...(options?.default && { default: options.default }),
-    });
-  }
-
-  return Type.Union(
-    values.map((value) => Type.Literal(value)),
-    options,
-  );
-}
+import { text as nativeText } from "@oh-my-pi/pi-tui/native/describe";
 import {
   type MessengerState,
   type AgentRegistration,
   type AgentMailMessage,
+  type ReservationConflict,
   MAX_CHAT_HISTORY,
   extractFolder,
   generateAutoStatus,
@@ -51,9 +28,16 @@ import {
 import * as handlers from "./handlers.ts";
 import { MessengerOverlay, type OverlayCallbacks } from "./overlay.ts";
 import { MessengerConfigOverlay } from "./config-overlay.ts";
-import { loadConfig, loadGlobalConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.ts";
+import {
+  loadConfig,
+  loadGlobalConfig,
+  matchesAutoRegisterPath,
+  setAgentDirProvider,
+  type MessengerConfig,
+} from "./config.ts";
 import { createMesh } from "./mesh/index.ts";
 import type { Mesh } from "./mesh/types.ts";
+import { normalizeCwd } from "./mesh/registration.ts";
 import { executeCrewAction } from "./crew/index.ts";
 import { setSdk } from "./crew/sdk.ts";
 import { detectCrewIdentity } from "./crew/identity.ts";
@@ -61,7 +45,7 @@ import { logFeedEvent, pruneFeed } from "./feed.ts";
 import type { CrewParams, Task } from "./crew/types.ts";
 import {
   autonomousState,
-  clearPlanningState,
+  cancelPlanningRun,
   consumePendingAutoWork,
   consumePlanningOverlayPending,
   dismissPlanningOverlayRun,
@@ -84,16 +68,30 @@ import { shutdownLobbyWorkers } from "./crew/lobby.ts";
 
 /** Minimal Component wrapper for a fixed set of pre-rendered lines. */
 function statusCard(lines: string[]) {
-  return { render: (width: number) => lines.map(line => truncateToWidth(line, width)), invalidate() { } };
+  return {
+    render: (width: number) => lines.map((line) => truncateToWidth(line, width)),
+    invalidate() {},
+  };
 }
 
 /** Status header line: colored icon, accent title, dim meta — mirrors omp's renderStatusLine. */
 function statusLine(
-  opts: { icon?: "pending" | "success" | "error" | "warning"; glyph?: string; title: string; meta?: string[] },
+  opts: {
+    icon?: "pending" | "success" | "error" | "warning";
+    glyph?: string;
+    title: string;
+    meta?: string[];
+  },
   theme: Theme,
 ): string {
-  const iconColor = { pending: "dim", success: "success", error: "error", warning: "warning" } as const;
-  const icon = opts.glyph ?? (opts.icon ? theme.fg(iconColor[opts.icon], theme.status[opts.icon]) : "");
+  const iconColor = {
+    pending: "dim",
+    success: "success",
+    error: "error",
+    warning: "warning",
+  } as const;
+  const icon =
+    opts.glyph ?? (opts.icon ? theme.fg(iconColor[opts.icon], theme.status[opts.icon]) : "");
   const meta = opts.meta?.length ? theme.fg("dim", `  ${opts.meta.join(" · ")}`) : "";
   return `${icon} ${theme.fg("accent", opts.title)}${meta}`.trimEnd();
 }
@@ -110,24 +108,42 @@ function ircQuoteBody(text: string, theme: Theme, collapsedLines = 3): string[] 
 
 /** Display target for send/broadcast: broadcasts read "all", matching hub's card. */
 function hubTarget(call: CrewParams): string {
-  return call.action === "broadcast" ? "all" : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "…";
+  return call.action === "broadcast"
+    ? "all"
+    : (Array.isArray(call.to) ? call.to.join(", ") : call.to) || "…";
 }
 
 /** Status-line title for non-messaging actions so every tool call renders visibly. */
 function actionTitle(call: CrewParams | undefined): string {
   const action = call?.action ?? "";
   switch (action) {
-    case "": return "IRC status";
-    case "join": return "IRC join";
-    case "leave": return "IRC leave";
-    case "channels": case "channels.join": case "channels.leave": case "channels.delete": return "IRC channels";
-    case "peers": return "IRC peers";
-    case "whois": return `IRC whois ${call?.name ?? ""}`.trim();
-    case "reserve": return "IRC reserve";
-    case "release": return "IRC release";
-    case "feed": return "IRC feed";
+    case "":
+      return "IRC status";
+    case "join":
+      return "IRC join";
+    case "leave":
+      return "IRC leave";
+    case "channels":
+    case "channels.join":
+    case "channels.leave":
+    case "channels.delete":
+      return "IRC channels";
+    case "peers":
+      return "IRC peers";
+    case "whois":
+      return `IRC whois ${call?.name ?? ""}`.trim();
+    case "reserve":
+      return "IRC reserve";
+    case "release":
+      return "IRC release";
+    case "feed":
+      return "IRC feed";
     default:
-      return action.startsWith("task.") || action.startsWith("team.") || action === "plan" || action === "work" || action === "review"
+      return action.startsWith("task.") ||
+        action.startsWith("team.") ||
+        action === "plan" ||
+        action === "work" ||
+        action === "review"
         ? `Crew ${action}`
         : `omp-messenger ${action}`;
   }
@@ -136,19 +152,82 @@ function actionTitle(call: CrewParams | undefined): string {
 /** Status-line meta for non-messaging actions: channels, paths, target name. */
 function actionMeta(call: CrewParams | undefined): string[] {
   const meta: string[] = [];
-  if (call?.channels?.length) meta.push(call.channels.map(c => `#${c}`).join(" "));
+  if (call?.channels?.length) meta.push(call.channels.map((c) => `#${c}`).join(" "));
   else if (call?.channel) meta.push(`#${call.channel}`);
   if (call?.paths?.length) meta.push(call.paths.join(", "));
   return meta;
 }
 
+function unwrapEditHeaderPath(targetPath: string): string {
+  const trimmed = targetPath.trimEnd();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return targetPath;
+  const inner = trimmed.slice(1, -1);
+  const tag = /#[0-9A-Fa-f]{4}$/.exec(inner);
+  const path = tag ? inner.slice(0, tag.index) : inner;
+  return path && (tag || !path.includes("#")) ? path : targetPath;
+}
+
+function normalizeEditPath(raw: string): string {
+  let path = raw
+    .trim()
+    .replace(/^\*{3}\s*(?:(?:Add|Update|Delete)\s+File|Move\s+to)\s*:\s*/i, "")
+    .trim();
+  if (path.startsWith('"') && path.endsWith('"')) {
+    try {
+      const parsed: unknown = JSON.parse(path);
+      if (typeof parsed === "string") path = parsed;
+    } catch {
+      // Keep the authored target when a partial payload has not closed its JSON string cleanly.
+    }
+  } else if (path.length >= 2 && path.startsWith("'") && path.endsWith("'")) {
+    path = path.slice(1, -1);
+  }
+  return path;
+}
+
+/** Read only target declarations from the public edit grammars; never execute the payload. */
+function freeformEditTargets(input: string, mode: "hashline" | "apply_patch" | "sloppy"): string[] {
+  const targets: string[] = [];
+  const add = (raw: string) => {
+    const path = normalizeEditPath(raw);
+    if (path) targets.push(path);
+  };
+  let hashlineSection = false;
+  for (const line of input.split("\n")) {
+    if (mode === "hashline") {
+      const header = /^\s*\[([^\]\r\n]+)\]\s*$/.exec(line);
+      if (header) {
+        hashlineSection = true;
+        add(header[1].replace(/#[0-9A-Fa-f]{4}$/, ""));
+      } else if (hashlineSection) {
+        const move = /^\s*MV\s+(\S.*?)\s*$/.exec(line);
+        if (move) add(move[1]);
+      }
+    } else if (mode === "sloppy") {
+      const header = /^\s*\*{3}\s+Edit\s+File\s*:\s*(.*?)\s*$/i.exec(line);
+      if (header?.[1]) add(header[1].replace(/\s+all$/i, ""));
+    } else {
+      const header = /^\s*\*{3}\s+(?:Add|Update|Delete)\s+File\s*:\s*(\S.*?)\s*$/i.exec(line);
+      const move = /^\s*\*{3}\s+Move\s+to\s*:\s*(\S.*?)\s*$/i.exec(line);
+      if (header) add(header[1]);
+      if (move) add(move[1]);
+    }
+  }
+  return targets;
+}
+
 export default function piMessengerExtension(pi: ExtensionAPI) {
-  const { pi: sdk } = pi;
-  setSdk(sdk);
+  setAgentDirProvider(() => pi.pi.getAgentDir());
+  setSdk(() => pi.pi);
+  const z = pi.zod;
   let overlayTui: TUI | null = null;
   let overlayHandle: OverlayHandle | null = null;
   let overlayOpening = false;
-
+  let overlayEpoch = 0;
+  let ownsCrewLifecycle = false;
+  let ownedPlanningRunId: string | null = null;
+  let ownerSessionId: string | undefined;
+  let ownedWorkAbort = new AbortController();
 
   // ===========================================================================
   // State & Configuration
@@ -213,7 +292,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Build message content with optional context
     // Detect if this is a new agent identity (first contact OR same name but different session)
-    const sender = mesh.peers().find(a => a.name === msg.from);
+    const sender = mesh.peers().find((a) => a.name === msg.from);
     const senderSessionId = sender?.sessionId;
     const prevSessionId = state.seenSenders.get(msg.from);
     const isNewIdentity = !prevSessionId || (senderSessionId && prevSessionId !== senderSessionId);
@@ -228,9 +307,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     // Add sender details on new identity (first contact or agent restart with same name)
     if (isNewIdentity && config.senderDetailsOnFirstContact && sender) {
       const folder = extractFolder(sender.cwd);
-      const locationPart = sender.gitBranch
-        ? `${folder} on ${sender.gitBranch}`
-        : folder;
+      const locationPart = sender.gitBranch ? `${folder} on ${sender.gitBranch}` : folder;
       content += `*${msg.from} is in ${locationPart} (${sender.model})*\n\n`;
     }
 
@@ -273,7 +350,9 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       }
       delivery = idle ? { triggerTurn: false } : { triggerTurn: false, deliverAs: "aside" };
     } else {
-      delivery = msg.gentle ? { triggerTurn: true, deliverAs: "aside" } : { triggerTurn: true, deliverAs: "steer" };
+      delivery = msg.gentle
+        ? { triggerTurn: true, deliverAs: "aside" }
+        : { triggerTurn: true, deliverAs: "steer" };
     }
     pi.sendMessage(
       {
@@ -299,7 +378,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     state,
     deliver: deliverMessage,
     onStatusChange: () => {
-      if (latestCtx) updateStatus(latestCtx);
+      updateStatusFromBackground();
     },
   });
 
@@ -328,7 +407,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
         agent.activity?.lastActivityAt ?? agent.startedAt,
         hasTask,
         (agent.reservations?.length ?? 0) > 0,
-        thresholdMs
+        thresholdMs,
       );
 
       if (computed.status === "stuck") {
@@ -340,7 +419,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
           const idleStr = computed.idleFor ?? "unknown";
           const taskInfo = hasTask ? " with task in progress" : " with reservation";
-          ctx.ui.notify(`\u26A0\uFE0F ${agent.name} appears stuck (idle ${idleStr}${taskInfo})`, "warning");
+          ctx.ui.notify(
+            `\u26A0\uFE0F ${agent.name} appears stuck (idle ${idleStr}${taskInfo})`,
+            "warning",
+          );
           if (config.stuckWakeAgent === state.agentName) {
             pi.sendMessage(
               {
@@ -348,7 +430,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
                 content: `**Stuck peer detected: ${agent.name}**\n\nThe peer has been idle ${idleStr}${taskInfo}. Inspect the mesh and the peer's Herdr pane, then recover or reassign its work.`,
                 display: true,
               },
-              { triggerTurn: true, deliverAs: "steer" }
+              { triggerTurn: true, deliverAs: "steer" },
             );
           }
         }
@@ -372,7 +454,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
       const agents = mesh.peers();
       checkStuckAgents(ctx, agents);
-      const activeNames = new Set(agents.map(a => a.name));
+      const activeNames = new Set(agents.map((a) => a.name));
       const count = agents.length;
       const theme = ctx.ui.theme;
 
@@ -394,32 +476,33 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       const nameStr = theme.fg("accent", state.agentName);
       const countStr = theme.fg("dim", ` (${count} peer${count === 1 ? "" : "s"})`);
       const channelList = mesh.channels().join(",");
-      const meshStr = mesh.kind === "mesh"
-        ? theme.fg(
-          mesh.status() === "connected" ? "dim" : "warning",
-          mesh.status() === "connected"
-            ? ` ⚡${channelList}`
-            : mesh.status() === "reconnecting"
-              ? ` ⚡${channelList}…`
-              : ` ⚡${channelList}✗`,
-        )
-        : channelList !== "main"
-          ? theme.fg("dim", ` #${channelList}`)
-          : "";
+      const meshStr =
+        mesh.kind === "mesh"
+          ? theme.fg(
+              mesh.status() === "connected" ? "dim" : "warning",
+              mesh.status() === "connected"
+                ? ` ⚡${channelList}`
+                : mesh.status() === "reconnecting"
+                  ? ` ⚡${channelList}…`
+                  : ` ⚡${channelList}✗`,
+            )
+          : channelList !== "main"
+            ? theme.fg("dim", ` #${channelList}`)
+            : "";
       const unreadStr = totalUnread > 0 ? theme.fg("accent", ` ●${totalUnread}`) : "";
 
       const planningCwd = ctx.cwd;
-      const planningStr =
-        isPlanningForCwd(planningCwd)
-          ? theme.fg(
+      const planningStr = isPlanningForCwd(planningCwd)
+        ? theme.fg(
             "warning",
             ` · plan ${planningState.pass}/${planningState.maxPasses} ${planningState.phase}${isPlanningStalled(planningCwd) ? " stalled" : ""}`,
           )
-          : "";
-
-      const activityStr = !planningStr && state.activity.currentActivity
-        ? theme.fg("dim", ` · ${state.activity.currentActivity}`)
         : "";
+
+      const activityStr =
+        !planningStr && state.activity.currentActivity
+          ? theme.fg("dim", ` · ${state.activity.currentActivity}`)
+          : "";
 
       // Add crew status if autonomous mode is active
       let crewStr = "";
@@ -435,7 +518,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
         }
       }
 
-      ctx.ui.setStatus("messenger", `msg: ${nameStr}${countStr}${meshStr}${unreadStr}${planningStr}${activityStr}${crewStr}`);
+      ctx.ui.setStatus(
+        "messenger",
+        `msg: ${nameStr}${countStr}${meshStr}${unreadStr}${planningStr}${activityStr}${crewStr}`,
+      );
 
       maybeAutoOpenCrewOverlay(ctx);
     } catch (error) {
@@ -476,10 +562,22 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     return autonomousContinueRepeats;
   }
 
+  function updateStatusFromBackground(): void {
+    try {
+      if (latestCtx) updateStatus(latestCtx);
+    } catch (error) {
+      console.error("omp-messenger background status update failed", error);
+    }
+  }
+
   function startStatusHeartbeat(): void {
     if (statusHeartbeatTimer) return;
     statusHeartbeatTimer = setInterval(() => {
-      if (latestCtx) updateStatus(latestCtx);
+      try {
+        if (latestCtx) updateStatus(latestCtx);
+      } catch (error) {
+        console.error("omp-messenger status heartbeat failed", error);
+      }
     }, STATUS_HEARTBEAT_MS);
   }
 
@@ -494,8 +592,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     startStatusHeartbeat();
   }
 
-  onLiveWorkersChanged(() => {
-    if (latestCtx) updateStatus(latestCtx);
+  const unsubscribeLiveWorkers = onLiveWorkersChanged(() => {
+    updateStatusFromBackground();
   });
 
   // ===========================================================================
@@ -504,14 +602,15 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   function sendRegistrationContext(ctx: ExtensionContext): void {
     const folder = extractFolder(ctx.cwd ?? state.cwd);
-    const locationPart = state.gitBranch
-      ? `${folder} on ${state.gitBranch}`
-      : folder;
-    pi.sendMessage({
-      customType: "messenger_context",
-      content: `You are agent "${state.agentName}" in ${locationPart}. Use omp_messenger({ action: "status" }) to see crew status, omp_messenger({ action: "work" }) to run tasks.`,
-      display: false
-    }, { triggerTurn: false });
+    const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
+    pi.sendMessage(
+      {
+        customType: "messenger_context",
+        content: `You are agent "${state.agentName}" in ${locationPart}. Use omp_messenger({ action: "status" }) to see crew status, omp_messenger({ action: "work" }) to run tasks.`,
+        display: false,
+      },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
   }
 
   // ===========================================================================
@@ -530,11 +629,37 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   omp_messenger({ action: "team.status" })                       → Team summary`
     : "";
 
-
   pi.registerTool({
     name: "omp_messenger",
     label: "omp-messenger",
     loadMode: "essential",
+    approval: (raw) => {
+      const params = raw && typeof raw === "object" ? (raw as CrewParams) : {};
+      const action = params.action ?? "status";
+      if (
+        [
+          "status",
+          "channels",
+          "list",
+          "whois",
+          "feed",
+          "swarm",
+          "task.show",
+          "task.list",
+          "team.profile.list",
+          "team.charter.show",
+          "team.roles",
+          "team.status",
+          "crew.status",
+          "crew.agents",
+        ].includes(action) ||
+        (action === "autoRegisterPath" && params.autoRegisterPath === "list")
+      )
+        return "read";
+      if (["plan", "work", "review", "sync", "task.revise", "task.revise-tree"].includes(action))
+        return "exec";
+      return "write";
+    },
     description: `Multi-agent coordination and task orchestration.
 
 Usage (action-based API - preferred):
@@ -580,62 +705,116 @@ Usage (action-based API - preferred):
   
   // Crew: Review
   omp_messenger({ action: "review", target: "task-1" })          → Review impl${teamToolDescription}`,
-    parameters: Type.Object({
-      action: Type.Optional(Type.String({
-        description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
-      })),
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // CREW PARAMETERS
-      // ═══════════════════════════════════════════════════════════════════════
-      prd: Type.Optional(Type.String({ description: "PRD file path for plan action" })),
-      prompt: Type.Optional(Type.String({ description: "Inline prompt for plan action, or revision instructions for task.revise/task.revise-tree" })),
-      id: Type.Optional(Type.String({ description: "Task ID (task-N format)" })),
-      taskId: Type.Optional(Type.String({ description: "Swarm task ID (e.g., TASK-01) - for action-based claim/unclaim/complete" })),
-      title: Type.Optional(Type.String({ description: "Title for task.create" })),
-      dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task depends on (for task.create)" })),
-      role: Type.Optional(Type.String({ description: "Team role for task creation/planning (built-ins follow packaged pi-subagents vocabulary; profiles may define more)" })),
-      riskLabels: Type.Optional(Type.Array(Type.String(), { description: "Team risk labels for approval policy" })),
-      target: Type.Optional(Type.String({ description: "Task ID for review action" })),
-      summary: Type.Optional(Type.String({ description: "Summary for task.done" })),
-      evidence: Type.Optional(Type.Object({
-        commits: Type.Optional(Type.Array(Type.String())),
-        tests: Type.Optional(Type.Array(Type.String())),
-        prs: Type.Optional(Type.Array(Type.String()))
-      }, { description: "Evidence for task.done" })),
-      content: Type.Optional(Type.String({ description: "Content for task spec" })),
-      count: Type.Optional(Type.Number({ description: "Suggested number of subtasks for task.split" })),
-      subtasks: Type.Optional(Type.Array(
-        Type.Object({
-          title: Type.String(),
-          content: Type.Optional(Type.String()),
-        }),
-        { description: "Subtask definitions for task.split (execute phase)" }
-      )),
-      type: Type.Optional(StringEnum(["plan", "impl", "decision", "interface", "risk", "handoff"], { description: "Review type, or Team memory type for team.memory.*" })),
-      autoWork: Type.Optional(Type.Boolean({ description: "Auto-start autonomous work after plan completes (default: true, pass false to review plan first)" })),
-      autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
-      concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
-      model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
-      cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
-      limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
-      paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
-      name: Type.Optional(Type.String({ description: "Name for rename action or Team setup/profile/charter commands" })),
-      channel: Type.Optional(Type.String({ description: "Channel for send/claim routing or channels.delete. Deletion removes history and notifies members; main is protected." })),
-      channels: Type.Optional(Type.Array(Type.String(), { description: "Mesh channels for join / channels.join / channels.leave" })),
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // MESSAGING & COORDINATION PARAMETERS
-      // ═══════════════════════════════════════════════════════════════════════
-      spec: Type.Optional(Type.String({ description: "Path to spec/plan file" })),
-      notes: Type.Optional(Type.String({ description: "Completion notes" })),
-      to: Type.Optional(Type.Any({ description: "Target agent name (string) or multiple names (array)" })),
-      message: Type.Optional(Type.String({ description: "Message to send, Team setup/charter text, or Team memory note" })),
-      replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
-      gentle: Type.Optional(Type.Boolean({ description: "Deliver without interrupting the recipient (queued until its current step ends). Default: interrupt." })),
-      reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, task block, or approval rejection feedback" })),
-      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" }))
-    }) as unknown as PiSchema,
+    parameters: z
+      .object({
+        action: z
+          .string()
+          .describe("Action to perform (e.g., 'join', 'plan', 'work', 'task.start')")
+          .optional(),
+        prd: z.string().describe("PRD file path for plan action").optional(),
+        prompt: z
+          .string()
+          .describe(
+            "Inline prompt for plan action, or revision instructions for task.revise/task.revise-tree",
+          )
+          .optional(),
+        id: z.string().describe("Task ID (task-N format)").optional(),
+        taskId: z
+          .string()
+          .describe("Swarm task ID (e.g., TASK-01) - for action-based claim/unclaim/complete")
+          .optional(),
+        title: z.string().describe("Title for task.create").optional(),
+        dependsOn: z
+          .array(z.string())
+          .describe("Task IDs this task depends on (for task.create)")
+          .optional(),
+        role: z
+          .string()
+          .describe(
+            "Team role for task creation/planning (built-ins follow packaged pi-subagents vocabulary; profiles may define more)",
+          )
+          .optional(),
+        riskLabels: z.array(z.string()).describe("Team risk labels for approval policy").optional(),
+        target: z.string().describe("Task ID for review action").optional(),
+        summary: z.string().describe("Summary for task.done").optional(),
+        evidence: z
+          .object({
+            commits: z.array(z.string()).optional(),
+            tests: z.array(z.string()).optional(),
+            prs: z.array(z.string()).optional(),
+          })
+          .passthrough()
+          .describe("Evidence for task.done")
+          .optional(),
+        content: z.string().describe("Content for task spec").optional(),
+        count: z.number().describe("Suggested number of subtasks for task.split").optional(),
+        subtasks: z
+          .array(
+            z
+              .object({
+                title: z.string(),
+                content: z.string().optional(),
+              })
+              .passthrough(),
+          )
+          .describe("Subtask definitions for task.split (execute phase)")
+          .optional(),
+        type: z
+          .enum(["plan", "impl", "decision", "interface", "risk", "handoff"])
+          .describe("Review type, or Team memory type for team.memory.*")
+          .optional(),
+        autoWork: z
+          .boolean()
+          .describe(
+            "Auto-start autonomous work after plan completes (default: true, pass false to review plan first)",
+          )
+          .optional(),
+        autonomous: z.boolean().describe("Run work continuously until done/blocked").optional(),
+        concurrency: z.number().describe("Override worker concurrency").optional(),
+        cascade: z.boolean().describe("For task.reset - also reset dependent tasks").optional(),
+        limit: z
+          .number()
+          .describe("Number of events to return (for feed action, default 20)")
+          .optional(),
+        paths: z.array(z.string()).describe("Paths for reserve/release actions").optional(),
+        name: z
+          .string()
+          .describe("Name for rename action or Team setup/profile/charter commands")
+          .optional(),
+        channel: z
+          .string()
+          .describe(
+            "Channel for send/claim routing or channels.delete. Deletion removes history and notifies members; main is protected.",
+          )
+          .optional(),
+        channels: z
+          .array(z.string())
+          .describe("Mesh channels for join / channels.join / channels.leave")
+          .optional(),
+        spec: z.string().describe("Path to spec/plan file").optional(),
+        notes: z.string().describe("Completion notes").optional(),
+        to: z.any().describe("Target agent name (string) or multiple names (array)").optional(),
+        message: z
+          .string()
+          .describe("Message to send, Team setup/charter text, or Team memory note")
+          .optional(),
+        replyTo: z.string().describe("Message ID if this is a reply").optional(),
+        gentle: z
+          .boolean()
+          .describe(
+            "Deliver without interrupting the recipient (queued until its current step ends). Default: interrupt.",
+          )
+          .optional(),
+        reason: z
+          .string()
+          .describe("Reason for reservation, claim, task block, or approval rejection feedback")
+          .optional(),
+        autoRegisterPath: z
+          .enum(["add", "remove", "list"])
+          .describe("Manage auto-register paths: add/remove current folder, or list all")
+          .optional(),
+      })
+      .passthrough(),
 
     // Peer traffic renders in the same visual language as omp's hub cards (IRC ➤ out /
     // ⟵ in): status header with icon + accent title + dim meta, quoted body with a dim
@@ -644,24 +823,57 @@ Usage (action-based API - preferred):
     // ToolDefinition's type, but the TUI reads it off the tool object and the extension
     // tool proxy (applyToolProxy) forwards own properties, so attach it structurally.
     ...({ mergeCallAndResult: true } as object),
+    describeCall(args) {
+      const call = args as CrewParams;
+      const body = call.message ? [nativeText(call.message)] : undefined;
+      return { tool: { title: actionTitle(call), meta: actionMeta(call) }, body };
+    },
+    describeResult(result, _options, args) {
+      const call = args as CrewParams | undefined;
+      const output = result.content
+        .map((item) => (item.type === "text" ? item.text : ""))
+        .join("\n")
+        .trim();
+      return {
+        tool: { title: actionTitle(call), meta: actionMeta(call) },
+        tone: result.isError ? "error" : undefined,
+        body: output ? [nativeText(output)] : undefined,
+      };
+    },
     renderCall(args, _options, theme) {
       const call = args as CrewParams;
       if (call.action === "send" || call.action === "broadcast") {
-        const lines = [statusLine({ icon: "pending", title: `IRC ${theme.nav.selected} ${hubTarget(call)}` }, theme)];
+        const lines = [
+          statusLine(
+            { icon: "pending", title: `IRC ${theme.nav.selected} ${hubTarget(call)}` },
+            theme,
+          ),
+        ];
         const preview = call.message?.replace(/\s+/g, " ").trim();
         if (preview) lines.push(theme.fg("dim", `  │ ${preview}`));
         return statusCard(lines);
       }
-      return statusCard([statusLine({ icon: "pending", title: actionTitle(call), meta: actionMeta(call) }, theme)]);
+      return statusCard([
+        statusLine({ icon: "pending", title: actionTitle(call), meta: actionMeta(call) }, theme),
+      ]);
     },
     renderResult(result, options, theme, args) {
       const call = args as CrewParams | undefined;
       if (call && (call.action === "send" || call.action === "broadcast")) {
         const details = result.details && typeof result.details === "object" ? result.details : {};
-        const sent = "sent" in details && Array.isArray(details.sent) ? details.sent.filter((s): s is string => typeof s === "string") : [];
-        const failed = "failed" in details && Array.isArray(details.failed)
-          ? details.failed.filter((f): f is { name: string; error: string } => typeof f === "object" && f !== null && typeof (f as { name?: unknown }).name === "string")
-          : [];
+        const sent =
+          "sent" in details && Array.isArray(details.sent)
+            ? details.sent.filter((s): s is string => typeof s === "string")
+            : [];
+        const failed =
+          "failed" in details && Array.isArray(details.failed)
+            ? details.failed.filter(
+                (f): f is { name: string; error: string } =>
+                  typeof f === "object" &&
+                  f !== null &&
+                  typeof (f as { name?: unknown }).name === "string",
+              )
+            : [];
         const isBroadcast = call.action === "broadcast" || sent.length + failed.length > 1;
         const isError = result.isError === true || (sent.length === 0 && failed.length > 0);
         const meta: string[] = [];
@@ -672,32 +884,90 @@ Usage (action-based API - preferred):
           meta.push(theme.fg("success", "delivered"));
         }
         if (call.channel) meta.push(`#${call.channel}`);
-        const glyph = isError ? theme.fg("error", theme.status.error) : theme.styledSymbol("tool.irc", "accent");
-        const lines = [statusLine({ glyph, title: `IRC ${theme.nav.selected} ${hubTarget(call)}`, meta }, theme)];
+        const glyph = isError
+          ? theme.fg("error", theme.status.error)
+          : theme.styledSymbol("tool.irc", "accent");
+        const lines = [
+          statusLine({ glyph, title: `IRC ${theme.nav.selected} ${hubTarget(call)}`, meta }, theme),
+        ];
         if (isError) {
-          const reason = failed[0]?.error
-            ?? result.content.map(c => (c.type === "text" ? c.text : "")).join(" ").trim()
-            ?? "send failed";
+          const reason =
+            failed[0]?.error ??
+            result.content
+              .map((c) => (c.type === "text" ? c.text : ""))
+              .join(" ")
+              .trim() ??
+            "send failed";
           lines.push(theme.fg("error", `  ✗ ${reason}`));
         } else if (call.message) {
-          lines.push(...ircQuoteBody(call.message, theme, options.expanded ? Number.MAX_SAFE_INTEGER : 3));
+          lines.push(
+            ...ircQuoteBody(call.message, theme, options.expanded ? Number.MAX_SAFE_INTEGER : 3),
+          );
         }
         return statusCard(lines);
       }
       const isError = result.isError === true;
-      const firstLine = result.content.map(c => (c.type === "text" ? c.text : "")).join("").trim().split("\n")[0] ?? "";
-      const lines = [statusLine({ icon: isError ? "error" : "success", title: actionTitle(call), meta: actionMeta(call) }, theme)];
-      if (firstLine) lines.push(`  ${isError ? theme.fg("error", firstLine) : theme.fg("muted", firstLine)}`);
+      const firstLine =
+        result.content
+          .map((c) => (c.type === "text" ? c.text : ""))
+          .join("")
+          .trim()
+          .split("\n")[0] ?? "";
+      const lines = [
+        statusLine(
+          { icon: isError ? "error" : "success", title: actionTitle(call), meta: actionMeta(call) },
+          theme,
+        ),
+      ];
+      if (firstLine)
+        lines.push(`  ${isError ? theme.fg("error", firstLine) : theme.fg("muted", firstLine)}`);
       return statusCard(lines);
     },
 
     async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
       const params = rawParams as CrewParams;
+      if (params.model !== undefined) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Per-call model overrides are unavailable; omit model to use configured agent routing.",
+            },
+          ],
+          details: { error: "per_call_model_unsupported" },
+          isError: true,
+        };
+      }
       captureStatusContext(ctx);
 
       const action = params.action;
+      if (
+        (ctx.agent?.kind === "sub" || state.isCrewWorker) &&
+        (action === "work.stop" ||
+          (action === "work" && params.autonomous) ||
+          action === "plan.cancel")
+      ) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Autonomous and planning lifecycle controls belong to the main session.",
+            },
+          ],
+          details: { error: "main_session_required" },
+          isError: true,
+        };
+      }
       if (!action) {
         return handlers.executeStatus(state, mesh, ctx.cwd);
+      }
+      if (
+        ctx.agent?.kind !== "sub" &&
+        !state.isCrewWorker &&
+        ((action === "plan" && !isPlanningForCwd(ctx.cwd)) ||
+          (action === "work" && params.autonomous && !isAutonomousForCwd(ctx.cwd)))
+      ) {
+        ownsCrewLifecycle = true;
       }
 
       const result = await executeCrewAction(
@@ -707,10 +977,21 @@ Usage (action-based API - preferred):
         mesh,
         ctx,
         deliverMessage,
-        updateStatus,
+        (currentCtx) => {
+          if (action === "plan" && ownsCrewLifecycle && isPlanningForCwd(currentCtx.cwd)) {
+            ownedPlanningRunId = planningState.runId;
+          }
+          updateStatus(currentCtx);
+        },
         (type, data) => pi.appendEntry(type, data),
-        { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention },
-        signal
+        {
+          stuckThreshold: config.stuckThreshold,
+          crewEventsInFeed: config.crewEventsInFeed,
+          nameTheme,
+          feedRetention: config.feedRetention,
+          ownerSignal: ownedWorkAbort.signal,
+        },
+        signal,
       );
 
       if (action === "join" && state.registered && config.registrationContext) {
@@ -725,7 +1006,7 @@ Usage (action-based API - preferred):
       }
 
       return result;
-    }
+    },
   });
 
   // ===========================================================================
@@ -737,14 +1018,27 @@ Usage (action-based API - preferred):
     config = loadConfig(state.cwd);
     const wasRegistered = state.registered;
     if (wasRegistered) {
-      try { await mesh.leave(); } catch { }
+      try {
+        await mesh.leave();
+      } catch {}
     }
     mesh.close();
     state.channels = config.mesh.channels;
-    mesh = createMesh({ config, base: baseDir, state, deliver: deliverMessage, onStatusChange: () => { if (latestCtx) updateStatus(latestCtx); } });
+    mesh = createMesh({
+      config,
+      base: baseDir,
+      state,
+      deliver: deliverMessage,
+      onStatusChange: () => {
+        updateStatusFromBackground();
+      },
+    });
     if (wasRegistered) {
       if (await mesh.join(ctx, { nameTheme })) {
-        ctx.ui.notify(`Rejoined mesh as ${state.agentName} (${mesh.kind === "mesh" ? config.mesh.url : "local"}, #${mesh.channels().join(",")})`, "info");
+        ctx.ui.notify(
+          `Rejoined mesh as ${state.agentName} (${mesh.kind === "mesh" ? config.mesh.url : "local"}, #${mesh.channels().join(",")})`,
+          "info",
+        );
       } else {
         ctx.ui.notify("Mesh settings saved, but rejoining failed — check URL/token", "error");
       }
@@ -757,10 +1051,12 @@ Usage (action-based API - preferred):
     await ctx.ui.custom<void>(
       (tui, theme, _keybindings, done) => {
         return new MessengerConfigOverlay(tui, theme, done, ctx.cwd, {
-          onMeshSettingsSaved: () => { pending = applyMeshSettings(ctx); },
+          onMeshSettingsSaved: () => {
+            pending = applyMeshSettings(ctx);
+          },
         });
       },
-      { overlay: true }
+      { overlay: true },
     );
     if (pending) await pending;
   }
@@ -768,10 +1064,11 @@ Usage (action-based API - preferred):
   pi.registerCommand("messenger", {
     description: "Open messenger overlay, or 'config' to manage mesh settings",
     handler: async (args, ctx) => {
+      if (ctx.agent?.kind === "sub" || state.isCrewWorker) return;
       captureStatusContext(ctx);
       if (!ctx.hasUI) return;
 
-      if (args[0] === "config") {
+      if (args.trim().split(/\s+/, 1)[0] === "config") {
         await openConfigOverlay(ctx);
         return;
       }
@@ -779,7 +1076,10 @@ Usage (action-based API - preferred):
       // /messenger - open chat overlay (auto-joins if not registered)
       if (!state.registered) {
         if (!(await mesh.join(ctx, { nameTheme }))) {
-          ctx.ui.notify("Failed to join agent mesh — press c in /messenger or run /messenger config", "error");
+          ctx.ui.notify(
+            "Failed to join agent mesh — press c in /messenger or run /messenger config",
+            "error",
+          );
           await openConfigOverlay(ctx);
           return;
         }
@@ -793,38 +1093,61 @@ Usage (action-based API - preferred):
         return;
       }
 
+      const openingEpoch = overlayEpoch;
       let openConfigAfter = false;
       const callbacks: OverlayCallbacks = {
         onBackground: (snapshotText) => {
+          if (openingEpoch !== overlayEpoch) return;
           overlayHandle?.setHidden(true);
-          pi.sendMessage({
-            customType: "crew_snapshot",
-            content: snapshotText,
-            display: true,
-          }, { triggerTurn: true });
+          pi.sendMessage(
+            {
+              customType: "crew_snapshot",
+              content: snapshotText,
+              display: true,
+            },
+            { triggerTurn: true },
+          );
         },
-        onOpenConfig: () => { openConfigAfter = true; },
+        onOpenConfig: () => {
+          openConfigAfter = true;
+        },
       };
 
       const snapshot = await ctx.ui.custom<string | undefined>(
         (tui, theme, _keybindings, done) => {
           overlayTui = tui;
-          return new MessengerOverlay(tui, theme, state, mesh, done, callbacks, ctx.cwd);
+          return new MessengerOverlay(
+            tui,
+            theme,
+            state,
+            mesh,
+            done,
+            callbacks,
+            ctx.cwd,
+            ctx.agent?.id,
+            ctx.sessionManager.getSessionId(),
+            ownedWorkAbort.signal,
+          );
         },
         {
           overlay: true,
           onHandle: (handle) => {
-            overlayHandle = handle;
+            if (openingEpoch === overlayEpoch) overlayHandle = handle;
+            else handle.hide();
           },
-        }
+        },
       );
+      if (openingEpoch !== overlayEpoch) return;
 
       if (snapshot) {
-        pi.sendMessage({
-          customType: "crew_snapshot",
-          content: snapshot,
-          display: true,
-        }, { triggerTurn: true });
+        pi.sendMessage(
+          {
+            customType: "crew_snapshot",
+            content: snapshot,
+            display: true,
+          },
+          { triggerTurn: true },
+        );
       }
 
       // Overlay closed
@@ -836,13 +1159,12 @@ Usage (action-based API - preferred):
       if (openConfigAfter) {
         await openConfigOverlay(ctx);
       }
-    }
+    },
   });
 
   // ===========================================================================
   // Message Renderer
   // ===========================================================================
-
 
   // ===========================================================================
   // Activity Tracking
@@ -890,17 +1212,29 @@ Usage (action-based API - preferred):
   function debouncedLogEdit(filePath: string, cwd: string): void {
     const existing = pendingEdits.get(filePath);
     if (existing) clearTimeout(existing);
-    pendingEdits.set(filePath, setTimeout(() => {
-      logFeedEvent(cwd, state.agentName, "edit", filePath);
-      pendingEdits.delete(filePath);
-    }, EDIT_DEBOUNCE_MS));
+    pendingEdits.set(
+      filePath,
+      setTimeout(() => {
+        try {
+          logFeedEvent(cwd, state.agentName, "edit", filePath);
+        } catch (error) {
+          console.error("omp-messenger edit activity failed", error);
+        } finally {
+          pendingEdits.delete(filePath);
+        }
+      }, EDIT_DEBOUNCE_MS),
+    );
   }
 
   function scheduleRegistryFlush(ctx: ExtensionContext): void {
     if (state.registryFlushTimer) return;
     state.registryFlushTimer = setTimeout(() => {
       state.registryFlushTimer = null;
-      mesh.publish(ctx);
+      try {
+        mesh.publish(latestCtx ?? ctx);
+      } catch (error) {
+        console.error("omp-messenger registry update failed", error);
+      }
     }, REGISTRY_FLUSH_MS);
   }
 
@@ -909,7 +1243,9 @@ Usage (action-based API - preferred):
   }
 
   function isTestRun(command: string): boolean {
-    return /\b(npm\s+test|npx\s+(jest|vitest|mocha)|pytest|go\s+test|cargo\s+test|bun\s+test)\b/.test(command);
+    return /\b(npm\s+test|npx\s+(jest|vitest|mocha)|pytest|go\s+test|cargo\s+test|bun\s+test)\b/.test(
+      command,
+    );
   }
 
   function extractCommitMessage(command: string): string {
@@ -934,24 +1270,58 @@ Usage (action-based API - preferred):
   function trackRecentCommit(): void {
     recentCommit = true;
     if (recentCommitTimer) clearTimeout(recentCommitTimer);
-    recentCommitTimer = setTimeout(() => { recentCommit = false; }, RECENT_WINDOW_MS);
+    recentCommitTimer = setTimeout(() => {
+      recentCommit = false;
+    }, RECENT_WINDOW_MS);
   }
 
   function trackRecentTest(): void {
     recentTestRuns++;
     if (recentTestTimer) clearTimeout(recentTestTimer);
-    recentTestTimer = setTimeout(() => { recentTestRuns = 0; }, RECENT_WINDOW_MS);
+    recentTestTimer = setTimeout(() => {
+      recentTestRuns = 0;
+    }, RECENT_WINDOW_MS);
   }
 
   function trackRecentEdit(): void {
     recentEdits++;
     if (recentEditTimer) clearTimeout(recentEditTimer);
-    recentEditTimer = setTimeout(() => { recentEdits = 0; }, RECENT_WINDOW_MS);
+    recentEditTimer = setTimeout(() => {
+      recentEdits = 0;
+    }, RECENT_WINDOW_MS);
   }
 
   function shortenPath(filePath: string): string {
     const parts = filePath.split("/");
     return parts.length > 2 ? parts.slice(-2).join("/") : filePath;
+  }
+
+  async function writeTargets(toolName: string, input: Record<string, unknown>): Promise<string[]> {
+    const targets: string[] = [];
+    if ((toolName === "write" || toolName === "edit") && typeof input.path === "string") {
+      targets.push(unwrapEditHeaderPath(input.path));
+    }
+    if (toolName === "ast_edit" && Array.isArray(input.paths)) {
+      targets.push(
+        ...input.paths.flatMap((path: unknown) =>
+          typeof path === "string"
+            ? path
+                .split(";")
+                .map((part) => part.trim())
+                .filter(Boolean)
+            : [],
+        ),
+      );
+    }
+    if ((toolName === "edit" || toolName === "apply_patch") && typeof input.input === "string") {
+      const mode = /^\*\*\* Edit File:/m.test(input.input)
+        ? "sloppy"
+        : /^\[[^\r\n]+#[0-9A-Fa-f]{4}\]\s*$/m.test(input.input)
+          ? "hashline"
+          : "apply_patch";
+      targets.push(...freeformEditTargets(input.input, mode));
+    }
+    return [...new Set(targets)];
   }
 
   pi.on("tool_call", async (event, ctx) => {
@@ -964,10 +1334,10 @@ Usage (action-based API - preferred):
     const toolName = event.toolName;
     const input = event.input as Record<string, unknown>;
 
-    if (toolName === "write" || toolName === "edit") {
-      const path = input.path as string;
-      if (path) {
-        setCurrentActivity(`editing ${shortenPath(path)}`);
+    if (["write", "edit", "apply_patch", "ast_edit"].includes(toolName)) {
+      const paths = await writeTargets(toolName, input);
+      if (paths.length) setCurrentActivity(`editing ${shortenPath(paths[0])}`);
+      for (const path of paths) {
         debouncedLogEdit(path, ctx.cwd);
         trackRecentEdit();
       }
@@ -996,9 +1366,8 @@ Usage (action-based API - preferred):
     const toolName = event.toolName;
     const input = event.input as Record<string, unknown>;
 
-    if (toolName === "write" || toolName === "edit") {
-      const path = input.path as string;
-      if (path) {
+    if (!event.isError && ["write", "edit", "apply_patch", "ast_edit"].includes(toolName)) {
+      for (const path of await writeTargets(toolName, input)) {
         setLastToolCall(`${toolName}: ${shortenPath(path)}`);
         addModifiedFile(path);
       }
@@ -1033,6 +1402,7 @@ Usage (action-based API - preferred):
   // ===========================================================================
 
   pi.on("session_start", async (_event, ctx) => {
+    ownerSessionId = ctx.sessionManager?.getSessionId?.();
     captureStatusContext(ctx);
     state.cwd = ctx.cwd;
     config = loadConfig(state.cwd);
@@ -1051,28 +1421,33 @@ Usage (action-based API - preferred):
         state,
         deliver: deliverMessage,
         onStatusChange: () => {
-          if (latestCtx) updateStatus(latestCtx);
+          updateStatusFromBackground();
         },
       });
     }
     state.scopeToFolder = config.scopeToFolder;
     nameTheme.theme = config.nameTheme;
     nameTheme.customWords = config.nameWords;
-    resetAutonomousContinueGuard();
-    startStatusHeartbeat();
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type === "custom" && entry.customType === "crew-state") {
-        restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
+    if (ctx.agent?.kind !== "sub" && !state.isCrewWorker) {
+      resetAutonomousContinueGuard();
+      for (const entry of ctx.sessionManager.getEntries()) {
+        if (entry.type === "custom" && entry.customType === "crew-state") {
+          restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
+          ownsCrewLifecycle = isAutonomousForCwd(ctx.cwd);
+        }
+      }
+      const { staleCleared } = restorePlanningState(state.cwd);
+      if (staleCleared && ctx.hasUI) {
+        ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
       }
     }
-    const { staleCleared } = restorePlanningState(state.cwd);
-    if (staleCleared && ctx.hasUI) {
-      ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
-    }
+    startStatusHeartbeat();
 
     state.isHuman = ctx.hasUI;
 
-    const shouldAutoRegister = state.isCrewWorker || config.autoRegister ||
+    const shouldAutoRegister =
+      state.isCrewWorker ||
+      config.autoRegister ||
       matchesAutoRegisterPath(state.cwd, config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
@@ -1095,18 +1470,16 @@ Usage (action-based API - preferred):
   });
 
   function maybeAutoOpenCrewOverlay(ctx: ExtensionContext): void {
+    if (ctx.agent?.kind === "sub" || state.isCrewWorker) return;
     const cwd = ctx.cwd;
     if (config.autoOverlayPlanning) {
       markPlanningOverlayPending(cwd);
     }
 
     const autonomousPending =
-      config.autoOverlay &&
-      autonomousState.active &&
-      autonomousState.autoOverlayPending;
+      config.autoOverlay && autonomousState.active && autonomousState.autoOverlayPending;
 
-    const planningPending =
-      config.autoOverlayPlanning ? getPlanningOverlayPending(cwd) : null;
+    const planningPending = config.autoOverlayPlanning ? getPlanningOverlayPending(cwd) : null;
 
     if ((!autonomousPending && !planningPending) || !ctx.hasUI || overlayTui || overlayOpening) {
       return;
@@ -1117,60 +1490,127 @@ Usage (action-based API - preferred):
     }
 
     const planningRunId = planningPending
-      ? consumePlanningOverlayPending(cwd)?.runId ?? null
+      ? (consumePlanningOverlayPending(cwd)?.runId ?? null)
       : null;
 
     overlayOpening = true;
+    const openingEpoch = overlayEpoch;
     const callbacks: OverlayCallbacks = {
       onBackground: (snapshotText) => {
+        if (openingEpoch !== overlayEpoch) return;
         overlayHandle?.setHidden(true);
-        pi.sendMessage({
-          customType: "crew_snapshot",
-          content: snapshotText,
-          display: true,
-        }, { triggerTurn: true });
+        pi.sendMessage(
+          {
+            customType: "crew_snapshot",
+            content: snapshotText,
+            display: true,
+          },
+          { triggerTurn: true },
+        );
       },
     };
 
-    ctx.ui.custom<string | undefined>(
-      (tui, theme, _keybindings, done) => {
-        overlayTui = tui;
-        return new MessengerOverlay(tui, theme, state, mesh, done, callbacks, ctx.cwd);
-      },
-      {
-        overlay: true,
-        onHandle: (handle) => {
-          overlayHandle = handle;
+    ctx.ui
+      .custom<string | undefined>(
+        (tui, theme, _keybindings, done) => {
+          overlayTui = tui;
+          return new MessengerOverlay(
+            tui,
+            theme,
+            state,
+            mesh,
+            done,
+            callbacks,
+            ctx.cwd,
+            ctx.agent?.id,
+            ctx.sessionManager.getSessionId(),
+            ownedWorkAbort.signal,
+          );
         },
-      }
-    ).then((snapshot) => {
-      if (planningRunId) {
-        dismissPlanningOverlayRun(planningRunId);
-      }
-      if (snapshot) {
-        pi.sendMessage({
-          customType: "crew_snapshot",
-          content: snapshot,
-          display: true,
-        }, { triggerTurn: true });
-      }
-      clearAllUnreadCounts();
-      overlayOpening = false;
-      overlayHandle = null;
-      overlayTui = null;
-      updateStatus(ctx);
-    }).catch(() => {
-      overlayOpening = false;
-      overlayHandle = null;
-      overlayTui = null;
-      if (config.autoOverlayPlanning) {
-        markPlanningOverlayPending(cwd);
-      }
-    });
+        {
+          overlay: true,
+          onHandle: (handle) => {
+            if (openingEpoch === overlayEpoch) overlayHandle = handle;
+            else handle.hide();
+          },
+        },
+      )
+      .then((snapshot) => {
+        if (openingEpoch !== overlayEpoch) return;
+        if (planningRunId) {
+          dismissPlanningOverlayRun(planningRunId);
+        }
+        if (snapshot) {
+          pi.sendMessage(
+            {
+              customType: "crew_snapshot",
+              content: snapshot,
+              display: true,
+            },
+            { triggerTurn: true },
+          );
+        }
+        clearAllUnreadCounts();
+        overlayOpening = false;
+        overlayHandle = null;
+        overlayTui = null;
+        updateStatus(ctx);
+      })
+      .catch(() => {
+        if (openingEpoch !== overlayEpoch) return;
+        overlayOpening = false;
+        overlayHandle = null;
+        overlayTui = null;
+        if (config.autoOverlayPlanning) {
+          markPlanningOverlayPending(cwd);
+        }
+      });
   }
+
+  function onSessionReplacement(ctx: ExtensionContext): void {
+    captureStatusContext(ctx);
+    if (ctx.agent?.kind === "sub" || state.isCrewWorker) return;
+    ownedWorkAbort.abort();
+    if (ownerSessionId && state.cwd) {
+      shutdownLobbyWorkers(state.cwd, ownerSessionId);
+      shutdownAllWorkers(state.cwd, ownerSessionId);
+    }
+    if (
+      ownedPlanningRunId &&
+      planningState.runId === ownedPlanningRunId &&
+      isPlanningForCwd(state.cwd)
+    ) {
+      cancelPlanningRun(state.cwd);
+    }
+    ownedPlanningRunId = null;
+    if (ownsCrewLifecycle) {
+      if (isAutonomousForCwd(state.cwd)) stopAutonomous("manual");
+      consumePendingAutoWork(state.cwd);
+      ownsCrewLifecycle = false;
+    }
+    resetAutonomousContinueGuard();
+    overlayEpoch++;
+    overlayHandle?.hide();
+    overlayHandle = null;
+    overlayTui = null;
+    overlayOpening = false;
+    if (state.registryFlushTimer) {
+      clearTimeout(state.registryFlushTimer);
+      state.registryFlushTimer = null;
+    }
+    ownerSessionId = ctx.sessionManager?.getSessionId?.();
+    ownedWorkAbort = new AbortController();
+    state.cwd = ctx.cwd;
+    if (state.registered) mesh.publish(ctx);
+    updateStatus(ctx);
+  }
+
+  pi.on("session_switch", async (_event, ctx) => onSessionReplacement(ctx));
+  pi.on("session_branch", async (_event, ctx) => onSessionReplacement(ctx));
 
   pi.on("session_tree", async (_event, ctx) => {
     captureStatusContext(ctx);
+    if (ctx.agent?.kind === "sub" || state.isCrewWorker) return;
     const { staleCleared } = restorePlanningState(ctx.cwd);
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
@@ -1189,7 +1629,7 @@ Usage (action-based API - preferred):
       const msg = event.message as unknown as Record<string, unknown> | undefined;
       if (msg && msg.role === "assistant" && msg.usage) {
         const usage = msg.usage as { totalTokens?: number; input?: number; output?: number };
-        const total = usage.totalTokens ?? ((usage.input ?? 0) + (usage.output ?? 0));
+        const total = usage.totalTokens ?? (usage.input ?? 0) + (usage.output ?? 0);
         if (total > 0) {
           state.session.tokens += total;
           scheduleRegistryFlush(ctx);
@@ -1204,48 +1644,63 @@ Usage (action-based API - preferred):
   // Crew Autonomous Mode Continuation
   // ===========================================================================
 
-  pi.on("agent_end", async (_event, ctx) => {
-    if (state.isCrewWorker) {
+  pi.on("agent_end", async (event, ctx) => {
+    if (
+      event.willContinue ||
+      event.awaitingAsyncWork ||
+      ctx.agent?.kind === "sub" ||
+      state.isCrewWorker
+    ) {
       return;
     }
 
     if (!state.registered) {
-      if (autonomousState.active) {
+      if (isAutonomousForCwd(ctx.cwd)) {
         stopAutonomous("manual");
         pi.appendEntry("crew-state", autonomousState);
         resetAutonomousContinueGuard();
         if (ctx.hasUI) {
-          ctx.ui.notify("Autonomous stopped: this session is not registered in omp-messenger.", "warning");
+          ctx.ui.notify(
+            "Autonomous stopped: this session is not registered in omp-messenger.",
+            "warning",
+          );
         }
       }
       return;
     }
 
     // --- Auto-work after plan completion ---
-    const autoWork = consumePendingAutoWork();
-    if (autoWork && !overlayTui) {
+    const autoWork = overlayTui ? null : consumePendingAutoWork(ctx.cwd);
+    if (autoWork) {
       const cwd = autoWork.cwd;
       const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
-      const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-      const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(cwd, t));
+      const readyTasks = crewStore.getReadyTasks(cwd, {
+        advisory: crewConfig.dependencies === "advisory",
+      });
+      const startableTasks = readyTasks.filter((t) => !teamStore.taskNeedsApproval(cwd, t));
       if (startableTasks.length > 0) {
         const plan = crewStore.getPlan(cwd);
         const label = plan ? crewStore.getPlanLabel(plan) : "plan";
-        pi.sendMessage({
-          customType: "crew_auto_work",
-          content: `Plan complete — ${startableTasks.length} task(s) ready for ${label}. Starting autonomous work.\n\nCall: omp_messenger({ action: "work", autonomous: true })`,
-          display: true,
-        }, { triggerTurn: true, deliverAs: "steer" });
+        pi.sendMessage(
+          {
+            customType: "crew_auto_work",
+            content: `Plan complete — ${startableTasks.length} task(s) ready for ${label}. Starting autonomous work.\n\nCall: omp_messenger({ action: "work", autonomous: true })`,
+            display: true,
+          },
+          { triggerTurn: true, deliverAs: "steer" },
+        );
         return;
       }
       if (readyTasks.length > 0) {
-        const rejected = readyTasks.filter(t => teamStore.taskNeedsRevision(cwd, t));
-        const pending = readyTasks.filter(t => teamStore.taskPendingApproval(cwd, t));
+        const rejected = readyTasks.filter((t) => teamStore.taskNeedsRevision(cwd, t));
+        const pending = readyTasks.filter((t) => teamStore.taskPendingApproval(cwd, t));
         pi.sendMessage({
-          customType: rejected.length > 0 ? "crew_auto_work_needs_revision" : "crew_auto_work_needs_approval",
-          content: rejected.length > 0
-            ? `Plan complete — ${rejected.length} ready task(s) need revision before autonomous work can start.`
-            : `Plan complete — ${pending.length} ready task(s) need lead approval before autonomous work can start.`,
+          customType:
+            rejected.length > 0 ? "crew_auto_work_needs_revision" : "crew_auto_work_needs_approval",
+          content:
+            rejected.length > 0
+              ? `Plan complete — ${rejected.length} ready task(s) need revision before autonomous work can start.`
+              : `Plan complete — ${pending.length} ready task(s) need lead approval before autonomous work can start.`,
           display: true,
         });
         return;
@@ -1274,21 +1729,26 @@ Usage (action-based API - preferred):
       pi.appendEntry("crew-state", autonomousState);
       resetAutonomousContinueGuard();
       if (ctx.hasUI) {
-        ctx.ui.notify(`Autonomous stopped: max waves (${crewConfig.work.maxWaves}) reached`, "warning");
+        ctx.ui.notify(
+          `Autonomous stopped: max waves (${crewConfig.work.maxWaves}) reached`,
+          "warning",
+        );
       }
       return;
     }
 
     // Check for ready tasks
-    const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(cwd, t));
+    const readyTasks = crewStore.getReadyTasks(cwd, {
+      advisory: crewConfig.dependencies === "advisory",
+    });
+    const startableTasks = readyTasks.filter((t) => !teamStore.taskNeedsApproval(cwd, t));
 
     if (startableTasks.length === 0) {
       // No ready tasks - check if all done or blocked
       const allTasks = crewStore.getTasks(cwd);
-      const allDone = allTasks.every(t => t.status === "done");
-      const needsApproval = readyTasks.filter(t => teamStore.taskPendingApproval(cwd, t));
-      const rejected = readyTasks.filter(t => teamStore.taskNeedsRevision(cwd, t));
+      const allDone = allTasks.every((t) => t.status === "done");
+      const needsApproval = readyTasks.filter((t) => teamStore.taskPendingApproval(cwd, t));
+      const rejected = readyTasks.filter((t) => teamStore.taskNeedsRevision(cwd, t));
 
       stopAutonomous(allDone ? "completed" : "blocked");
 
@@ -1299,16 +1759,22 @@ Usage (action-based API - preferred):
         } else if (rejected.length > 0) {
           ctx.ui.notify(`Autonomous stopped: ${rejected.length} task(s) need revision`, "warning");
         } else if (needsApproval.length > 0) {
-          ctx.ui.notify(`Autonomous stopped: ${needsApproval.length} task(s) need lead approval`, "warning");
+          ctx.ui.notify(
+            `Autonomous stopped: ${needsApproval.length} task(s) need lead approval`,
+            "warning",
+          );
         } else {
-          const blocked = allTasks.filter(t => t.status === "blocked");
+          const blocked = allTasks.filter((t) => t.status === "blocked");
           ctx.ui.notify(`Autonomous stopped: ${blocked.length} task(s) blocked`, "warning");
         }
       }
       return;
     }
 
-    const continueSignature = `${cwd}:${autonomousState.waveNumber}:${startableTasks.map(task => task.id).sort().join(",")}`;
+    const continueSignature = `${cwd}:${autonomousState.waveNumber}:${startableTasks
+      .map((task) => task.id)
+      .sort()
+      .join(",")}`;
     const continueRepeatCount = trackAutonomousContinue(continueSignature);
     if (continueRepeatCount >= AUTONOMOUS_CONTINUE_REPEAT_LIMIT) {
       stopAutonomous("manual");
@@ -1331,11 +1797,14 @@ Usage (action-based API - preferred):
     // Continue to next wave
     // Note: waveNumber was already incremented by addWaveResult() in work.ts
     const plan = crewStore.getPlan(cwd);
-    pi.sendMessage({
-      customType: "crew_continue",
-      content: `Continuing autonomous work on ${plan?.prd ?? "plan"}. Wave ${autonomousState.waveNumber} with ${startableTasks.length} ready task(s).`,
-      display: true
-    }, { triggerTurn: true, deliverAs: "steer" });
+    pi.sendMessage(
+      {
+        customType: "crew_continue",
+        content: `Continuing autonomous work on ${plan?.prd ?? "plan"}. Wave ${autonomousState.waveNumber} with ${startableTasks.length} ready task(s).`,
+        display: true,
+      },
+      { triggerTurn: true, deliverAs: "steer" },
+    );
 
     // The steer message will trigger the LLM to call work again
   });
@@ -1343,18 +1812,29 @@ Usage (action-based API - preferred):
   pi.on("session_shutdown", async (_event, ctx) => {
     latestCtx = null;
     const cwd = ctx.cwd || state.cwd;
-    if (!state.isCrewWorker) {
-      if (cwd) {
-        shutdownLobbyWorkers(cwd);
-      }
-      shutdownAllWorkers();
+    if (ctx.agent?.kind !== "sub" && !state.isCrewWorker && cwd) {
+      ownedWorkAbort.abort();
+      const sessionId = ctx.sessionManager.getSessionId();
+      shutdownLobbyWorkers(cwd, sessionId);
+      shutdownAllWorkers(cwd, sessionId);
     }
     stopStatusHeartbeat();
+    unsubscribeLiveWorkers();
+    overlayEpoch++;
     overlayOpening = false;
     overlayHandle = null;
     overlayTui = null;
-    if (cwd && isPlanningForCwd(cwd) && planningState.pid === process.pid) {
-      clearPlanningState(cwd);
+    if (
+      ctx.agent?.kind !== "sub" &&
+      !state.isCrewWorker &&
+      ownsCrewLifecycle &&
+      cwd &&
+      isPlanningForCwd(cwd) &&
+      ownedPlanningRunId !== null &&
+      planningState.runId === ownedPlanningRunId
+    ) {
+      cancelPlanningRun(cwd);
+      ownedPlanningRunId = null;
     }
     if (cwd && state.registered) {
       logFeedEvent(cwd, state.agentName, "leave");
@@ -1367,28 +1847,73 @@ Usage (action-based API - preferred):
       clearTimeout(timer);
     }
     pendingEdits.clear();
-    if (recentCommitTimer) { clearTimeout(recentCommitTimer); recentCommitTimer = null; }
-    if (recentTestTimer) { clearTimeout(recentTestTimer); recentTestTimer = null; }
-    if (recentEditTimer) { clearTimeout(recentEditTimer); recentEditTimer = null; }
+    if (recentCommitTimer) {
+      clearTimeout(recentCommitTimer);
+      recentCommitTimer = null;
+    }
+    if (recentTestTimer) {
+      clearTimeout(recentTestTimer);
+      recentTestTimer = null;
+    }
+    if (recentEditTimer) {
+      clearTimeout(recentEditTimer);
+      recentEditTimer = null;
+    }
     mesh.close();
-    try { await mesh.leave(); } catch { }
+    try {
+      await mesh.leave();
+    } catch {}
   });
 
   // ===========================================================================
   // Reservation Enforcement
   // ===========================================================================
 
-  pi.on("tool_call", async (event, _ctx) => {
-    if (!["edit", "write"].includes(event.toolName)) return;
+  pi.on("tool_call", async (event, ctx) => {
+    if (!["edit", "write", "apply_patch", "ast_edit"].includes(event.toolName)) return;
 
     const input = event.input as Record<string, unknown>;
-    const filePath = typeof input.path === "string" ? input.path : null;
-    if (!filePath) return;
-
-    const conflicts = findReservationConflicts(filePath, mesh.peers());
-    if (conflicts.length === 0) return;
-
-    const c = conflicts[0];
+    const peers = mesh.peers();
+    let filePath = "";
+    let conflict: ReservationConflict | undefined;
+    for (const target of await writeTargets(event.toolName, input)) {
+      conflict = findReservationConflicts(target, peers)[0];
+      if (!conflict && event.toolName === "ast_edit") {
+        const wildcard = target.search(/[*?[\]{}]/);
+        const beforeWildcard = wildcard < 0 ? target : target.slice(0, wildcard);
+        const prefix =
+          wildcard < 0 || beforeWildcard.endsWith("/")
+            ? beforeWildcard || "."
+            : dirname(beforeWildcard || ".");
+        const absoluteTarget = resolve(normalizeCwd(ctx.cwd), prefix);
+        for (const peer of peers) {
+          for (const reservation of peer.reservations ?? []) {
+            const absoluteReservation = resolve(normalizeCwd(peer.cwd), reservation.pattern);
+            if (
+              absoluteReservation === absoluteTarget ||
+              absoluteReservation.startsWith(absoluteTarget + sep) ||
+              absoluteTarget.startsWith(absoluteReservation + sep)
+            ) {
+              conflict = {
+                path: target,
+                agent: peer.name,
+                pattern: reservation.pattern,
+                reason: reservation.reason,
+                registration: peer,
+              };
+              break;
+            }
+          }
+          if (conflict) break;
+        }
+      }
+      if (conflict) {
+        filePath = target;
+        break;
+      }
+    }
+    if (!conflict) return;
+    const c = conflict;
     const folder = extractFolder(c.registration.cwd);
     const locationPart = c.registration.gitBranch
       ? ` (in ${folder} on ${c.registration.gitBranch})`
@@ -1397,7 +1922,9 @@ Usage (action-based API - preferred):
     const lines = [filePath, `Reserved by: ${c.agent}${locationPart}`];
     if (c.reason) lines.push(`Reason: "${c.reason}"`);
     lines.push("");
-    lines.push(`Coordinate via omp_messenger({ action: "send", to: "${c.agent}", message: "..." })`);
+    lines.push(
+      `Coordinate via omp_messenger({ action: "send", to: "${c.agent}", message: "..." })`,
+    );
 
     return { block: true, reason: lines.join("\n") };
   });

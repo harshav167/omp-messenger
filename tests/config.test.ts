@@ -68,7 +68,6 @@ describe("config autoOverlayPlanning", () => {
     const cfg = loadConfig(dirs.cwd);
     expect(cfg.stuckWakeAgent).toBe("project-manager");
   });
-
 });
 
 describe("mesh config", () => {
@@ -82,6 +81,9 @@ describe("mesh config", () => {
     dirs = createTempCrewDirs();
     homedirMock.mockReset();
     homedirMock.mockReturnValue(path.join(dirs.root, ".omp-home"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", path.join(dirs.root, ".omp-home", ".omp", "agent"));
+    delete process.env.OMP_PROFILE;
+    delete process.env.PI_PROFILE;
     delete process.env.OMP_MESSENGER_MESH_URL;
     delete process.env.OMP_MESSENGER_MESH_TOKEN;
     delete process.env.OMP_MESSENGER_MESH_CHANNELS;
@@ -191,15 +193,29 @@ describe("mesh config", () => {
     const { saveMeshSettings, getStoredMeshSettings, loadConfig } = await loadConfigModule();
     const home = path.join(dirs.root, ".omp-home");
 
-    saveMeshSettings({ url: "ws://192.168.1.9:8765", token: "secret-1", channels: ["repo-b", "repo-a", "repo-a"] });
+    saveMeshSettings({
+      url: "ws://192.168.1.9:8765",
+      token: "secret-1",
+      channels: ["repo-b", "repo-a", "repo-a"],
+    });
 
-    const stored = JSON.parse(fs.readFileSync(path.join(home, ".omp", "agent", "omp-messenger.json"), "utf-8"));
+    const stored = JSON.parse(
+      fs.readFileSync(path.join(home, ".omp", "agent", "omp-messenger.json"), "utf-8"),
+    );
     expect(stored.mesh).toEqual({ url: "ws://192.168.1.9:8765", channels: ["repo-a", "repo-b"] });
     const tokenPath = path.join(home, ".omp", "agent", "messenger", "mesh.token");
     expect(fs.readFileSync(tokenPath, "utf-8")).toBe("secret-1\n");
     expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
-    expect(getStoredMeshSettings()).toEqual({ url: "ws://192.168.1.9:8765", token: "secret-1", channels: ["repo-a", "repo-b"] });
-    expect(loadConfig(dirs.cwd).mesh).toEqual({ url: "ws://192.168.1.9:8765", token: "secret-1", channels: ["repo-a", "repo-b"] });
+    expect(getStoredMeshSettings()).toEqual({
+      url: "ws://192.168.1.9:8765",
+      token: "secret-1",
+      channels: ["repo-a", "repo-b"],
+    });
+    expect(loadConfig(dirs.cwd).mesh).toEqual({
+      url: "ws://192.168.1.9:8765",
+      token: "secret-1",
+      channels: ["repo-a", "repo-b"],
+    });
 
     saveMeshSettings({ url: "", token: "", channels: ["main"] });
     expect(fs.existsSync(tokenPath)).toBe(false);
@@ -208,12 +224,27 @@ describe("mesh config", () => {
 
   it("applies a token edit when user config already contains an inline token", async () => {
     const home = path.join(dirs.root, ".omp-home");
-    writeJson(path.join(home, ".omp", "agent", "omp-messenger.json"), { mesh: { url: "ws://host:8765", token: "old", channels: ["main"] } });
+    writeJson(path.join(home, ".omp", "agent", "omp-messenger.json"), {
+      mesh: { url: "ws://host:8765", token: "old", channels: ["main"] },
+    });
     const { saveMeshSettings, getStoredMeshSettings, loadConfig } = await loadConfigModule();
     saveMeshSettings({ ...getStoredMeshSettings(), token: "new" });
     expect(loadConfig(dirs.cwd).mesh.token).toBe("new");
     process.env.OMP_MESSENGER_MESH_TOKEN = "environment";
     expect(loadConfig(dirs.cwd).mesh.token).toBe("environment");
+  });
+
+  it("uses the configured OMP agent directory for user config and token fallback", async () => {
+    const agentDir = path.join(dirs.root, "custom-agent");
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    writeJson(path.join(agentDir, "omp-messenger.json"), { mesh: { url: "ws://configured:8765" } });
+    fs.mkdirSync(path.join(agentDir, "messenger"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "messenger", "mesh.token"), "configured-token\n");
+    const { loadConfig } = await loadConfigModule();
+    expect(loadConfig(dirs.cwd).mesh).toMatchObject({
+      url: "ws://configured:8765",
+      token: "configured-token",
+    });
   });
 
   it("reads the legacy channel key in stored mesh settings", async () => {

@@ -14,6 +14,7 @@ interface BaseWorkerEntry {
   name: string;
   cwd: string;
   taskId: string;
+  ownerSessionId?: string;
   abort: AbortController;
   run: Promise<AgentResult> | null;
   settled: boolean;
@@ -49,8 +50,10 @@ export function registerWorker(entry: WorkerEntry): void {
   workers.set(makeKey(entry.cwd, entry.taskId), entry);
 }
 
-export function unregisterWorker(cwd: string, taskId: string): void {
-  workers.delete(makeKey(cwd, taskId));
+export function unregisterWorker(cwd: string, taskId: string, expectedName?: string): void {
+  const key = makeKey(cwd, taskId);
+  if (expectedName !== undefined && workers.get(key)?.name !== expectedName) return;
+  workers.delete(key);
 }
 
 export function findWorkerByTask(cwd: string, taskId: string): WorkerEntry | null {
@@ -76,9 +79,10 @@ export function killWorkerByTask(cwd: string, taskId: string): boolean {
   return true;
 }
 
-export function killAll(cwd?: string): void {
+export function killAll(cwd?: string, ownerSessionId?: string): void {
   for (const [key, entry] of workers.entries()) {
     if (cwd && entry.cwd !== cwd) continue;
+    if (ownerSessionId && entry.ownerSessionId !== ownerSessionId) continue;
     if (!entry.settled) entry.abort.abort();
     workers.delete(key);
   }
@@ -92,10 +96,11 @@ export function getLobbyWorkers(cwd: string): LobbyWorkerEntry[] {
   return result;
 }
 
-export function getAvailableLobbyWorkers(cwd: string): LobbyWorkerEntry[] {
+export function getAvailableLobbyWorkers(cwd: string, ownerSessionId?: string): LobbyWorkerEntry[] {
   const result: LobbyWorkerEntry[] = [];
   for (const entry of workers.values()) {
     if (entry.cwd !== cwd || entry.type !== "lobby") continue;
+    if (ownerSessionId && entry.ownerSessionId !== ownerSessionId) continue;
     if (entry.assignedTaskId || entry.settled) continue;
     if (!registryAlive(entry.name)) continue;
     result.push(entry);

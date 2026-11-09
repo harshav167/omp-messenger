@@ -14,7 +14,6 @@ import {
   applySdkProgress,
   EXTENSION_ENTRY,
   modelHasThinkingSuffix,
-  resolveModel,
   resolveThinking,
   toAgentResult,
 } from "./agents.ts";
@@ -78,8 +77,8 @@ function onLobbyRunSettled(worker: LobbyWorker, mesh: Mesh): void {
   }
 
   worker.settled = true;
-  unregisterWorker(worker.cwd, worker.taskId);
-  removeLiveWorker(worker.cwd, taskId ?? worker.taskId);
+  unregisterWorker(worker.cwd, worker.taskId, worker.name);
+  removeLiveWorker(worker.cwd, taskId ?? worker.taskId, worker.name);
   mesh.evict(worker.name);
 }
 
@@ -87,27 +86,22 @@ export function spawnLobbyWorker(
   cwd: string,
   mesh: Mesh,
   promptOverride?: string,
-  sessionModel?: string,
+  _sessionModel?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
 ): LobbyWorker | null {
   const agents = discoverCrewAgents(cwd);
-  const workerConfig = agents.find(agent => agent.name === "crew-worker");
+  const workerConfig = agents.find((agent) => agent.name === "crew-worker");
   if (!workerConfig) return null;
 
   const crewDir = store.getCrewDir(cwd);
   const config = loadCrewConfig(crewDir);
   const name = allocateWorkerName(mesh);
-  const modelOverride = resolveModel(
-    undefined,
-    undefined,
-    undefined,
-    config.models?.worker,
-    sessionModel,
-    workerConfig.model,
-  );
+  const modelOverride = config.models?.worker;
   const thinking = resolveThinking(config.thinking?.worker, workerConfig.thinking);
   const def = toAgentDefinition(
     workerConfig,
-    modelHasThinkingSuffix(modelOverride) ? undefined : thinking,
+    modelHasThinkingSuffix(modelOverride ?? workerConfig.model) ? undefined : thinking,
   );
   const prompt = promptOverride ?? buildLobbyPrompt(cwd, config, name);
   const maxOutput = workerConfig.maxOutput ?? getTruncationForRole(config, "worker");
@@ -120,6 +114,7 @@ export function spawnLobbyWorker(
     name,
     cwd,
     taskId: `__lobby-${name}__`,
+    ownerSessionId,
     abort: new AbortController(),
     run: null,
     settled: false,
@@ -129,49 +124,62 @@ export function spawnLobbyWorker(
   };
   registerWorker(entry);
 
-  entry.run = sdk.runSubprocess({
-    cwd,
-    agent: def,
-    task: prompt,
-    index: 0,
-    id: name,
-    modelOverride,
-    parentAgentId: sdk.MAIN_AGENT_ID,
-    taskDepth: 1,
-    artifactsDir,
-    persistArtifacts: true,
-    preloadedExtensionPaths: [EXTENSION_ENTRY],
-    enableIrc: false,
-    keepAlive: true,
-    signal: entry.abort.signal,
-    onProgress: sdkProgress => {
-      applySdkProgress(progress, sdkProgress);
-      const displayId = entry.assignedTaskId ?? entry.taskId;
-      updateLiveWorker(cwd, displayId, {
-        taskId: displayId,
-        agent: "crew-worker",
+  entry.run = sdk
+    .runSubprocess({
+      cwd,
+      agent: def,
+      task: prompt,
+      index: 0,
+      id: name,
+      modelOverride,
+      parentAgentId: parentAgentId ?? sdk.MAIN_AGENT_ID,
+      taskDepth: 1,
+      artifactsDir,
+      persistArtifacts: true,
+      preloadedExtensionPaths: [EXTENSION_ENTRY],
+      enableIrc: false,
+      keepAlive: true,
+      signal: entry.abort.signal,
+      onProgress: (sdkProgress) => {
+        applySdkProgress(progress, sdkProgress);
+        const displayId = entry.assignedTaskId ?? entry.taskId;
+        updateLiveWorker(
+          cwd,
+          displayId,
+          {
+            taskId: displayId,
+            agent: "crew-worker",
+            name,
+            progress: {
+              ...progress,
+              recentTools: progress.recentTools.map((tool) => ({ ...tool })),
+            },
+            startedAt: entry.startedAt,
+          },
+          name,
+        );
+        const currentConfig = loadCrewConfig(crewDir);
+        const budget = LOBBY_TOKEN_BUDGETS[currentConfig.coordination ?? "chatty"];
+        if (!entry.assignedTaskId && progress.tokens > budget) entry.abort.abort();
+      },
+    })
+    .then((result) =>
+      toAgentResult("crew-worker", result, progress, {
         name,
-        progress: { ...progress, recentTools: progress.recentTools.map(tool => ({ ...tool })) },
-        startedAt: entry.startedAt,
-      });
-      const currentConfig = loadCrewConfig(crewDir);
-      const budget = LOBBY_TOKEN_BUDGETS[currentConfig.coordination ?? "chatty"];
-      if (!entry.assignedTaskId && progress.tokens > budget) entry.abort.abort();
-    },
-  }).then(result => toAgentResult("crew-worker", result, progress, {
-    name,
-    artifactsDir,
-    maxOutput,
-  })).then(result => {
-    removeLiveWorker(cwd, entry.taskId);
-    if (result.exitCode !== 0 && !entry.assignedTaskId) {
-      entry.settled = true;
-      unregisterWorker(cwd, entry.taskId);
-      mesh.evict(name);
-      logFeedEvent(cwd, name, "leave", undefined, "Lobby worker exited");
-    }
-    return result;
-  });
+        artifactsDir,
+        maxOutput,
+      }),
+    )
+    .then((result) => {
+      removeLiveWorker(cwd, entry.taskId, name);
+      if (result.exitCode !== 0 && !entry.assignedTaskId) {
+        entry.settled = true;
+        unregisterWorker(cwd, entry.taskId, name);
+        mesh.evict(name);
+        logFeedEvent(cwd, name, "leave", undefined, "Lobby worker exited");
+      }
+      return result;
+    });
 
   updateLiveWorker(cwd, entry.taskId, {
     taskId: entry.taskId,
@@ -188,8 +196,8 @@ export function getLobbyWorkerCount(cwd: string): number {
   return registryGetLobbyWorkerCount(cwd);
 }
 
-export function getAvailableLobbyWorkers(cwd: string): LobbyWorker[] {
-  return registryGetAvailableLobbyWorkers(cwd);
+export function getAvailableLobbyWorkers(cwd: string, ownerSessionId?: string): LobbyWorker[] {
+  return registryGetAvailableLobbyWorkers(cwd, ownerSessionId);
 }
 
 export async function assignTaskToLobbyWorker(
@@ -197,20 +205,18 @@ export async function assignTaskToLobbyWorker(
   taskId: string,
   taskPrompt: string,
   mesh: Mesh,
+  cancellation?: AbortSignal,
 ): Promise<boolean> {
   if (worker.assignedTaskId || worker.settled || !registryAlive(worker.name)) return false;
 
-  const workerConfig = discoverCrewAgents(worker.cwd).find(agent => agent.name === "crew-worker");
+  const workerConfig = discoverCrewAgents(worker.cwd).find((agent) => agent.name === "crew-worker");
   if (!workerConfig) return false;
 
   const crewDir = store.getCrewDir(worker.cwd);
   const config = loadCrewConfig(crewDir);
   const model = config.models?.worker ?? workerConfig.model;
   const thinking = resolveThinking(config.thinking?.worker, workerConfig.thinking);
-  const def = toAgentDefinition(
-    workerConfig,
-    modelHasThinkingSuffix(model) ? undefined : thinking,
-  );
+  const def = toAgentDefinition(workerConfig, modelHasThinkingSuffix(model) ? undefined : thinking);
   const artifactsDir = join(crewDir, "artifacts");
   const maxOutput = workerConfig.maxOutput ?? getTruncationForRole(config, "worker");
   const progress = createProgress("crew-worker");
@@ -225,34 +231,51 @@ ${taskPrompt}`;
 
   worker.assignedTaskId = taskId;
   removeLiveWorker(worker.cwd, worker.taskId);
-  worker.run = sdk.runSubagentFollowUpTurn({
-    id: worker.name,
-    agent: def,
-    message: assignmentText,
-    index: 0,
-    artifactsDir,
-    signal: worker.abort.signal,
-    onProgress: sdkProgress => {
-      applySdkProgress(progress, sdkProgress);
-      updateLiveWorker(worker.cwd, taskId, {
-        taskId,
-        agent: "crew-worker",
+  worker.run = sdk
+    .runSubagentFollowUpTurn({
+      id: worker.name,
+      agent: def,
+      message: assignmentText,
+      index: 0,
+      artifactsDir,
+      signal: cancellation
+        ? AbortSignal.any([worker.abort.signal, cancellation])
+        : worker.abort.signal,
+      onProgress: (sdkProgress) => {
+        applySdkProgress(progress, sdkProgress);
+        updateLiveWorker(
+          worker.cwd,
+          taskId,
+          {
+            taskId,
+            agent: "crew-worker",
+            name: worker.name,
+            progress: {
+              ...progress,
+              recentTools: progress.recentTools.map((tool) => ({ ...tool })),
+            },
+            startedAt: worker.startedAt,
+          },
+          worker.name,
+        );
+      },
+    })
+    .then((result) =>
+      toAgentResult("crew-worker", result, progress, {
         name: worker.name,
-        progress: { ...progress, recentTools: progress.recentTools.map(tool => ({ ...tool })) },
-        startedAt: worker.startedAt,
-      });
-    },
-  }).then(result => toAgentResult("crew-worker", result, progress, {
-    name: worker.name,
-    artifactsDir,
-    maxOutput,
-    taskId,
-  })).finally(() => onLobbyRunSettled(worker, mesh));
+        artifactsDir,
+        maxOutput,
+        taskId,
+      }),
+    )
+    .finally(() => onLobbyRunSettled(worker, mesh));
   return true;
 }
 
 export function killLobbyWorkerForTask(cwd: string, taskId: string): boolean {
-  const worker = registryGetLobbyWorkers(cwd).find(candidate => candidate.assignedTaskId === taskId);
+  const worker = registryGetLobbyWorkers(cwd).find(
+    (candidate) => candidate.assignedTaskId === taskId,
+  );
   if (!worker) return false;
 
   worker.abort.abort();
@@ -261,8 +284,9 @@ export function killLobbyWorkerForTask(cwd: string, taskId: string): boolean {
   return true;
 }
 
-export function shutdownLobbyWorkers(cwd: string): void {
+export function shutdownLobbyWorkers(cwd: string, ownerSessionId?: string): void {
   for (const worker of registryGetLobbyWorkers(cwd)) {
+    if (ownerSessionId && worker.ownerSessionId !== ownerSessionId) continue;
     worker.abort.abort();
     unregisterWorker(cwd, worker.taskId);
     removeLiveWorker(cwd, worker.assignedTaskId ?? worker.taskId);
@@ -275,12 +299,21 @@ export function spawnWorkerForTask(
   taskPrompt: string,
   mesh: Mesh,
   sessionModel?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
 ): LobbyWorker | null {
   const task = store.getTask(cwd, taskId);
   if (!task || task.status !== "todo") return null;
   if (hasActiveWorker(cwd, taskId)) return null;
 
-  const worker = spawnLobbyWorker(cwd, mesh, taskPrompt, sessionModel);
+  const worker = spawnLobbyWorker(
+    cwd,
+    mesh,
+    taskPrompt,
+    sessionModel,
+    parentAgentId,
+    ownerSessionId,
+  );
   if (!worker) return null;
 
   removeLiveWorker(cwd, worker.taskId);

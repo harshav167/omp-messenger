@@ -20,11 +20,7 @@ import { autonomousState, waitForConcurrencyChange } from "./state.ts";
 import type { AgentResult, AgentTask } from "./types.ts";
 import { ensureArtifactsDir, writeMetadata } from "./utils/artifacts.ts";
 import { loadCrewConfig, getTruncationForRole, type CrewConfig } from "./utils/config.ts";
-import {
-  discoverCrewAgents,
-  toAgentDefinition,
-  type CrewAgentConfig,
-} from "./utils/discover.ts";
+import { discoverCrewAgents, toAgentDefinition, type CrewAgentConfig } from "./utils/discover.ts";
 import { createProgress, type AgentProgress } from "./utils/progress.ts";
 import { truncateOutput, type MaxOutputConfig } from "./utils/truncate.ts";
 
@@ -54,10 +50,13 @@ export interface SpawnOptions {
   signal?: AbortSignal;
   mesh?: Mesh;
   localProtocolOptions?: unknown;
+  parentAgentId?: string;
+  ownerSessionId?: string;
+  ownerSignal?: AbortSignal;
 }
 
-export function shutdownAllWorkers(): void {
-  killAll();
+export function shutdownAllWorkers(cwd: string, ownerSessionId: string): void {
+  killAll(cwd, ownerSessionId);
 }
 
 export function resolveModel(
@@ -71,7 +70,10 @@ export function resolveModel(
   return taskModel ?? paramModel ?? roleModel ?? configModel ?? sessionModel ?? agentModel;
 }
 
-export function resolveThinking(configThinking?: string, agentThinking?: string): string | undefined {
+export function resolveThinking(
+  configThinking?: string,
+  agentThinking?: string,
+): string | undefined {
   const resolved = configThinking ?? agentThinking;
   return !resolved || resolved === "off" ? undefined : resolved;
 }
@@ -99,7 +101,7 @@ export function raceTimeout(promise: Promise<void>, ms: number): Promise<boolean
 }
 
 export function allocateWorkerName(mesh?: Mesh): string {
-  const peerNames = new Set(mesh?.peers().map(peer => peer.name) ?? []);
+  const peerNames = new Set(mesh?.peers().map((peer) => peer.name) ?? []);
   let candidate = "";
   for (let attempt = 0; attempt < 20; attempt++) {
     candidate = generateMemorableName();
@@ -115,7 +117,7 @@ export function applySdkProgress(target: AgentProgress, progress: SdkProgress): 
   target.currentTool = progress.currentTool;
   target.currentToolArgs = progress.currentToolArgs;
   target.currentToolStartMs = progress.currentToolStartMs;
-  target.recentTools = progress.recentTools.map(tool => ({
+  target.recentTools = progress.recentTools.map((tool) => ({
     tool: tool.tool,
     args: tool.args,
     startMs: tool.endMs,
@@ -149,6 +151,8 @@ export function toAgentResult(
     progress,
     config: context.config,
     taskId: context.taskId,
+    started: true,
+    workerName: context.name,
     wasGracefullyShutdown: context.wasGracefullyShutdown,
     error: result.error ?? result.retryFailure?.errorMessage,
     artifactPaths: {
@@ -156,6 +160,23 @@ export function toAgentResult(
       transcript: path.join(context.artifactsDir, `${context.name}.jsonl`),
       meta: path.join(context.artifactsDir, `${context.name}_meta.json`),
     },
+  };
+}
+
+function cancelledAgentResult(task: AgentTask): AgentResult {
+  const progress = createProgress(task.agent);
+  progress.status = "cancelled";
+  progress.error = "Cancelled before agent started";
+  return {
+    agent: task.agent,
+    exitCode: 143,
+    output: "",
+    truncated: false,
+    progress,
+    taskId: task.taskId,
+    started: false,
+    wasGracefullyShutdown: true,
+    error: progress.error,
   };
 }
 
@@ -169,20 +190,40 @@ export async function spawnAgents(
   const agents = discoverCrewAgents(cwd);
   const runId = randomUUID().slice(0, 8);
   const artifactsDir = path.join(crewDir, "artifacts");
-  ensureArtifactsDir(artifactsDir, config.artifacts.enabled ? config.artifacts.cleanupDays : undefined);
+  ensureArtifactsDir(
+    artifactsDir,
+    config.artifacts.enabled ? config.artifacts.cleanupDays : undefined,
+  );
 
   const results: AgentResult[] = [];
+  const signal =
+    options.signal && options.ownerSignal
+      ? AbortSignal.any([options.signal, options.ownerSignal])
+      : (options.signal ?? options.ownerSignal);
+  const ownedOptions = { ...options, signal };
   const queue = tasks.map((task, index) => ({ task, index }));
   const running: Promise<void>[] = [];
 
   while (queue.length > 0 || running.length > 0) {
-    if (options.signal?.aborted && running.length === 0) break;
+    if (signal?.aborted && queue.length > 0) {
+      for (const queued of queue.splice(0)) results.push(cancelledAgentResult(queued.task));
+    }
+    if (signal?.aborted && running.length === 0) break;
     while (running.length < autonomousState.concurrency && queue.length > 0) {
-      if (options.signal?.aborted) break;
+      if (signal?.aborted) break;
       const queued = queue.shift();
       if (!queued) break;
-      const promise = runAgent(queued.task, queued.index, cwd, agents, config, runId, artifactsDir, options)
-        .then(result => {
+      const promise = runAgent(
+        queued.task,
+        queued.index,
+        cwd,
+        agents,
+        config,
+        runId,
+        artifactsDir,
+        ownedOptions,
+      )
+        .then((result) => {
           results.push(result);
           options.onProgress?.(results);
         })
@@ -210,7 +251,7 @@ async function runAgent(
   artifactsDir: string,
   options: SpawnOptions,
 ): Promise<AgentResult> {
-  const agentConfig = agents.find(agent => agent.name === task.agent);
+  const agentConfig = agents.find((agent) => agent.name === task.agent);
   const progress = createProgress(task.agent);
   const startTime = Date.now();
   if (!agentConfig) {
@@ -236,15 +277,34 @@ async function runAgent(
     agentConfig,
     modelHasThinkingSuffix(resolvedModel) ? undefined : resolvedThinking,
   );
-  const name = role === "worker" ? allocateWorkerName(options.mesh) : `${task.agent}-${runId}-${index}`;
+  const name =
+    role === "worker" ? allocateWorkerName(options.mesh) : `${task.agent}-${runId}-${index}`;
   const abort = new AbortController();
   let gracefulShutdownRequested = false;
-  const worker: RegularWorker | undefined = task.taskId
-    ? { type: "worker", name, cwd, taskId: task.taskId, abort, run: null, settled: false }
+  const worker: RegularWorker | undefined = options.ownerSessionId
+    ? {
+        type: "worker",
+        name,
+        cwd,
+        taskId: task.taskId ?? `__agent-${name}__`,
+        ownerSessionId: options.ownerSessionId,
+        abort,
+        run: null,
+        settled: false,
+      }
     : undefined;
   if (worker) registerWorker(worker);
 
   const sdk = getSdk();
+  if (task.taskId) {
+    updateLiveWorker(cwd, task.taskId, {
+      taskId: task.taskId,
+      agent: task.agent,
+      name,
+      progress: { ...progress, recentTools: [] },
+      startedAt: startTime,
+    });
+  }
   const runPromise = sdk.runSubprocess({
     cwd,
     agent: definition,
@@ -252,7 +312,7 @@ async function runAgent(
     index,
     id: name,
     modelOverride,
-    parentAgentId: sdk.MAIN_AGENT_ID,
+    parentAgentId: options.parentAgentId ?? sdk.MAIN_AGENT_ID,
     taskDepth: 1,
     artifactsDir,
     persistArtifacts: true,
@@ -261,19 +321,24 @@ async function runAgent(
     keepAlive: false,
     signal: abort.signal,
     localProtocolOptions: options.localProtocolOptions as never,
-    onProgress: sdkProgress => {
+    onProgress: (sdkProgress) => {
       applySdkProgress(progress, sdkProgress);
       if (task.taskId) {
-        updateLiveWorker(cwd, task.taskId, {
-          taskId: task.taskId,
-          agent: task.agent,
-          name,
-          progress: {
-            ...progress,
-            recentTools: progress.recentTools.map(tool => ({ ...tool })),
+        updateLiveWorker(
+          cwd,
+          task.taskId,
+          {
+            taskId: task.taskId,
+            agent: task.agent,
+            name,
+            progress: {
+              ...progress,
+              recentTools: progress.recentTools.map((tool) => ({ ...tool })),
+            },
+            startedAt: startTime,
           },
-          startedAt: startTime,
-        });
+          name,
+        );
       }
       if (sdkProgress.retryFailure) abort.abort();
     },
@@ -282,13 +347,22 @@ async function runAgent(
   const gracefulShutdown = async (): Promise<void> => {
     gracefulShutdownRequested = true;
     if (options.mesh && role === "worker") {
-      const sent = await options.mesh.send(name, SHUTDOWN_MESSAGE, {
+      const sending = options.mesh.send(name, SHUTDOWN_MESSAGE, {
         from: "crew-orchestrator",
       });
-      if (sent.ok && await raceTimeout(
-        runPromise.then(() => {}),
-        config.work.shutdownGracePeriodMs ?? 30_000,
-      )) return;
+      void sending.then(
+        (sent) => {
+          if (!sent.ok) abort.abort();
+        },
+        () => abort.abort(),
+      );
+      if (
+        await raceTimeout(
+          runPromise.then(() => {}),
+          config.work.shutdownGracePeriodMs ?? 30_000,
+        )
+      )
+        return;
     }
     abort.abort();
   };
@@ -298,39 +372,46 @@ async function runAgent(
   if (options.signal?.aborted) requestGracefulShutdown();
   else options.signal?.addEventListener("abort", requestGracefulShutdown, { once: true });
 
-  const resultPromise = runPromise.then(result => {
-    progress.status = result.aborted || result.exitCode !== 0 ? "failed" : "completed";
-    progress.durationMs = result.durationMs;
-    progress.error = result.error ?? result.retryFailure?.errorMessage ?? progress.error;
-    const mapped = toAgentResult(task.agent, result, progress, {
-      name,
-      artifactsDir,
-      maxOutput,
-      taskId: task.taskId,
-      config: agentConfig,
-      wasGracefullyShutdown: gracefulShutdownRequested,
+  const resultPromise = runPromise
+    .then((result) => {
+      progress.status =
+        result.aborted && options.ownerSignal?.aborted
+          ? "cancelled"
+          : result.aborted || result.exitCode !== 0
+            ? "failed"
+            : "completed";
+      progress.durationMs = result.durationMs;
+      progress.error = result.error ?? result.retryFailure?.errorMessage ?? progress.error;
+      const mapped = toAgentResult(task.agent, result, progress, {
+        name,
+        artifactsDir,
+        maxOutput,
+        taskId: task.taskId,
+        config: agentConfig,
+        wasGracefullyShutdown: gracefulShutdownRequested,
+      });
+      writeMetadata(path.join(artifactsDir, `${name}_meta.json`), {
+        runId,
+        agent: task.agent,
+        name,
+        index,
+        exitCode: mapped.exitCode,
+        durationMs: mapped.progress.durationMs,
+        tokens: mapped.progress.tokens,
+        truncated: mapped.truncated,
+        error: mapped.error,
+      });
+      return mapped;
+    })
+    .finally(() => {
+      options.signal?.removeEventListener("abort", requestGracefulShutdown);
+      if (worker) {
+        worker.settled = true;
+        unregisterWorker(cwd, worker.taskId, name);
+      }
+      if (role === "worker") options.mesh?.evict(name);
+      if (task.taskId) removeLiveWorker(cwd, task.taskId, name);
     });
-    writeMetadata(path.join(artifactsDir, `${name}_meta.json`), {
-      runId,
-      agent: task.agent,
-      name,
-      index,
-      exitCode: mapped.exitCode,
-      durationMs: mapped.progress.durationMs,
-      tokens: mapped.progress.tokens,
-      truncated: mapped.truncated,
-      error: mapped.error,
-    });
-    return mapped;
-  }).finally(() => {
-    options.signal?.removeEventListener("abort", requestGracefulShutdown);
-    if (worker) worker.settled = true;
-    if (role === "worker") options.mesh?.evict(name);
-    if (task.taskId) {
-      unregisterWorker(cwd, task.taskId);
-      removeLiveWorker(cwd, task.taskId);
-    }
-  });
   if (worker) worker.run = resultPromise;
   return resultPromise;
 }

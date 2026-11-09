@@ -38,7 +38,10 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     const agentsDir = path.join(cwd, ".omp", "messenger", "crew", "agents");
     fs.mkdirSync(agentsDir, { recursive: true });
     for (const name of ["crew-worker", "crew-reviewer"]) {
-      fs.writeFileSync(path.join(agentsDir, `${name}.md`), `---\nname: ${name}\ndescription: Agent\n---\nAgent`);
+      fs.writeFileSync(
+        path.join(agentsDir, `${name}.md`),
+        `---\nname: ${name}\ndescription: Agent\n---\nAgent`,
+      );
     }
 
     vi.mocked(reviewHandler.reviewImplementation).mockResolvedValue({
@@ -64,7 +67,14 @@ describe("auto-review skips blocked/duplicate tasks", () => {
   }
 
   function workerResult(taskId: string) {
-    return { exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId };
+    return {
+      exitCode: 0,
+      output: "",
+      truncated: false,
+      progress: { toolCallCount: 0, tokens: 0 },
+      agent: "crew-worker",
+      taskId,
+    };
   }
 
   it("blocked task in succeeded list is not reviewed and gets a feed event", async () => {
@@ -72,7 +82,12 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     const task = store.createTask(cwd, "Duplicated work", "Do work");
     blockAfterResultProcessing(task.id, "Duplicate of completed task-1");
     vi.mocked(agents.spawnAgents).mockImplementation(async () => {
-      store.updateTask(cwd, task.id, { status: "done", completed_at: new Date().toISOString(), summary: "Done", base_commit: "abc123" });
+      store.updateTask(cwd, task.id, {
+        status: "done",
+        completed_at: new Date().toISOString(),
+        summary: "Done",
+        base_commit: "abc123",
+      });
       return [workerResult(task.id)];
     });
 
@@ -83,8 +98,12 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     expect(response.details.blocked).toContain(task.id);
 
     const feedPath = path.join(cwd, ".omp", "messenger", "feed.jsonl");
-    const events = fs.readFileSync(feedPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const skip = events.find(e => e.type === "task.review" && e.target === task.id);
+    const events = fs
+      .readFileSync(feedPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const skip = events.find((e) => e.type === "task.review" && e.target === task.id);
     expect(skip).toBeDefined();
     expect(skip.preview).toContain("skipped");
     expect(skip.preview).toContain("Duplicate of completed task-1");
@@ -99,7 +118,12 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     const task = store.createTask(cwd, "Duplicate work", "Do work");
     // Task stays status "done" but carries a stale duplicate blocked_reason
     vi.mocked(agents.spawnAgents).mockImplementation(async () => {
-      store.updateTask(cwd, task.id, { status: "done", completed_at: new Date().toISOString(), summary: "Done", base_commit: "abc123" });
+      store.updateTask(cwd, task.id, {
+        status: "done",
+        completed_at: new Date().toISOString(),
+        summary: "Done",
+        base_commit: "abc123",
+      });
       return [workerResult(task.id)];
     });
     const responsePromise = workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
@@ -126,13 +150,34 @@ describe("auto-review skips blocked/duplicate tasks", () => {
     store.createPlan(cwd, "docs/PRD.md");
     const task = store.createTask(cwd, "Healthy work", "Do work");
     vi.mocked(agents.spawnAgents).mockImplementation(async () => {
-      store.updateTask(cwd, task.id, { status: "done", completed_at: new Date().toISOString(), summary: "Done", base_commit: "abc123" });
+      store.updateTask(cwd, task.id, {
+        status: "done",
+        completed_at: new Date().toISOString(),
+        summary: "Done",
+        base_commit: "abc123",
+      });
       return [workerResult(task.id)];
     });
 
-    const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
+    const owner = new AbortController();
+    const response = await workHandler.execute(
+      {},
+      mesh,
+      createMockContext(cwd),
+      vi.fn(),
+      undefined,
+      undefined,
+      owner.signal,
+    );
 
-    expect(reviewHandler.reviewImplementation).toHaveBeenCalledWith(cwd, task.id, undefined);
+    expect(reviewHandler.reviewImplementation).toHaveBeenCalledWith(
+      cwd,
+      task.id,
+      undefined,
+      undefined,
+      "test-session",
+      owner.signal,
+    );
     expect(response.details.succeeded).toContain(task.id);
     expect(store.getTask(cwd, task.id)?.review_count).toBe(1);
   });

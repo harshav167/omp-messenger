@@ -5,7 +5,7 @@ import { isMentioned, isValidAgentName, isValidChannelName, parseMentions } from
 import type { AgentMailMessage, AgentRegistration, AllClaims, HistoryEntry } from "../lib.ts";
 import { HISTORY_PAGE_MAX, MESH_CLOSE, MESH_SUBPROTOCOL, parseFrame } from "./protocol.ts";
 import type { ChannelSnapshot, ClientFrame, ReplyResult, ServerFrame } from "./protocol.ts";
-import { openPersist } from "./persist.ts";
+import { openPersist, StorageError } from "./persist.ts";
 import type { Persist } from "./persist.ts";
 import { createServerState } from "./server-state.ts";
 import type { ServerState } from "./server-state.ts";
@@ -33,6 +33,8 @@ export interface MeshServerOptions {
   readonly hostname?: string;
   readonly token: string;
   readonly dataDir?: string;
+  /** Test/embedding seam; production opens SQLite from dataDir. */
+  readonly persist?: Persist;
 }
 
 const peersTopic = (channel: string): string => `peers:${channel}`;
@@ -56,7 +58,14 @@ function sendReply(ws: Bun.ServerWebSocket<SocketData>, id: string, result: Repl
 
 export function startMeshServer(opts: MeshServerOptions): MeshServer {
   const hostname = opts.hostname ?? "127.0.0.1";
-  const persist: Persist | undefined = opts.dataDir ? openPersist(opts.dataDir) : undefined;
+  const persist: Persist | undefined =
+    opts.persist ?? (opts.dataDir ? openPersist(opts.dataDir) : undefined);
+  let storageHealthy = true;
+  const storageFailure = (operation: string, error: unknown): StorageError => {
+    storageHealthy = false;
+    console.error(`[mesh] storage ${operation} failed`, error);
+    return error instanceof StorageError ? error : new StorageError(operation, { cause: error });
+  };
   const state: ServerState = createServerState(persist);
   const expectedToken = tokenDigest(opts.token);
   const peerTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -69,13 +78,18 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
   const sockets = new Set<Bun.ServerWebSocket<SocketData>>();
 
   /** Live sockets other than `ws` holding `name` in `channel`; closed holders are dropped first. */
-  const otherHolders = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): Bun.ServerWebSocket<SocketData>[] => {
+  const otherHolders = (
+    channel: string,
+    name: string,
+    ws: Bun.ServerWebSocket<SocketData>,
+  ): Bun.ServerWebSocket<SocketData>[] => {
     const topic = inboxTopic(channel, name);
     const holders = inboxOwners.get(topic);
     if (!holders) return [];
-    for (const holder of holders) if (holder !== ws && holder.readyState !== WebSocket.OPEN) holders.delete(holder);
+    for (const holder of holders)
+      if (holder !== ws && holder.readyState !== WebSocket.OPEN) holders.delete(holder);
     if (holders.size === 0) inboxOwners.delete(topic);
-    return [...holders].filter(holder => holder !== ws);
+    return [...holders].filter((holder) => holder !== ws);
   };
 
   /**
@@ -83,11 +97,27 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
    * window: every holder must be human on the same host and present the same identity key. hostId and
    * isHuman are broadcast to every peer, so only the key proves it; omp sessions send none and stay exclusive.
    */
-  const nameTaken = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>, registration: AgentRegistration | null | undefined): boolean => {
+  const nameTaken = (
+    channel: string,
+    name: string,
+    ws: Bun.ServerWebSocket<SocketData>,
+    registration: AgentRegistration | null | undefined,
+  ): boolean => {
     const others = otherHolders(channel, name, ws);
     const key = ws.data.identityKey;
-    return others.length > 0 && !(registration?.isHuman && key !== null && others.every(other =>
-      other.data.identityKey === key && other.data.registration?.isHuman && other.data.registration.hostId === registration.hostId));
+    return (
+      others.length > 0 &&
+      !(
+        registration?.isHuman &&
+        key !== null &&
+        others.every(
+          (other) =>
+            other.data.identityKey === key &&
+            other.data.registration?.isHuman &&
+            other.data.registration.hostId === registration.hostId,
+        )
+      )
+    );
   };
 
   const holdInbox = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): void => {
@@ -102,7 +132,11 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
    * Release `ws`'s hold on `name` in `channel`; true when no live window holds it any more. Otherwise the
    * member's presence switches to a remaining window, since the newest window's registration had replaced it.
    */
-  const releaseInbox = (channel: string, name: string, ws: Bun.ServerWebSocket<SocketData>): boolean => {
+  const releaseInbox = (
+    channel: string,
+    name: string,
+    ws: Bun.ServerWebSocket<SocketData>,
+  ): boolean => {
     ws.unsubscribe(inboxTopic(channel, name));
     inboxOwners.get(inboxTopic(channel, name))?.delete(ws);
     const others = otherHolders(channel, name, ws);
@@ -124,28 +158,43 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
       const json = JSON.stringify(channels);
       if (json === lastChannelList) return;
       lastChannelList = json;
-      server.publish(CHANNELS_TOPIC, JSON.stringify({ t: "channel_list", channels } satisfies ServerFrame));
+      server.publish(
+        CHANNELS_TOPIC,
+        JSON.stringify({ t: "channel_list", channels } satisfies ServerFrame),
+      );
     }, 100);
   };
 
   const broadcastPeers = (channel: string): void => {
     if (stopped || peerTimers.has(channel)) return;
-    peerTimers.set(channel, setTimeout(() => {
-      peerTimers.delete(channel);
-      const peers = [...(state.channels.get(channel)?.presence.values() ?? [])];
-      server.publish(peersTopic(channel), JSON.stringify({ t: "peers", channel, peers } satisfies ServerFrame));
-      // Every presence change (join, part, close) comes through here, so the channel list follows it.
-      broadcastChannels();
-    }, 50));
+    peerTimers.set(
+      channel,
+      setTimeout(() => {
+        peerTimers.delete(channel);
+        const peers = [...(state.channels.get(channel)?.presence.values() ?? [])];
+        server.publish(
+          peersTopic(channel),
+          JSON.stringify({ t: "peers", channel, peers } satisfies ServerFrame),
+        );
+        // Every presence change (join, part, close) comes through here, so the channel list follows it.
+        broadcastChannels();
+      }, 50),
+    );
   };
 
   const broadcastClaims = (channel: string): void => {
     if (stopped || claimTimers.has(channel)) return;
-    claimTimers.set(channel, setTimeout(() => {
-      claimTimers.delete(channel);
-      const claims: AllClaims = state.channels.get(channel)?.claims ?? {};
-      server.publish(claimsTopic(channel), JSON.stringify({ t: "claims", channel, claims } satisfies ServerFrame));
-    }, 50));
+    claimTimers.set(
+      channel,
+      setTimeout(() => {
+        claimTimers.delete(channel);
+        const claims: AllClaims = state.channels.get(channel)?.claims ?? {};
+        server.publish(
+          claimsTopic(channel),
+          JSON.stringify({ t: "claims", channel, claims } satisfies ServerFrame),
+        );
+      }, 50),
+    );
   };
 
   const snapshot = (channel: string): ChannelSnapshot => {
@@ -158,10 +207,22 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
     };
   };
 
-  /** Log a delivered message and push it to the channel's watchers. */
-  const record = (entry: Omit<HistoryEntry, "seq">): HistoryEntry => {
-    const logged = state.appendLog(entry);
-    server.publish(logTopic(entry.channel), JSON.stringify({ t: "log", channel: entry.channel, entry: logged } satisfies ServerFrame));
+  /** Log a message once and push only new entries to the channel's watchers. */
+  const record = (
+    entry: Omit<HistoryEntry, "seq">,
+    delivered: string[] = [],
+  ): { entry: HistoryEntry; duplicate: boolean; delivered: string[] } => {
+    const logged = state.appendLog(entry, delivered);
+    if (!logged.duplicate) {
+      server.publish(
+        logTopic(entry.channel),
+        JSON.stringify({
+          t: "log",
+          channel: entry.channel,
+          entry: logged.entry,
+        } satisfies ServerFrame),
+      );
+    }
     return logged;
   };
 
@@ -202,16 +263,40 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
   const server = Bun.serve<SocketData>({
     port: opts.port,
     hostname,
-    routes: { "/healthz": new Response("ok") },
+    routes: {
+      "/healthz": () => {
+        if (persist) {
+          try {
+            persist.probe();
+            storageHealthy = true;
+          } catch (error) {
+            storageFailure("health probe", error);
+          }
+        }
+        return new Response(storageHealthy ? "ok" : "storage unavailable", {
+          status: storageHealthy ? 200 : 503,
+        });
+      },
+    },
     fetch(request, bunServer) {
       const offered = request.headers.get("sec-websocket-protocol");
-      const acceptsProtocol = offered?.split(",").some((protocol) => protocol.trim() === MESH_SUBPROTOCOL) ?? false;
+      const acceptsProtocol =
+        offered?.split(",").some((protocol) => protocol.trim() === MESH_SUBPROTOCOL) ?? false;
       if (!acceptsProtocol) {
-        return new Response("omp-messenger-mesh: subprotocol omp-messenger.v2 required", { status: 426 });
+        return new Response("omp-messenger-mesh: subprotocol omp-messenger.v2 required", {
+          status: 426,
+        });
       }
       const upgraded = bunServer.upgrade(request, {
         headers: { "Sec-WebSocket-Protocol": MESH_SUBPROTOCOL },
-        data: { name: null, channels: new Set<string>(), watching: new Set<string>(), helloTimer: null, registration: null, identityKey: null },
+        data: {
+          name: null,
+          channels: new Set<string>(),
+          watching: new Set<string>(),
+          helloTimer: null,
+          registration: null,
+          identityKey: null,
+        },
       });
       return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
     },
@@ -222,417 +307,20 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
       sendPings: true,
       open(ws) {
         sockets.add(ws);
-        ws.data.helloTimer = setTimeout(() => ws.close(MESH_CLOSE.HELLO_TIMEOUT, "hello timeout"), 5_000);
+        ws.data.helloTimer = setTimeout(
+          () => ws.close(MESH_CLOSE.HELLO_TIMEOUT, "hello timeout"),
+          5_000,
+        );
       },
       message(ws, raw) {
-        const frame = parseFrame<ClientFrame>(raw);
-        if (!frame) {
-          ws.close(MESH_CLOSE.BAD_FRAME);
-          return;
-        }
-
-        if (ws.data.name === null) {
-          if (frame.t !== "hello") {
-            ws.close(MESH_CLOSE.BAD_FRAME);
-            return;
-          }
-          if (typeof frame.token !== "string" || !timingSafeEqual(expectedToken, tokenDigest(frame.token))) {
-            sendFrame(ws, { t: "reject", error: "bad_token" });
-            ws.close(MESH_CLOSE.BAD_TOKEN);
-            return;
-          }
-          if (!Array.isArray(frame.channels) || frame.channels.length === 0) {
-            sendFrame(ws, { t: "reject", error: "invalid_channel" });
-            return;
-          }
-          const invalid = frame.channels.find((channel) => !isValidChannelName(channel));
-          if (invalid !== undefined) {
-            sendFrame(ws, { t: "reject", error: "invalid_channel", channel: invalid });
-            return;
-          }
-          const name = frame.agent?.name;
-          if (!isValidAgentName(name)) {
-            sendFrame(ws, { t: "reject", error: "invalid_name" });
-            return;
-          }
-          const deleted = [...new Set(frame.channels)].filter(channel => state.isDeleted(channel));
-          const requested = [...new Set(frame.channels)].filter(channel => !state.isDeleted(channel));
-          if (!requested.length) requested.push("main");
-          // name_taken only when another live socket holds the name and isn't the same person's
-          // other window. A zombie holder (partitioned, closing, heartbeat-reap pending) is
-          // dropped so a reconnecting agent can reclaim its own name.
-          // Keys shorter than a random 32-byte base64url secret are treated as absent.
-          ws.data.identityKey = typeof frame.identityKey === "string" && frame.identityKey.length >= 43 ? frame.identityKey : null;
-          let taken: string | undefined;
-          for (const channel of requested) {
-            const held = inboxOwners.has(inboxTopic(channel, name));
-            if (nameTaken(channel, name, ws, frame.agent)) taken = channel;
-            else if (held && !inboxOwners.has(inboxTopic(channel, name))) {
-              state.dropAgent(channel, name);
-              broadcastPeers(channel);
-            }
-          }
-          if (taken !== undefined) {
-            sendFrame(ws, { t: "reject", error: "name_taken", channel: taken });
-            return;
-          }
-
-          clearTimeout(ws.data.helloTimer);
-          ws.data.helloTimer = null;
-          ws.data.name = name;
-          ws.data.registration = { ...frame.agent, name };
-          ws.subscribe(CHANNELS_TOPIC);
-          for (const channel of requested) {
-            ws.data.channels.add(channel);
-            ws.subscribe(peersTopic(channel));
-            ws.subscribe(claimsTopic(channel));
-            holdInbox(channel, name, ws);
-            state.getOrCreate(channel).presence.set(name, { ...ws.data.registration });
-          }
-          const claimChannels = new Set<string>();
-          for (const assertion of Array.isArray(frame.claims) ? frame.claims : []) {
-            const channel = assertion?.channel;
-            if (typeof channel !== "string" || !ws.data.channels.has(channel)) continue;
-            const result = state.claim(channel, name, assertion.spec, assertion.taskId, assertion.reason);
-            if (result.success) claimChannels.add(channel);
-          }
-          sendFrame(ws, { t: "welcome", name, channels: requested.map(snapshot) });
-          for (const channel of deleted) {
-            sendFrame(ws, { t: "removed", channel, by: "server", channels: requested, added: [] });
-            sendFrame(ws, {
-              t: "message", channel: requested[0], message: {
-                id: randomUUID(), from: "server", to: name, text: `#${channel} was deleted while you were disconnected. You have not rejoined it.`,
-                channel: requested[0], timestamp: new Date().toISOString(), replyTo: null,
-              }
-            });
-          }
-          for (const channel of requested) broadcastPeers(channel);
-          for (const channel of claimChannels) broadcastClaims(channel);
-          return;
-        }
-
-        const name = ws.data.name;
-        switch (frame.t) {
-          case "publish": {
-            ws.data.registration = { ...frame.agent, name };
-            for (const channel of ws.data.channels) {
-              state.getOrCreate(channel).presence.set(name, { ...ws.data.registration });
-              broadcastPeers(channel);
-            }
-            return;
-          }
-          case "join": {
-            if (!Array.isArray(frame.channels)) {
-              ws.close(MESH_CLOSE.BAD_FRAME);
-              return;
-            }
-            const requested = [...new Set(frame.channels)];
-            const invalid = requested.find((channel) => !isValidChannelName(channel));
-            if (invalid !== undefined) {
-              sendReply(ws, frame.id, { ok: false, error: "invalid_channel", channel: invalid });
-              return;
-            }
-            const added = requested.filter((channel) => !ws.data.channels.has(channel));
-            // A socket left with no channel (evicted while its name was taken in main) has nothing to join from.
-            const agent = ws.data.channels.size > 0 ? ws.data.registration : null;
-            const taken = added.find((channel) => nameTaken(channel, name, ws, agent));
-            if (taken !== undefined) {
-              sendReply(ws, frame.id, { ok: false, error: "name_taken", channel: taken });
-              return;
-            }
-            if (added.length > 0) {
-              if (!agent) {
-                sendReply(ws, frame.id, { ok: false, error: "not_joined", channel: added[0] });
-                return;
-              }
-              for (const channel of added) {
-                ws.data.channels.add(channel);
-                ws.subscribe(peersTopic(channel));
-                ws.subscribe(claimsTopic(channel));
-                holdInbox(channel, name, ws);
-                state.getOrCreate(channel).presence.set(name, { ...agent, name });
-              }
-            }
-            sendReply(ws, frame.id, { ok: true, channels: requested.map(snapshot) });
-            for (const channel of added) broadcastPeers(channel);
-            return;
-          }
-          case "part": {
-            if (!Array.isArray(frame.channels)) {
-              ws.close(MESH_CLOSE.BAD_FRAME);
-              return;
-            }
-            for (const channel of new Set(frame.channels)) {
-              if (!ws.data.channels.delete(channel)) continue;
-              // A watched channel keeps its presence and claims feed after the socket leaves it.
-              if (!ws.data.watching.has(channel)) {
-                ws.unsubscribe(peersTopic(channel));
-                ws.unsubscribe(claimsTopic(channel));
-              }
-              if (releaseInbox(channel, name, ws)) state.dropAgent(channel, name);
-              broadcastPeers(channel);
-              broadcastClaims(channel);
-            }
-            sendReply(ws, frame.id, { ok: true, channels: [...ws.data.channels].sort() });
-            if (ws.data.channels.size === 0) ws.close(1000);
-            return;
-          }
-          case "channels":
-            sendReply(ws, frame.id, state.listChannels());
-            return;
-          case "send": {
-            if (!ws.data.channels.has(frame.channel)) {
-              sendReply(ws, frame.id, { ok: false, error: "not_found" });
-              return;
-            }
-            if (!isValidAgentName(frame.to)) {
-              sendReply(ws, frame.id, { ok: false, error: "invalid_name" });
-              return;
-            }
-            const topic = inboxTopic(frame.channel, frame.to);
-            if (server.subscriberCount(topic) === 0) {
-              sendReply(ws, frame.id, { ok: false, error: "not_found" });
-              return;
-            }
-            // Stamp the authenticated identity: the token authorizes the connection, not
-            // arbitrary sender names. `from`/`to` come from the handshake, never the frame.
-            const message: AgentMailMessage = { ...frame.message, from: ws.data.name, to: frame.to, channel: frame.channel };
-            server.publish(topic, JSON.stringify({ t: "message", channel: frame.channel, message } satisfies ServerFrame));
-            record({
-              id: typeof message.id === "string" ? message.id : randomUUID(),
-              channel: frame.channel,
-              kind: "dm",
-              from: ws.data.name,
-              to: frame.to,
-              mentions: [],
-              text: typeof message.text === "string" ? message.text : "",
-              timestamp: typeof message.timestamp === "string" ? message.timestamp : new Date().toISOString(),
-              replyTo: typeof message.replyTo === "string" ? message.replyTo : null,
-            });
-            sendReply(ws, frame.id, { ok: true, message });
-            return;
-          }
-          case "post": {
-            if (!isValidChannelName(frame.channel)) {
-              sendReply(ws, frame.id, { ok: false, error: "invalid_channel" });
-              return;
-            }
-            if (!ws.data.channels.has(frame.channel)) {
-              sendReply(ws, frame.id, { ok: false, error: "not_joined" });
-              return;
-            }
-            const text = typeof frame.text === "string" ? frame.text.trim() : "";
-            if (text === "") {
-              sendReply(ws, frame.id, { ok: false, error: "empty" });
-              return;
-            }
-            const members = [...(state.channels.get(frame.channel)?.presence.keys() ?? [])];
-            const entry = record({
-              id: randomUUID(),
-              channel: frame.channel,
-              kind: "post",
-              from: name,
-              to: null,
-              mentions: parseMentions(text, members),
-              text,
-              timestamp: new Date().toISOString(),
-              replyTo: typeof frame.replyTo === "string" ? frame.replyTo : null,
-            });
-            const delivered: string[] = [];
-            for (const member of members) {
-              if (member === name) continue;
-              const message: AgentMailMessage = {
-                id: entry.id,
-                from: name,
-                to: member,
-                text,
-                timestamp: entry.timestamp,
-                replyTo: entry.replyTo,
-                channel: frame.channel,
-                kind: "post",
-                mentions: entry.mentions,
-                ...(isMentioned(entry.mentions, member) ? {} : { gentle: true }),
-              };
-              server.publish(inboxTopic(frame.channel, member), JSON.stringify({ t: "message", channel: frame.channel, message } satisfies ServerFrame));
-              delivered.push(member);
-            }
-            sendReply(ws, frame.id, { ok: true, entry, delivered });
-            return;
-          }
-          case "history": {
-            if (!isValidChannelName(frame.channel)) {
-              sendReply(ws, frame.id, { ok: false, error: "invalid_channel" });
-              return;
-            }
-            const limit = Math.max(1, Math.min(HISTORY_PAGE_MAX, Number.isInteger(frame.limit) ? frame.limit! : 100));
-            const before = Number.isInteger(frame.before) ? frame.before : undefined;
-            const page = state.history(frame.channel, before, limit);
-            sendReply(ws, frame.id, { ok: true, channel: frame.channel, entries: page.entries, hasMore: page.hasMore });
-            return;
-          }
-          case "watch": {
-            if (!Array.isArray(frame.channels)) {
-              ws.close(MESH_CLOSE.BAD_FRAME);
-              return;
-            }
-            const requested = [...new Set(frame.channels)];
-            const invalid = requested.find((channel) => !isValidChannelName(channel));
-            if (invalid !== undefined) {
-              sendReply(ws, frame.id, { ok: false, error: "invalid_channel", channel: invalid });
-              return;
-            }
-            const next = new Set(requested);
-            for (const channel of ws.data.watching) {
-              if (next.has(channel)) continue;
-              ws.unsubscribe(logTopic(channel));
-              if (!ws.data.channels.has(channel)) {
-                ws.unsubscribe(peersTopic(channel));
-                ws.unsubscribe(claimsTopic(channel));
-              }
-            }
-            for (const channel of next) {
-              if (ws.data.watching.has(channel)) continue;
-              ws.subscribe(logTopic(channel));
-              ws.subscribe(peersTopic(channel));
-              ws.subscribe(claimsTopic(channel));
-            }
-            ws.data.watching = next;
-            // Watching must not create channels (a stale watch list would resurrect a deleted one).
-            const peek = (channel: string): ChannelSnapshot => state.channels.has(channel)
-              ? snapshot(channel)
-              : { channel, peers: [], claims: {}, completions: {} };
-            sendReply(ws, frame.id, { ok: true, watching: requested.map(peek) });
-            return;
-          }
-          case "delete_channel": {
-            const channel = frame.channel;
-            if (!isValidChannelName(channel)) {
-              sendReply(ws, frame.id, { ok: false, error: "invalid_channel" });
-              return;
-            }
-            if (channel === "main") {
-              sendReply(ws, frame.id, { ok: false, error: "protected" });
-              return;
-            }
-            const current = state.channels.get(channel);
-            const members = [...(current?.presence.entries() ?? [])];
-            try {
-              if (members.some(([, registration]) => !inboxOwners.has(inboxTopic("main", registration.name)))) state.getOrCreate("main");
-              state.deleteChannel(channel);
-            } catch {
-              sendReply(ws, frame.id, { ok: false, error: "storage_failed" });
-              return;
-            }
-            clearTimeout(peerTimers.get(channel));
-            clearTimeout(claimTimers.get(channel));
-            peerTimers.delete(channel);
-            claimTimers.delete(channel);
-            const removed: string[] = [];
-            for (const [member, registration] of members) {
-              const holders = [...(inboxOwners.get(inboxTopic(channel, member)) ?? [])];
-              if (holders.length > 0 && member !== name) removed.push(member);
-              for (const sock of holders) {
-                const rehomed = evict(sock, member, channel, name, registration);
-                if (member === name) continue;
-                // Same path as a peer message: interrupts the agent's session so it knows why.
-                const notice: AgentMailMessage = {
-                  id: randomUUID(),
-                  from: name,
-                  to: member,
-                  text: `#${channel} was deleted by ${name}. You're no longer in it${rehomed ? " — you've been moved to #main so you stay reachable" : ""}.`,
-                  timestamp: new Date().toISOString(),
-                  replyTo: null,
-                  channel: rehomed ? "main" : channel,
-                };
-                sendFrame(sock, { t: "message", channel: notice.channel ?? channel, message: notice });
-              }
-            }
-            for (const socket of sockets) {
-              socket.data.watching.delete(channel);
-              socket.unsubscribe(peersTopic(channel));
-              socket.unsubscribe(claimsTopic(channel));
-              socket.unsubscribe(logTopic(channel));
-            }
-            server.publish(CHANNELS_TOPIC, JSON.stringify({ t: "channel_deleted", channel, by: name } satisfies ServerFrame));
-            broadcastChannels();
-            sendReply(ws, frame.id, { ok: true, deleted: channel, removed });
-            return;
-          }
-          case "rename": {
-            if (!isValidAgentName(frame.name)) {
-              sendReply(ws, frame.id, { success: false, error: "invalid_name" });
-              return;
-            }
-            if (frame.name === name) {
-              sendReply(ws, frame.id, { success: false, error: "same_name" });
-              return;
-            }
-            for (const channel of ws.data.channels) {
-              if (otherHolders(channel, frame.name, ws).length > 0) {
-                sendReply(ws, frame.id, { success: false, error: "name_taken" });
-                return;
-              }
-            }
-            const renamed = ws.data.registration ? { ...ws.data.registration, name: frame.name } : null;
-            for (const channel of ws.data.channels) {
-              const vacated = releaseInbox(channel, name, ws);
-              holdInbox(channel, frame.name, ws);
-              // The person's other windows keep the old name; only this window moves.
-              if (vacated) state.renameAgent(channel, name, frame.name);
-              else if (renamed) state.getOrCreate(channel).presence.set(frame.name, { ...renamed });
-            }
-            ws.data.name = frame.name;
-            ws.data.registration = renamed;
-            sendReply(ws, frame.id, { success: true, oldName: name, newName: frame.name });
-            for (const channel of ws.data.channels) {
-              broadcastPeers(channel);
-              broadcastClaims(channel);
-            }
-            return;
-          }
-          case "claim": {
-            if (!ws.data.channels.has(frame.channel)) {
-              ws.close(MESH_CLOSE.BAD_FRAME);
-              return;
-            }
-            const result = state.claim(frame.channel, name, frame.spec, frame.taskId, frame.reason);
-            sendReply(ws, frame.id, result);
-            broadcastClaims(frame.channel);
-            return;
-          }
-          case "unclaim": {
-            if (!ws.data.channels.has(frame.channel)) {
-              ws.close(MESH_CLOSE.BAD_FRAME);
-              return;
-            }
-            const result = state.unclaim(frame.channel, name, frame.spec, frame.taskId);
-            sendReply(ws, frame.id, result);
-            broadcastClaims(frame.channel);
-            return;
-          }
-          case "complete": {
-            if (!ws.data.channels.has(frame.channel)) {
-              ws.close(MESH_CLOSE.BAD_FRAME);
-              return;
-            }
-            const result = state.complete(frame.channel, name, frame.spec, frame.taskId, frame.notes);
-            sendReply(ws, frame.id, result);
-            broadcastClaims(frame.channel);
-            if (result.success) {
-              const completions = state.getOrCreate(frame.channel).completions;
-              server.publish(claimsTopic(frame.channel), JSON.stringify({ t: "completions", channel: frame.channel, completions } satisfies ServerFrame));
-            }
-            return;
-          }
-          case "ping":
-            sendFrame(ws, { t: "pong" });
-            return;
-          case "bye":
-            ws.close(1000);
-            return;
-          case "hello":
-            ws.close(MESH_CLOSE.BAD_FRAME);
-            return;
+        try {
+          handleMessage(ws, raw);
+        } catch (error) {
+          console.error(
+            `[mesh] websocket message failed for ${ws.data.name ?? "unregistered socket"}`,
+            error,
+          );
+          ws.close(1011, "internal error");
         }
       },
       close(ws) {
@@ -649,6 +337,570 @@ export function startMeshServer(opts: MeshServerOptions): MeshServer {
       },
     },
   });
+
+  function handleMessage(ws: Bun.ServerWebSocket<SocketData>, raw: string | Buffer): void {
+    const frame = parseFrame<ClientFrame>(raw);
+    if (!frame) {
+      ws.close(MESH_CLOSE.BAD_FRAME);
+      return;
+    }
+
+    if (ws.data.name === null) {
+      if (frame.t !== "hello") {
+        ws.close(MESH_CLOSE.BAD_FRAME);
+        return;
+      }
+      if (
+        typeof frame.token !== "string" ||
+        !timingSafeEqual(expectedToken, tokenDigest(frame.token))
+      ) {
+        sendFrame(ws, { t: "reject", error: "bad_token" });
+        ws.close(MESH_CLOSE.BAD_TOKEN);
+        return;
+      }
+      if (!Array.isArray(frame.channels) || frame.channels.length === 0) {
+        sendFrame(ws, { t: "reject", error: "invalid_channel" });
+        return;
+      }
+      const invalid = frame.channels.find((channel) => !isValidChannelName(channel));
+      if (invalid !== undefined) {
+        sendFrame(ws, { t: "reject", error: "invalid_channel", channel: invalid });
+        return;
+      }
+      const name = frame.agent?.name;
+      if (!isValidAgentName(name)) {
+        sendFrame(ws, { t: "reject", error: "invalid_name" });
+        return;
+      }
+      const deleted = [...new Set(frame.channels)].filter((channel) => state.isDeleted(channel));
+      const requested = [...new Set(frame.channels)].filter((channel) => !state.isDeleted(channel));
+      if (!requested.length) requested.push("main");
+      // name_taken only when another live socket holds the name and isn't the same person's
+      // other window. A zombie holder (partitioned, closing, heartbeat-reap pending) is
+      // dropped so a reconnecting agent can reclaim its own name.
+      // Keys shorter than a random 32-byte base64url secret are treated as absent.
+      ws.data.identityKey =
+        typeof frame.identityKey === "string" && frame.identityKey.length >= 43
+          ? frame.identityKey
+          : null;
+      let taken: string | undefined;
+      for (const channel of requested) {
+        const held = inboxOwners.has(inboxTopic(channel, name));
+        if (nameTaken(channel, name, ws, frame.agent)) taken = channel;
+        else if (held && !inboxOwners.has(inboxTopic(channel, name))) {
+          state.dropAgent(channel, name);
+          broadcastPeers(channel);
+        }
+      }
+      if (taken !== undefined) {
+        sendFrame(ws, { t: "reject", error: "name_taken", channel: taken });
+        return;
+      }
+
+      clearTimeout(ws.data.helloTimer);
+      ws.data.helloTimer = null;
+      ws.data.name = name;
+      ws.data.registration = { ...frame.agent, name };
+      ws.subscribe(CHANNELS_TOPIC);
+      for (const channel of requested) {
+        ws.data.channels.add(channel);
+        ws.subscribe(peersTopic(channel));
+        ws.subscribe(claimsTopic(channel));
+        holdInbox(channel, name, ws);
+        state.getOrCreate(channel).presence.set(name, { ...ws.data.registration });
+      }
+      const claimChannels = new Set<string>();
+      for (const assertion of Array.isArray(frame.claims) ? frame.claims : []) {
+        const channel = assertion?.channel;
+        if (typeof channel !== "string" || !ws.data.channels.has(channel)) continue;
+        const result = state.claim(
+          channel,
+          name,
+          assertion.spec,
+          assertion.taskId,
+          assertion.reason,
+          assertion.claimedAt,
+        );
+        if (result.success) claimChannels.add(channel);
+      }
+      sendFrame(ws, {
+        t: "welcome",
+        name,
+        channels: requested.map(snapshot),
+        server: {
+          protocol: 2,
+          features: [
+            "history",
+            "watch",
+            "delete_channel",
+            "shared_human_identity",
+            "storage_failed",
+            "idempotency",
+          ],
+        },
+      });
+      for (const channel of deleted) {
+        sendFrame(ws, { t: "removed", channel, by: "server", channels: requested, added: [] });
+        sendFrame(ws, {
+          t: "message",
+          channel: requested[0],
+          message: {
+            id: randomUUID(),
+            from: "server",
+            to: name,
+            text: `#${channel} was deleted while you were disconnected. You have not rejoined it.`,
+            channel: requested[0],
+            timestamp: new Date().toISOString(),
+            replyTo: null,
+          },
+        });
+      }
+      for (const channel of requested) broadcastPeers(channel);
+      for (const channel of claimChannels) broadcastClaims(channel);
+      return;
+    }
+
+    const name = ws.data.name;
+    switch (frame.t) {
+      case "publish": {
+        ws.data.registration = { ...frame.agent, name };
+        for (const channel of ws.data.channels) {
+          state.getOrCreate(channel).presence.set(name, { ...ws.data.registration });
+          broadcastPeers(channel);
+        }
+        return;
+      }
+      case "join": {
+        if (!Array.isArray(frame.channels)) {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+          return;
+        }
+        const requested = [...new Set(frame.channels)];
+        const invalid = requested.find((channel) => !isValidChannelName(channel));
+        if (invalid !== undefined) {
+          sendReply(ws, frame.id, { ok: false, error: "invalid_channel", channel: invalid });
+          return;
+        }
+        const added = requested.filter((channel) => !ws.data.channels.has(channel));
+        // A socket left with no channel (evicted while its name was taken in main) has nothing to join from.
+        const agent = ws.data.channels.size > 0 ? ws.data.registration : null;
+        const taken = added.find((channel) => nameTaken(channel, name, ws, agent));
+        if (taken !== undefined) {
+          sendReply(ws, frame.id, { ok: false, error: "name_taken", channel: taken });
+          return;
+        }
+        if (added.length > 0) {
+          if (!agent) {
+            sendReply(ws, frame.id, { ok: false, error: "not_joined", channel: added[0] });
+            return;
+          }
+          for (const channel of added) {
+            ws.data.channels.add(channel);
+            ws.subscribe(peersTopic(channel));
+            ws.subscribe(claimsTopic(channel));
+            holdInbox(channel, name, ws);
+            state.getOrCreate(channel).presence.set(name, { ...agent, name });
+          }
+        }
+        sendReply(ws, frame.id, { ok: true, channels: requested.map(snapshot) });
+        for (const channel of added) broadcastPeers(channel);
+        return;
+      }
+      case "part": {
+        if (!Array.isArray(frame.channels)) {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+          return;
+        }
+        for (const channel of new Set(frame.channels)) {
+          if (!ws.data.channels.delete(channel)) continue;
+          // A watched channel keeps its presence and claims feed after the socket leaves it.
+          if (!ws.data.watching.has(channel)) {
+            ws.unsubscribe(peersTopic(channel));
+            ws.unsubscribe(claimsTopic(channel));
+          }
+          if (releaseInbox(channel, name, ws)) state.dropAgent(channel, name);
+          broadcastPeers(channel);
+          broadcastClaims(channel);
+        }
+        sendReply(ws, frame.id, { ok: true, channels: [...ws.data.channels].sort() });
+        if (ws.data.channels.size === 0) ws.close(1000);
+        return;
+      }
+      case "channels":
+        sendReply(ws, frame.id, state.listChannels());
+        return;
+      case "send": {
+        if (!ws.data.channels.has(frame.channel)) {
+          sendReply(ws, frame.id, { ok: false, error: "not_found" });
+          return;
+        }
+        if (!isValidAgentName(frame.to)) {
+          sendReply(ws, frame.id, { ok: false, error: "invalid_name" });
+          return;
+        }
+        const topic = inboxTopic(frame.channel, frame.to);
+        // Stamp the authenticated identity: the token authorizes the connection, not
+        // arbitrary sender names. `from`/`to` come from the handshake, never the frame.
+        const message: AgentMailMessage = {
+          ...frame.message,
+          from: ws.data.name,
+          to: frame.to,
+          channel: frame.channel,
+        };
+        const messageId = typeof message.id === "string" ? message.id : randomUUID();
+        const fromHistory = (entry: HistoryEntry): AgentMailMessage => ({
+          ...message,
+          id: entry.id,
+          from: entry.from,
+          to: entry.to ?? frame.to,
+          text: entry.text,
+          timestamp: entry.timestamp,
+          replyTo: entry.replyTo,
+          channel: entry.channel,
+          ...(message.mentions === undefined ? {} : { mentions: entry.mentions }),
+        });
+        let existing: HistoryEntry | null;
+        try {
+          existing = state.getMessage(frame.channel, messageId);
+        } catch (error) {
+          storageFailure("read direct message", error);
+          sendReply(ws, frame.id, { ok: false, error: "storage_failed" });
+          return;
+        }
+        if (existing) {
+          sendReply(ws, frame.id, { ok: true, message: fromHistory(existing) });
+          return;
+        }
+        if (server.subscriberCount(topic) === 0) {
+          sendReply(ws, frame.id, { ok: false, error: "not_found" });
+          return;
+        }
+        let logged: HistoryEntry;
+        let duplicate = false;
+        try {
+          const appended = record({
+            id: messageId,
+            channel: frame.channel,
+            kind: "dm",
+            from: ws.data.name,
+            to: frame.to,
+            mentions: [],
+            text: typeof message.text === "string" ? message.text : "",
+            timestamp:
+              typeof message.timestamp === "string" ? message.timestamp : new Date().toISOString(),
+            replyTo: typeof message.replyTo === "string" ? message.replyTo : null,
+          });
+          logged = appended.entry;
+          duplicate = appended.duplicate;
+        } catch (error) {
+          storageFailure("append direct message", error);
+          sendReply(ws, frame.id, { ok: false, error: "storage_failed" });
+          return;
+        }
+        const deliveredMessage = fromHistory(logged);
+        if (!duplicate) {
+          server.publish(
+            topic,
+            JSON.stringify({
+              t: "message",
+              channel: frame.channel,
+              message: deliveredMessage,
+            } satisfies ServerFrame),
+          );
+        }
+        sendReply(ws, frame.id, { ok: true, message: deliveredMessage });
+        return;
+      }
+      case "post": {
+        if (!isValidChannelName(frame.channel)) {
+          sendReply(ws, frame.id, { ok: false, error: "invalid_channel" });
+          return;
+        }
+        if (!ws.data.channels.has(frame.channel)) {
+          sendReply(ws, frame.id, { ok: false, error: "not_joined" });
+          return;
+        }
+        const text = typeof frame.text === "string" ? frame.text.trim() : "";
+        if (text === "") {
+          sendReply(ws, frame.id, { ok: false, error: "empty" });
+          return;
+        }
+        const members = [...(state.channels.get(frame.channel)?.presence.keys() ?? [])];
+        const recipients = members.filter((member) => member !== name);
+        let entry: HistoryEntry;
+        let duplicate = false;
+        let delivered: string[];
+        try {
+          const appended = record(
+            {
+              id:
+                typeof frame.messageId === "string" && frame.messageId.length > 0
+                  ? frame.messageId
+                  : randomUUID(),
+              channel: frame.channel,
+              kind: "post",
+              from: name,
+              to: null,
+              mentions: parseMentions(text, members),
+              text,
+              timestamp: new Date().toISOString(),
+              replyTo: typeof frame.replyTo === "string" ? frame.replyTo : null,
+            },
+            recipients,
+          );
+          entry = appended.entry;
+          duplicate = appended.duplicate;
+          delivered = appended.delivered;
+        } catch (error) {
+          storageFailure("append channel post", error);
+          sendReply(ws, frame.id, { ok: false, error: "storage_failed" });
+          return;
+        }
+        if (!duplicate) {
+          for (const member of recipients) {
+            const message: AgentMailMessage = {
+              id: entry.id,
+              from: entry.from,
+              to: member,
+              text: entry.text,
+              timestamp: entry.timestamp,
+              replyTo: entry.replyTo,
+              channel: entry.channel,
+              kind: "post",
+              mentions: entry.mentions,
+              ...(isMentioned(entry.mentions, member) ? {} : { gentle: true }),
+            };
+            server.publish(
+              inboxTopic(entry.channel, member),
+              JSON.stringify({
+                t: "message",
+                channel: entry.channel,
+                message,
+              } satisfies ServerFrame),
+            );
+          }
+        }
+        sendReply(ws, frame.id, { ok: true, entry, delivered });
+        return;
+      }
+      case "history": {
+        if (!isValidChannelName(frame.channel)) {
+          sendReply(ws, frame.id, { ok: false, error: "invalid_channel" });
+          return;
+        }
+        const limit = Math.max(
+          1,
+          Math.min(HISTORY_PAGE_MAX, Number.isInteger(frame.limit) ? frame.limit! : 100),
+        );
+        const before = Number.isInteger(frame.before) ? frame.before : undefined;
+        try {
+          const page = state.history(frame.channel, before, limit);
+          sendReply(ws, frame.id, {
+            ok: true,
+            channel: frame.channel,
+            entries: page.entries,
+            hasMore: page.hasMore,
+          });
+        } catch (error) {
+          storageFailure("read channel history", error);
+          sendReply(ws, frame.id, { ok: false, error: "storage_failed" });
+        }
+        return;
+      }
+      case "watch": {
+        if (!Array.isArray(frame.channels)) {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+          return;
+        }
+        const requested = [...new Set(frame.channels)];
+        const invalid = requested.find((channel) => !isValidChannelName(channel));
+        if (invalid !== undefined) {
+          sendReply(ws, frame.id, { ok: false, error: "invalid_channel", channel: invalid });
+          return;
+        }
+        const next = new Set(requested);
+        for (const channel of ws.data.watching) {
+          if (next.has(channel)) continue;
+          ws.unsubscribe(logTopic(channel));
+          if (!ws.data.channels.has(channel)) {
+            ws.unsubscribe(peersTopic(channel));
+            ws.unsubscribe(claimsTopic(channel));
+          }
+        }
+        for (const channel of next) {
+          if (ws.data.watching.has(channel)) continue;
+          ws.subscribe(logTopic(channel));
+          ws.subscribe(peersTopic(channel));
+          ws.subscribe(claimsTopic(channel));
+        }
+        ws.data.watching = next;
+        // Watching must not create channels (a stale watch list would resurrect a deleted one).
+        const peek = (channel: string): ChannelSnapshot =>
+          state.channels.has(channel)
+            ? snapshot(channel)
+            : { channel, peers: [], claims: {}, completions: {} };
+        sendReply(ws, frame.id, { ok: true, watching: requested.map(peek) });
+        return;
+      }
+      case "delete_channel": {
+        const channel = frame.channel;
+        if (!isValidChannelName(channel)) {
+          sendReply(ws, frame.id, { ok: false, error: "invalid_channel" });
+          return;
+        }
+        if (channel === "main") {
+          sendReply(ws, frame.id, { ok: false, error: "protected" });
+          return;
+        }
+        const current = state.channels.get(channel);
+        const members = [...(current?.presence.entries() ?? [])];
+        try {
+          if (
+            members.some(
+              ([, registration]) => !inboxOwners.has(inboxTopic("main", registration.name)),
+            )
+          )
+            state.getOrCreate("main");
+          state.deleteChannel(channel);
+        } catch (error) {
+          storageFailure("delete channel", error);
+          sendReply(ws, frame.id, { ok: false, error: "storage_failed" });
+          return;
+        }
+        clearTimeout(peerTimers.get(channel));
+        clearTimeout(claimTimers.get(channel));
+        peerTimers.delete(channel);
+        claimTimers.delete(channel);
+        const removed: string[] = [];
+        for (const [member, registration] of members) {
+          const holders = [...(inboxOwners.get(inboxTopic(channel, member)) ?? [])];
+          if (holders.length > 0 && member !== name) removed.push(member);
+          for (const sock of holders) {
+            const rehomed = evict(sock, member, channel, name, registration);
+            if (member === name) continue;
+            // Same path as a peer message: interrupts the agent's session so it knows why.
+            const notice: AgentMailMessage = {
+              id: randomUUID(),
+              from: name,
+              to: member,
+              text: `#${channel} was deleted by ${name}. You're no longer in it${rehomed ? " — you've been moved to #main so you stay reachable" : ""}.`,
+              timestamp: new Date().toISOString(),
+              replyTo: null,
+              channel: rehomed ? "main" : channel,
+            };
+            sendFrame(sock, {
+              t: "message",
+              channel: notice.channel ?? channel,
+              message: notice,
+            });
+          }
+        }
+        for (const socket of sockets) {
+          socket.data.watching.delete(channel);
+          socket.unsubscribe(peersTopic(channel));
+          socket.unsubscribe(claimsTopic(channel));
+          socket.unsubscribe(logTopic(channel));
+        }
+        server.publish(
+          CHANNELS_TOPIC,
+          JSON.stringify({ t: "channel_deleted", channel, by: name } satisfies ServerFrame),
+        );
+        broadcastChannels();
+        sendReply(ws, frame.id, { ok: true, deleted: channel, removed });
+        return;
+      }
+      case "rename": {
+        if (!isValidAgentName(frame.name)) {
+          sendReply(ws, frame.id, { success: false, error: "invalid_name" });
+          return;
+        }
+        if (frame.name === name) {
+          sendReply(ws, frame.id, { success: false, error: "same_name" });
+          return;
+        }
+        for (const channel of ws.data.channels) {
+          if (otherHolders(channel, frame.name, ws).length > 0) {
+            sendReply(ws, frame.id, { success: false, error: "name_taken" });
+            return;
+          }
+        }
+        const renamed = ws.data.registration ? { ...ws.data.registration, name: frame.name } : null;
+        for (const channel of ws.data.channels) {
+          const vacated = releaseInbox(channel, name, ws);
+          holdInbox(channel, frame.name, ws);
+          // The person's other windows keep the old name; only this window moves.
+          if (vacated) state.renameAgent(channel, name, frame.name);
+          else if (renamed) state.getOrCreate(channel).presence.set(frame.name, { ...renamed });
+        }
+        ws.data.name = frame.name;
+        ws.data.registration = renamed;
+        sendReply(ws, frame.id, { success: true, oldName: name, newName: frame.name });
+        for (const channel of ws.data.channels) {
+          broadcastPeers(channel);
+          broadcastClaims(channel);
+        }
+        return;
+      }
+      case "claim": {
+        if (!ws.data.channels.has(frame.channel)) {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+          return;
+        }
+        const result = state.claim(frame.channel, name, frame.spec, frame.taskId, frame.reason);
+        sendReply(ws, frame.id, result);
+        broadcastClaims(frame.channel);
+        return;
+      }
+      case "unclaim": {
+        if (!ws.data.channels.has(frame.channel)) {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+          return;
+        }
+        const result = state.unclaim(frame.channel, name, frame.spec, frame.taskId);
+        sendReply(ws, frame.id, result);
+        broadcastClaims(frame.channel);
+        return;
+      }
+      case "complete": {
+        if (!ws.data.channels.has(frame.channel)) {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+          return;
+        }
+        const result = state.complete(frame.channel, name, frame.spec, frame.taskId, frame.notes);
+        sendReply(ws, frame.id, result);
+        broadcastClaims(frame.channel);
+        if (result.success) {
+          const completions = state.getOrCreate(frame.channel).completions;
+          server.publish(
+            claimsTopic(frame.channel),
+            JSON.stringify({
+              t: "completions",
+              channel: frame.channel,
+              completions,
+            } satisfies ServerFrame),
+          );
+        }
+        return;
+      }
+      case "ping":
+        sendFrame(ws, { t: "pong" });
+        return;
+      case "bye":
+        ws.close(1000);
+        return;
+      case "hello":
+        ws.close(MESH_CLOSE.BAD_FRAME);
+        return;
+      default: {
+        const unsupported = frame as unknown as { id?: unknown };
+        if (typeof unsupported.id === "string") {
+          sendReply(ws, unsupported.id, { ok: false, error: "unsupported" });
+        } else {
+          ws.close(MESH_CLOSE.BAD_FRAME);
+        }
+      }
+    }
+  }
 
   return {
     port: server.port,

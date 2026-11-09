@@ -4,6 +4,7 @@
  * Tracks autonomous mode, wave history, concurrency, and auto-work flag.
  */
 
+import { randomUUID } from "node:crypto";
 import { normalizeCwd } from "./state.ts";
 
 export interface WaveResult {
@@ -41,6 +42,12 @@ export const autonomousState: AutonomousState = {
   pid: null,
 };
 
+let autonomousRunId: string | null = null;
+
+export function getAutonomousRunId(): string | null {
+  return autonomousRunId;
+}
+
 export const MIN_CONCURRENCY = 1;
 export const MAX_CONCURRENCY = 10;
 
@@ -56,9 +63,10 @@ function isProcessAlive(pid: number): boolean {
 export function clampConcurrency(value: number, configMax?: number): number {
   if (!Number.isFinite(value)) return MIN_CONCURRENCY;
   const whole = Math.trunc(value);
-  const effectiveMax = configMax != null && Number.isFinite(configMax)
-    ? Math.min(configMax, MAX_CONCURRENCY)
-    : MAX_CONCURRENCY;
+  const effectiveMax =
+    configMax != null && Number.isFinite(configMax)
+      ? Math.min(configMax, MAX_CONCURRENCY)
+      : MAX_CONCURRENCY;
   return Math.max(MIN_CONCURRENCY, Math.min(effectiveMax, whole));
 }
 
@@ -75,12 +83,13 @@ export function adjustConcurrency(delta: number, configMax?: number): number {
 }
 
 export function waitForConcurrencyChange(): Promise<void> {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     concurrencyResolve = resolve;
   });
 }
 
 export function startAutonomous(cwd: string, concurrency: number): void {
+  autonomousRunId = randomUUID();
   autonomousState.active = true;
   autonomousState.cwd = normalizeCwd(cwd);
   autonomousState.waveNumber = 1;
@@ -94,6 +103,7 @@ export function startAutonomous(cwd: string, concurrency: number): void {
 }
 
 export function stopAutonomous(reason: "completed" | "blocked" | "manual"): void {
+  autonomousRunId = null;
   autonomousState.active = false;
   autonomousState.autoOverlayPending = false;
   autonomousState.stoppedAt = new Date().toISOString();
@@ -123,7 +133,10 @@ export function restoreAutonomousState(data: Partial<AutonomousState>): void {
     autonomousState.pid = typeof data.pid === "number" ? data.pid : null;
   }
 
-  if (!autonomousState.active) return;
+  if (!autonomousState.active) {
+    autonomousRunId = null;
+    return;
+  }
 
   const ownerPid = autonomousState.pid;
   const sameProcess = ownerPid === process.pid;
@@ -136,6 +149,7 @@ export function restoreAutonomousState(data: Partial<AutonomousState>): void {
     autonomousState.stoppedAt = autonomousState.stoppedAt ?? new Date().toISOString();
     autonomousState.pid = null;
   }
+  autonomousRunId = autonomousState.active ? randomUUID() : null;
 }
 
 export function isAutonomousForCwd(cwd: string): boolean {
@@ -155,8 +169,9 @@ export function setPendingAutoWork(cwd: string): void {
   pendingAutoWorkCwd = normalizeCwd(cwd);
 }
 
-export function consumePendingAutoWork(): { cwd: string } | null {
-  if (!pendingAutoWork || !pendingAutoWorkCwd) return null;
+export function consumePendingAutoWork(cwd?: string): { cwd: string } | null {
+  if (!pendingAutoWork || !pendingAutoWorkCwd || (cwd && normalizeCwd(cwd) !== pendingAutoWorkCwd))
+    return null;
   const consumed = { cwd: pendingAutoWorkCwd };
   pendingAutoWork = false;
   pendingAutoWorkCwd = null;

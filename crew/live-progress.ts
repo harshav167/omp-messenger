@@ -16,16 +16,25 @@ function getWorkerKey(cwd: string, taskId: string): string {
   return `${cwd}::${taskId}`;
 }
 
-export function updateLiveWorker(cwd: string, taskId: string, info: Omit<LiveWorkerInfo, "cwd">): void {
-  liveWorkers.set(getWorkerKey(cwd, taskId), {
+export function updateLiveWorker(
+  cwd: string,
+  taskId: string,
+  info: Omit<LiveWorkerInfo, "cwd">,
+  expectedName?: string,
+): void {
+  const key = getWorkerKey(cwd, taskId);
+  if (expectedName !== undefined && liveWorkers.get(key)?.name !== expectedName) return;
+  liveWorkers.set(key, {
     ...info,
     cwd,
   });
   notifyListeners();
 }
 
-export function removeLiveWorker(cwd: string, taskId: string): void {
-  liveWorkers.delete(getWorkerKey(cwd, taskId));
+export function removeLiveWorker(cwd: string, taskId: string, expectedName?: string): void {
+  const key = getWorkerKey(cwd, taskId);
+  if (expectedName !== undefined && liveWorkers.get(key)?.name !== expectedName) return;
+  liveWorkers.delete(key);
   notifyListeners();
 }
 

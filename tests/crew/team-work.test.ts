@@ -60,7 +60,10 @@ describe("work with Team approval", () => {
 
   it("does not auto-block approval-gated tasks at max attempts", async () => {
     fs.mkdirSync(path.join(cwd, ".omp", "messenger", "crew"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".omp", "messenger", "crew", "config.json"), JSON.stringify({ work: { maxAttemptsPerTask: 1 } }));
+    fs.writeFileSync(
+      path.join(cwd, ".omp", "messenger", "crew", "config.json"),
+      JSON.stringify({ work: { maxAttemptsPerTask: 1 } }),
+    );
     store.createPlan(cwd, "docs/PRD.md");
     const gated = store.createTask(cwd, "High risk", "Edit auth", [], {
       approval: { required: true, status: "pending" },
@@ -80,7 +83,16 @@ describe("work with Team approval", () => {
     teamStore.setActiveTeam(cwd, "models", "models");
     store.createPlan(cwd, "docs/PRD.md");
     store.createTask(cwd, "Normal work", "Do work", [], { role: "worker" });
-    vi.mocked(agents.spawnAgents).mockResolvedValue([{ exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: "task-1" }]);
+    vi.mocked(agents.spawnAgents).mockResolvedValue([
+      {
+        exitCode: 0,
+        output: "",
+        truncated: false,
+        progress: { toolCallCount: 0, tokens: 0 },
+        agent: "crew-worker",
+        taskId: "task-1",
+      },
+    ]);
 
     await workHandler.execute({ model: "request-model" }, mesh, createMockContext(cwd), vi.fn());
 
@@ -94,7 +106,16 @@ describe("work with Team approval", () => {
     teamStore.setActiveTeam(cwd, "models", "models");
     store.createPlan(cwd, "docs/PRD.md");
     store.createTask(cwd, "Scout work", "Inspect", [], { role: "Scout" });
-    vi.mocked(agents.spawnAgents).mockResolvedValue([{ exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: "task-1" }]);
+    vi.mocked(agents.spawnAgents).mockResolvedValue([
+      {
+        exitCode: 0,
+        output: "",
+        truncated: false,
+        progress: { toolCallCount: 0, tokens: 0 },
+        agent: "crew-worker",
+        taskId: "task-1",
+      },
+    ]);
 
     await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());
 
@@ -103,16 +124,32 @@ describe("work with Team approval", () => {
     expect(task.modelOverride).toBe("role-model");
   });
 
-  it("uses the host session model before agent defaults", async () => {
+  it("leaves the model unset when no role model is configured", async () => {
     store.createPlan(cwd, "docs/PRD.md");
     store.createTask(cwd, "Normal work", "Do work");
-    vi.mocked(agents.spawnAgents).mockResolvedValue([{ exitCode: 0, output: "", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: "task-1" }]);
+    vi.mocked(agents.spawnAgents).mockResolvedValue([
+      {
+        exitCode: 0,
+        output: "",
+        truncated: false,
+        progress: { toolCallCount: 0, tokens: 0 },
+        agent: "crew-worker",
+        taskId: "task-1",
+      },
+    ]);
 
-    await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn(), undefined, "session-model");
+    await workHandler.execute(
+      {},
+      mesh,
+      createMockContext(cwd),
+      vi.fn(),
+      undefined,
+      "session-model",
+    );
 
     expect(agents.spawnAgents).toHaveBeenCalledTimes(1);
     const task = vi.mocked(agents.spawnAgents).mock.calls[0][0][0];
-    expect(task.modelOverride).toBe("session-model");
+    expect(task.modelOverride).toBeUndefined();
   });
 
   it("reports rejected ready tasks separately from pending approvals", async () => {
@@ -125,15 +162,24 @@ describe("work with Team approval", () => {
 
     expect(response.details.needsApproval).toEqual([]);
     expect(response.details.rejected).toEqual([
-      { id: rejected.id, title: rejected.title, approval: { required: true, status: "rejected", feedback: "needs rollback tests" } },
+      {
+        id: rejected.id,
+        title: rejected.title,
+        approval: { required: true, status: "rejected", feedback: "needs rollback tests" },
+      },
     ]);
     expect(response.content[0].text).toContain("Rejected tasks need revision");
-    expect(response.content[0].text).toContain('omp_messenger({ action: "task.revise", id: "task-1", prompt: "Address approval feedback" })');
+    expect(response.content[0].text).toContain(
+      'omp_messenger({ action: "task.revise", id: "task-1", prompt: "Address approval feedback" })',
+    );
   });
 
   it("reports approval-gated tasks unlocked after a wave", async () => {
     fs.mkdirSync(path.join(cwd, ".omp", "messenger", "crew"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".omp", "messenger", "crew", "config.json"), JSON.stringify({ dependencies: "strict" }));
+    fs.writeFileSync(
+      path.join(cwd, ".omp", "messenger", "crew", "config.json"),
+      JSON.stringify({ dependencies: "strict" }),
+    );
     store.createPlan(cwd, "docs/PRD.md");
     const first = store.createTask(cwd, "Prepare", "Do prep");
     const gated = store.createTask(cwd, "Change auth", "Edit auth", [first.id], {
@@ -142,8 +188,21 @@ describe("work with Team approval", () => {
       approval: { required: true, status: "pending" },
     });
     vi.mocked(agents.spawnAgents).mockImplementation(async () => {
-      store.updateTask(cwd, first.id, { status: "done", completed_at: new Date().toISOString(), summary: "Done" });
-      return [{ exitCode: 0, output: "done", truncated: false, progress: { toolCallCount: 0, tokens: 0 }, agent: "crew-worker", taskId: first.id }];
+      store.updateTask(cwd, first.id, {
+        status: "done",
+        completed_at: new Date().toISOString(),
+        summary: "Done",
+      });
+      return [
+        {
+          exitCode: 0,
+          output: "done",
+          truncated: false,
+          progress: { toolCallCount: 0, tokens: 0 },
+          agent: "crew-worker",
+          taskId: first.id,
+        },
+      ];
     });
 
     const response = await workHandler.execute({}, mesh, createMockContext(cwd), vi.fn());

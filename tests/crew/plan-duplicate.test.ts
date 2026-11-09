@@ -24,16 +24,23 @@ describe("plan duplicate-run guard", () => {
 
   function writePersistedPlanningState(pid: number): void {
     fs.mkdirSync(path.dirname(planningStatePath()), { recursive: true });
-    fs.writeFileSync(planningStatePath(), JSON.stringify({
-      active: true,
-      cwd: tmpDir,
-      runId: "run-from-another-process",
-      pass: 1,
-      maxPasses: 3,
-      phase: "scan-code",
-      updatedAt: new Date().toISOString(),
-      pid,
-    }, null, 2));
+    fs.writeFileSync(
+      planningStatePath(),
+      JSON.stringify(
+        {
+          active: true,
+          cwd: tmpDir,
+          runId: "run-from-another-process",
+          pass: 1,
+          maxPasses: 3,
+          phase: "scan-code",
+          updatedAt: new Date().toISOString(),
+          pid,
+        },
+        null,
+        2,
+      ),
+    );
   }
 
   beforeEach(async () => {
@@ -51,12 +58,14 @@ describe("plan duplicate-run guard", () => {
 
     mockCtx = createMockContext(tmpDir);
 
-    spawnAgents.mockResolvedValue([{
-      exitCode: 0,
-      output: plannerOutput,
-      error: null,
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 0,
+        output: plannerOutput,
+        error: null,
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
   });
 
   afterEach(() => {
@@ -84,6 +93,31 @@ describe("plan duplicate-run guard", () => {
     expect(r.details?.error).toBeUndefined();
     expect(store.getTasks(tmpDir)).toHaveLength(1);
     expect(JSON.parse(fs.readFileSync(planningStatePath(), "utf-8")).active).toBe(false);
+  });
+
+  it("does not let a stale planner delete a replacement run's plan", async () => {
+    const pending = Promise.withResolvers<Array<Record<string, unknown>>>();
+    spawnAgents.mockReturnValueOnce(pending.promise);
+    const running = planHandler.execute({ action: "plan" }, mockCtx, "agent");
+    expect(spawnAgents).toHaveBeenCalledTimes(1);
+    expect(state.planningState.runId).not.toBe("replacement-run");
+
+    state.startPlanningRun(tmpDir, 1);
+    const replacementRunId = state.planningState.runId;
+    pending.resolve([
+      {
+        exitCode: 143,
+        output: "",
+        error: "cancelled",
+        progress: { status: "cancelled", toolCallCount: 0, tokens: 0 },
+      },
+    ]);
+    const r = await running;
+
+    expect(r.details?.error).toBe("cancelled");
+    expect(state.planningState.active).toBe(true);
+    expect(state.planningState.runId).toBe(replacementRunId);
+    expect(store.getPlan(tmpDir)).not.toBeNull();
   });
 });
 
@@ -115,7 +149,9 @@ describe("plan idempotent task creation", () => {
     if (state.planningState.cwd) state.clearPlanningState(state.planningState.cwd);
   });
 
-  function outputWithTasks(tasks: Array<{ title: string; description: string; dependsOn: string[] }>): string {
+  function outputWithTasks(
+    tasks: Array<{ title: string; description: string; dependsOn: string[] }>,
+  ): string {
     return `## 1. PRD Understanding Summary\nSummary\n## 2. Relevant Code/Docs/Resources Reviewed\nResources\n## 3. Sequential Implementation Steps\nSteps\n## 4. Parallelized Task Graph\nGraph\n\`\`\`tasks-json\n${JSON.stringify(tasks)}\n\`\`\``;
   }
 
@@ -125,15 +161,17 @@ describe("plan idempotent task creation", () => {
     spawnAgents.mockImplementation(async () => {
       store.createPlan(tmpDir, "docs/PRD.md");
       store.createTask(tmpDir, "Task A", "Do A");
-      return [{
-        exitCode: 0,
-        output: outputWithTasks([
-          { title: "Task A", description: "Do A", dependsOn: [] },
-          { title: "Task B", description: "Do B", dependsOn: ["Task A"] },
-        ]),
-        error: null,
-        progress: { toolCallCount: 0, tokens: 0 },
-      }];
+      return [
+        {
+          exitCode: 0,
+          output: outputWithTasks([
+            { title: "Task A", description: "Do A", dependsOn: [] },
+            { title: "Task B", description: "Do B", dependsOn: ["Task A"] },
+          ]),
+          error: null,
+          progress: { toolCallCount: 0, tokens: 0 },
+        },
+      ];
     });
 
     const r = await planHandler.execute({ action: "plan" }, mockCtx, "agent");
@@ -141,22 +179,24 @@ describe("plan idempotent task creation", () => {
     expect(r.details?.error).toBeUndefined();
     const tasks = store.getTasks(tmpDir);
     expect(tasks).toHaveLength(2);
-    expect(tasks.filter(t => t.title === "Task A")).toHaveLength(1);
-    const taskA = tasks.find(t => t.title === "Task A")!;
-    const taskB = tasks.find(t => t.title === "Task B")!;
+    expect(tasks.filter((t) => t.title === "Task A")).toHaveLength(1);
+    const taskA = tasks.find((t) => t.title === "Task A")!;
+    const taskB = tasks.find((t) => t.title === "Task B")!;
     expect(taskB.depends_on).toEqual([taskA.id]);
   });
 
   it("deduplicates repeated titles within one planner output", async () => {
-    spawnAgents.mockResolvedValue([{
-      exitCode: 0,
-      output: outputWithTasks([
-        { title: "Task A", description: "Do A", dependsOn: [] },
-        { title: "Task A", description: "Do A again", dependsOn: [] },
-      ]),
-      error: null,
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 0,
+        output: outputWithTasks([
+          { title: "Task A", description: "Do A", dependsOn: [] },
+          { title: "Task A", description: "Do A again", dependsOn: [] },
+        ]),
+        error: null,
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
 
     const r = await planHandler.execute({ action: "plan" }, mockCtx, "agent");
 

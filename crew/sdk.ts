@@ -10,15 +10,15 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export type Sdk = ExtensionAPI["pi"];
 
-let sdk: Sdk | null = null;
+let getApi: (() => Sdk) | null = null;
 
-export function setSdk(api: Sdk): void {
-  sdk = api;
+export function setSdk(api: Sdk | (() => Sdk)): void {
+  getApi = typeof api === "function" ? api : () => api;
 }
 
 export function getSdk(): Sdk {
-  if (!sdk) {
+  if (!getApi) {
     throw new Error("omp-messenger crew requires the oh-my-pi runtime (SDK not injected)");
   }
-  return sdk;
+  return getApi();
 }

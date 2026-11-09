@@ -1,6 +1,6 @@
 /**
  * Crew - Plan Handler
- * 
+ *
  * Orchestrates planning: planner agent → parse tasks → create in store
  * Simplified: PRD → plan → tasks
  */
@@ -19,6 +19,7 @@ import {
   finishPlanningRun,
   isPlanningCancelled,
   isPlanningForCwd,
+  planningState,
   resetPlanningCancellation,
   restorePlanningState,
   setPendingAutoWork,
@@ -33,13 +34,20 @@ import type { TeamProfile, TeamRoleDefinition } from "../team/types.ts";
 import { taskMetadataMarkers } from "../utils/task-format.ts";
 
 const PRD_PATTERNS = [
-  "PRD.md", "prd.md",
-  "SPEC.md", "spec.md",
-  "REQUIREMENTS.md", "requirements.md",
-  "DESIGN.md", "design.md",
-  "PLAN.md", "plan.md",
-  "docs/PRD.md", "docs/prd.md",
-  "docs/SPEC.md", "docs/spec.md",
+  "PRD.md",
+  "prd.md",
+  "SPEC.md",
+  "spec.md",
+  "REQUIREMENTS.md",
+  "requirements.md",
+  "DESIGN.md",
+  "design.md",
+  "PLAN.md",
+  "plan.md",
+  "docs/PRD.md",
+  "docs/prd.md",
+  "docs/SPEC.md",
+  "docs/spec.md",
 ];
 
 const PLANNER_AGENT = "crew-planner";
@@ -115,14 +123,18 @@ function appendReviewToProgress(
   cwd: string,
   reviewNum: number,
   verdict: string,
-  content: string
+  content: string,
 ): void {
   const progressPath = getProgressPath(cwd);
   const header = `### Review ${reviewNum} (${formatProgressTime()})\n`;
   fs.appendFileSync(progressPath, `\n${header}**Verdict: ${verdict}**\n${content}\n`);
 }
 
-function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info"): void {
+function notify(
+  ctx: ExtensionContext,
+  message: string,
+  type: "info" | "warning" | "error" = "info",
+): void {
   if (!ctx.hasUI) return;
   ctx.ui.notify(message, type);
 }
@@ -186,14 +198,14 @@ function pruneTransitiveDeps(cwd: string, taskIds: string[]): void {
     const deps = idDeps.get(from);
     if (!deps) return false;
     if (deps.includes(to)) return true;
-    return deps.some(d => isReachable(d, to, visited));
+    return deps.some((d) => isReachable(d, to, visited));
   }
 
   for (const id of taskIds) {
     const deps = idDeps.get(id);
     if (!deps || deps.length < 2) continue;
-    const pruned = deps.filter(dep =>
-      !deps.some(other => other !== dep && isReachable(other, dep))
+    const pruned = deps.filter(
+      (dep) => !deps.some((other) => other !== dep && isReachable(other, dep)),
     );
     if (pruned.length < deps.length) {
       store.updateTask(cwd, id, { depends_on: pruned });
@@ -207,9 +219,13 @@ export async function execute(
   agentName: string,
   onProgress?: () => void,
   sessionModel?: string,
+  ownerSignal?: AbortSignal,
 ) {
   const cwd = ctx.cwd;
   const { prd, prompt } = params;
+  if (ownerSignal?.aborted) {
+    return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
+  }
   const reportProgress = () => onProgress?.();
   resetPlanningCancellation();
 
@@ -230,29 +246,39 @@ export async function execute(
       const planRef = existingPlan.prompt
         ? `"${store.getPlanLabel(existingPlan)}"`
         : existingPlan.prd;
-      return result(`A plan already exists for ${planRef}.\n\nTo re-plan with a steering prompt:\n  omp_messenger({ action: "plan", prompt: "focus on..." })`, {
-        mode: "plan",
-        error: "plan_exists",
-        existingPrd: existingPlan.prd,
-      });
+      return result(
+        `A plan already exists for ${planRef}.\n\nTo re-plan with a steering prompt:\n  omp_messenger({ action: "plan", prompt: "focus on..." })`,
+        {
+          mode: "plan",
+          error: "plan_exists",
+          existingPrd: existingPlan.prd,
+        },
+      );
     }
 
     if (existingTasks.length > 0 && prompt) {
       const liveWorkers = getLiveWorkers(cwd);
-      const inProgress = existingTasks.filter(t => t.status === "in_progress" || liveWorkers.has(t.id));
+      const inProgress = existingTasks.filter(
+        (t) => t.status === "in_progress" || liveWorkers.has(t.id),
+      );
       if (inProgress.length > 0) {
-        return result(`Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map(t => t.id).join(", ")}). Stop or complete them first.`, {
-          mode: "plan",
-          error: "tasks_in_progress",
-          inProgress: inProgress.map(t => t.id),
-        });
+        return result(
+          `Cannot re-plan: ${inProgress.length} task(s) in progress (${inProgress.map((t) => t.id).join(", ")}). Stop or complete them first.`,
+          {
+            mode: "plan",
+            error: "tasks_in_progress",
+            inProgress: inProgress.map((t) => t.id),
+          },
+        );
       }
       wipeTasks(cwd);
     }
 
     if (existingTasks.length === 0 && !prompt) {
       const crewDir = store.getCrewDir(cwd);
-      try { fs.rmSync(crewDir, { recursive: true, force: true }); } catch {}
+      try {
+        fs.rmSync(crewDir, { recursive: true, force: true });
+      } catch {}
     }
   }
 
@@ -266,7 +292,7 @@ export async function execute(
       return result(`PRD file not found: ${prd}`, {
         mode: "plan",
         error: "prd_not_found",
-        prd
+        prd,
       });
     }
     prdContent = fs.readFileSync(fullPath, "utf-8");
@@ -285,11 +311,14 @@ export async function execute(
         prdContent = prdContent.slice(0, MAX_PRD_SIZE) + "\n\n[Content truncated]";
       }
     } else {
-      return result(`No PRD file found. Create one of: ${PRD_PATTERNS.slice(0, 4).join(", ")}\n\nOr:\n  omp_messenger({ action: "plan", prd: "path/to/PRD.md" })\n  omp_messenger({ action: "plan", prompt: "Scan for bugs" })`, {
-        mode: "plan",
-        error: "no_prd",
-        searchedPatterns: PRD_PATTERNS
-      });
+      return result(
+        `No PRD file found. Create one of: ${PRD_PATTERNS.slice(0, 4).join(", ")}\n\nOr:\n  omp_messenger({ action: "plan", prd: "path/to/PRD.md" })\n  omp_messenger({ action: "plan", prompt: "Scan for bugs" })`,
+        {
+          mode: "plan",
+          error: "no_prd",
+          searchedPatterns: PRD_PATTERNS,
+        },
+      );
     }
   }
 
@@ -297,16 +326,16 @@ export async function execute(
 
   const availableAgents = discoverCrewAgents(cwd);
 
-  if (!availableAgents.some(a => a.name === PLANNER_AGENT)) {
+  if (!availableAgents.some((a) => a.name === PLANNER_AGENT)) {
     return result(`Error: ${PLANNER_AGENT} agent not found. Check extension installation.`, {
       mode: "plan",
-      error: "no_planner"
+      error: "no_planner",
     });
   }
 
   const config = loadCrewConfig(store.getCrewDir(cwd));
   const maxPasses = Math.max(1, config.planning.maxPasses);
-  const hasReviewer = availableAgents.some(a => a.name === "crew-reviewer");
+  const hasReviewer = availableAgents.some((a) => a.name === "crew-reviewer");
   const skills = discoverCrewSkills(cwd);
   const activeTeam = config.team.enabled ? teamStore.getActiveTeam(cwd) : null;
   const activeProfile = activeTeam ? teamStore.loadActiveProfile(cwd) : null;
@@ -316,16 +345,29 @@ export async function execute(
   const existingProgress = readProgressForPrompt(cwd);
 
   const runLabel = isPromptBased
-    ? (prompt!.length > 60 ? prompt!.slice(0, 57) + "..." : prompt!)
+    ? prompt!.length > 60
+      ? prompt!.slice(0, 57) + "..."
+      : prompt!
     : prdPath;
 
   store.createPlan(cwd, prdPath, isPromptBased ? prompt : undefined);
   startRunInProgress(cwd, runLabel);
   if (prompt && !isPromptBased) injectSteeringPrompt(cwd, prompt);
   startPlanningRun(cwd, maxPasses);
+  const planningRunId = planningState.runId;
+  const isCancelledOrStale = (): boolean =>
+    ownerSignal?.aborted === true ||
+    isPlanningCancelled() ||
+    !isPlanningForCwd(cwd) ||
+    planningState.runId !== planningRunId;
+  const cancelledResult = () => result("Planning cancelled.", { mode: "plan", error: "cancelled" });
   setPlanningPhase(cwd, "read-prd", 0);
   logFeedEvent(cwd, agentName, "plan.start", prdPath, `max passes ${maxPasses}`);
-  notify(ctx, `Planning started: ${isPromptBased ? runLabel : path.basename(prdPath)} (${maxPasses} pass${maxPasses === 1 ? "" : "es"})`, "info");
+  notify(
+    ctx,
+    `Planning started: ${isPromptBased ? runLabel : path.basename(prdPath)} (${maxPasses} pass${maxPasses === 1 ? "" : "es"})`,
+    "info",
+  );
   reportProgress();
 
   let lastPlannerOutput = "";
@@ -336,24 +378,61 @@ export async function execute(
 
   for (let pass = 1; pass <= maxPasses; pass++) {
     const passPhase: PlanningPhase = pass === 1 ? "scan-code" : "gap-analysis";
-    advancePhase(cwd, passPhase, agentName, "plan.pass.start", prdPath, `pass ${pass}/${maxPasses}`, pass);
+    advancePhase(
+      cwd,
+      passPhase,
+      agentName,
+      "plan.pass.start",
+      prdPath,
+      `pass ${pass}/${maxPasses}`,
+      pass,
+    );
     reportProgress();
     notify(ctx, `Planning pass ${pass}/${maxPasses} in progress`, "info");
 
-    const plannerPrompt = pass === 1
-      ? buildFirstPassPrompt(prdPath, prdContent, existingProgress, isPromptBased, skills, activeTeam?.name, activeProfile, teamRoles, approvalLabels)
-      : buildRefinementPrompt(prdPath, prdContent, readProgressForPrompt(cwd), isPromptBased, skills, activeTeam?.name, activeProfile, teamRoles, approvalLabels);
+    const plannerPrompt =
+      pass === 1
+        ? buildFirstPassPrompt(
+            prdPath,
+            prdContent,
+            existingProgress,
+            isPromptBased,
+            skills,
+            activeTeam?.name,
+            activeProfile,
+            teamRoles,
+            approvalLabels,
+          )
+        : buildRefinementPrompt(
+            prdPath,
+            prdContent,
+            readProgressForPrompt(cwd),
+            isPromptBased,
+            skills,
+            activeTeam?.name,
+            activeProfile,
+            teamRoles,
+            approvalLabels,
+          );
 
-    const [plannerResult] = await spawnAgents([{
-      agent: PLANNER_AGENT,
-      task: plannerPrompt,
-      modelOverride: config.models?.planner ?? sessionModel,
-      taskId: "__planner__",
-    }], cwd);
+    const [plannerResult] = await spawnAgents(
+      [
+        {
+          agent: PLANNER_AGENT,
+          task: plannerPrompt,
+          modelOverride: config.models?.planner,
+          taskId: "__planner__",
+        },
+      ],
+      cwd,
+      {
+        parentAgentId: ctx.agent?.id,
+        ownerSessionId: ctx.sessionManager?.getSessionId?.(),
+        ownerSignal,
+      },
+    );
 
-    if (isPlanningCancelled()) {
-      return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
-    }
+    if (isCancelledOrStale()) return cancelledResult();
 
     if (plannerResult.exitCode !== 0) {
       if (pass === 1) {
@@ -364,12 +443,22 @@ export async function execute(
         store.deletePlan(cwd);
         return result(`Error: Planner failed: ${plannerResult.error ?? "Unknown error"}`, {
           mode: "plan",
-          error: "planner_failed"
+          error: "planner_failed",
         });
       }
 
-      appendPassToProgress(cwd, pass, `[Planner failed: ${plannerResult.error ?? "Unknown error"}]`);
-      logFeedEvent(cwd, agentName, "plan.failed", prdPath, `pass ${pass} failed, using previous pass output`);
+      appendPassToProgress(
+        cwd,
+        pass,
+        `[Planner failed: ${plannerResult.error ?? "Unknown error"}]`,
+      );
+      logFeedEvent(
+        cwd,
+        agentName,
+        "plan.failed",
+        prdPath,
+        `pass ${pass} failed, using previous pass output`,
+      );
       notify(ctx, `Planner failed on pass ${pass}; using previous pass output.`, "warning");
       plannerFailedPass = pass;
       break;
@@ -378,13 +467,29 @@ export async function execute(
     lastPlannerOutput = plannerResult.output;
     passesCompleted = pass;
     appendPassToProgress(cwd, pass, lastPlannerOutput);
-    advancePhase(cwd, "build-task-graph", agentName, "plan.pass.done", prdPath, `pass ${pass}/${maxPasses} complete`, pass);
+    advancePhase(
+      cwd,
+      "build-task-graph",
+      agentName,
+      "plan.pass.done",
+      prdPath,
+      `pass ${pass}/${maxPasses} complete`,
+      pass,
+    );
     reportProgress();
 
     if (pass >= maxPasses) break;
     if (!hasReviewer) break;
 
-    advancePhase(cwd, "review-pass", agentName, "plan.review.start", prdPath, `review pass ${pass}`, pass);
+    advancePhase(
+      cwd,
+      "review-pass",
+      agentName,
+      "plan.review.start",
+      prdPath,
+      `review pass ${pass}`,
+      pass,
+    );
     reportProgress();
     notify(ctx, `Reviewing planning pass ${pass}/${maxPasses}`, "info");
 
@@ -397,16 +502,24 @@ export async function execute(
       isPromptBased,
     );
 
-    const [reviewResult] = await spawnAgents([{
-      agent: "crew-reviewer",
-      task: reviewPrompt,
-      modelOverride: config.models?.reviewer ?? sessionModel,
-      taskId: "__reviewer__",
-    }], cwd);
+    const [reviewResult] = await spawnAgents(
+      [
+        {
+          agent: "crew-reviewer",
+          task: reviewPrompt,
+          modelOverride: config.models?.reviewer,
+          taskId: "__reviewer__",
+        },
+      ],
+      cwd,
+      {
+        parentAgentId: ctx.agent?.id,
+        ownerSessionId: ctx.sessionManager?.getSessionId?.(),
+        ownerSignal,
+      },
+    );
 
-    if (isPlanningCancelled()) {
-      return result("Planning cancelled.", { mode: "plan", error: "cancelled" });
-    }
+    if (isCancelledOrStale()) return cancelledResult();
 
     if (reviewResult.exitCode !== 0) {
       logFeedEvent(cwd, agentName, "plan.review.done", prdPath, `review pass ${pass} failed`);
@@ -419,11 +532,21 @@ export async function execute(
     lastVerdict = parseVerdict(reviewResult.output);
     lastReviewOutput = reviewResult.output;
     appendReviewToProgress(cwd, pass, lastVerdict.verdict, reviewResult.output);
-    advancePhase(cwd, "build-steps", agentName, "plan.review.done", prdPath, `review ${pass}: ${lastVerdict.verdict}`, pass);
+    advancePhase(
+      cwd,
+      "build-steps",
+      agentName,
+      "plan.review.done",
+      prdPath,
+      `review ${pass}: ${lastVerdict.verdict}`,
+      pass,
+    );
     reportProgress();
 
     if (lastVerdict.verdict === "SHIP") break;
   }
+
+  if (isCancelledOrStale()) return cancelledResult();
 
   setPlanningPhase(cwd, "build-steps", passesCompleted);
   reportProgress();
@@ -442,11 +565,14 @@ export async function execute(
     logFeedEvent(cwd, agentName, "plan.failed", prdPath, "no tasks parsed");
     notify(ctx, "Planning finished but no tasks could be parsed. Review plan.md.", "warning");
 
-    return result(`Plan analysis complete but no tasks could be parsed.\n\nAnalysis saved to plan.md. Review and create tasks manually.`, {
-      mode: "plan",
-      prd: prdPath,
-      analysisLength: lastPlannerOutput.length
-    });
+    return result(
+      `Plan analysis complete but no tasks could be parsed.\n\nAnalysis saved to plan.md. Review and create tasks manually.`,
+      {
+        mode: "plan",
+        prd: prdPath,
+        analysisLength: lastPlannerOutput.length,
+      },
+    );
   }
 
   const plannedTasks: { id: string; title: string; dependsOn: string[] }[] = [];
@@ -456,7 +582,7 @@ export async function execute(
   // Reconcile against tasks already on the board so a duplicated plan run
   // reuses them by title instead of appending a second copy.
   const existingByTitle = new Map(
-    store.getTasks(cwd).map(t => [t.title.toLowerCase(), t.id] as const),
+    store.getTasks(cwd).map((t) => [t.title.toLowerCase(), t.id] as const),
   );
 
   for (let i = 0; i < tasks.length; i++) {
@@ -465,8 +591,12 @@ export async function execute(
     let taskId = titleToId.get(titleKey) ?? existingByTitle.get(titleKey);
     if (!taskId) {
       const role = config.team.enabled ? teamStore.canonicalRoleForTask(cwd, task.role) : undefined;
-      const riskLabels = config.team.enabled ? teamStore.normalizeRiskLabels(task.riskLabels) : undefined;
-      const approval = config.team.enabled ? teamStore.approvalForTask(cwd, role, riskLabels) : undefined;
+      const riskLabels = config.team.enabled
+        ? teamStore.normalizeRiskLabels(task.riskLabels)
+        : undefined;
+      const approval = config.team.enabled
+        ? teamStore.approvalForTask(cwd, role, riskLabels)
+        : undefined;
       const created = store.createTask(cwd, task.title, task.description, undefined, {
         ...(role ? { role } : {}),
         ...(riskLabels && riskLabels.length > 0 ? { risk_labels: riskLabels } : {}),
@@ -479,7 +609,7 @@ export async function execute(
     titleToId.set(titleKey, taskId);
     titleToId.set(`task ${i + 1}`, taskId);
     titleToId.set(`task-${i + 1}`, taskId);
-    if (!plannedTasks.some(t => t.id === taskId)) {
+    if (!plannedTasks.some((t) => t.id === taskId)) {
       plannedTasks.push({ id: taskId, title: task.title, dependsOn: task.dependsOn });
     }
   }
@@ -497,19 +627,23 @@ export async function execute(
         store.updateTask(cwd, task.id, { depends_on: resolvedDeps });
       }
     }
-
   }
 
-  pruneTransitiveDeps(cwd, plannedTasks.map(t => t.id));
+  pruneTransitiveDeps(
+    cwd,
+    plannedTasks.map((t) => t.id),
+  );
 
   store.setPlanSpec(cwd, lastPlannerOutput);
 
-  const taskList = plannedTasks.map(t => {
-    const task = store.getTask(cwd, t.id);
-    const deps = task?.depends_on.length ? ` → deps: ${task.depends_on.join(", ")}` : "";
-    const markers = task ? taskMetadataMarkers(task) : "";
-    return `  - ${t.id}: ${t.title}${markers}${deps}`;
-  }).join("\n");
+  const taskList = plannedTasks
+    .map((t) => {
+      const task = store.getTask(cwd, t.id);
+      const deps = task?.depends_on.length ? ` → deps: ${task.depends_on.join(", ")}` : "";
+      const markers = task ? taskMetadataMarkers(task) : "";
+      return `  - ${t.id}: ${t.title}${markers}${deps}`;
+    })
+    .join("\n");
 
   const passLabel = passesCompleted === 1 ? "pass" : "passes";
   let planningSummary = "";
@@ -543,13 +677,14 @@ export async function execute(
 - Autonomous: \`omp_messenger({ action: "work", autonomous: true })\``;
   if (shouldAutoWork) {
     const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-    const startable = ready.filter(t => !teamStore.taskNeedsApproval(cwd, t));
-    const needsApproval = ready.filter(t => teamStore.taskNeedsApproval(cwd, t));
-    nextSteps = startable.length > 0
-      ? `Workers will start automatically.`
-      : needsApproval.length > 0
-        ? `Ready tasks need lead approval before workers can start:\n${needsApproval.map(t => `- \`omp_messenger({ action: "task.approve", id: "${t.id}" })\` — ${t.title}`).join("\n")}`
-        : `No tasks are startable yet. Review dependencies with \`omp_messenger({ action: "task.ready" })\`.`;
+    const startable = ready.filter((t) => !teamStore.taskNeedsApproval(cwd, t));
+    const needsApproval = ready.filter((t) => teamStore.taskNeedsApproval(cwd, t));
+    nextSteps =
+      startable.length > 0
+        ? `Workers will start automatically.`
+        : needsApproval.length > 0
+          ? `Ready tasks need lead approval before workers can start:\n${needsApproval.map((t) => `- \`omp_messenger({ action: "task.approve", id: "${t.id}" })\` — ${t.title}`).join("\n")}`
+          : `No tasks are startable yet. Review dependencies with \`omp_messenger({ action: "task.ready" })\`.`;
   }
 
   const text = `✅ Plan created from ${successLabel}
@@ -578,7 +713,7 @@ ${nextSteps}`;
     mode: "plan",
     prd: prdPath,
     plannerAgent: PLANNER_AGENT,
-    tasksCreated: plannedTasks.map(t => ({ id: t.id, title: t.title })),
+    tasksCreated: plannedTasks.map((t) => ({ id: t.id, title: t.title })),
     newTaskCount,
   });
 }
@@ -590,7 +725,7 @@ ${nextSteps}`;
 function formatSkillsForPlanner(skills: CrewSkillInfo[]): string {
   if (skills.length === 0) return "";
 
-  const lines = skills.map(s => `  ${s.name} — ${s.description}`);
+  const lines = skills.map((s) => `  ${s.name} — ${s.description}`);
   return `
 ## Available Skills
 
@@ -601,14 +736,23 @@ ${lines.join("\n")}
 `;
 }
 
-function formatTeamForPlanner(teamName: string | undefined, profile: TeamProfile | null, roles: Record<string, TeamRoleDefinition>, approvalLabels: string[]): string {
+function formatTeamForPlanner(
+  teamName: string | undefined,
+  profile: TeamProfile | null,
+  roles: Record<string, TeamRoleDefinition>,
+  approvalLabels: string[],
+): string {
   if (!teamName) return "";
   const roleLines = Object.values(roles)
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(role => `  ${role.name}${role.description ? ` — ${role.description}` : ""}${role.model ? ` (model: ${role.model})` : ""}`);
-  const approvalLine = approvalLabels.length > 0
-    ? `\nHigh-risk labels requiring lead approval for editing roles: ${approvalLabels.join(", ")}\n`
-    : "";
+    .map(
+      (role) =>
+        `  ${role.name}${role.description ? ` — ${role.description}` : ""}${role.model ? ` (model: ${role.model})` : ""}`,
+    );
+  const approvalLine =
+    approvalLabels.length > 0
+      ? `\nHigh-risk labels requiring lead approval for editing roles: ${approvalLabels.join(", ")}\n`
+      : "";
 
   return `
 ## Active Team
@@ -625,8 +769,12 @@ When creating tasks, include optional \`role\` and \`riskLabels\` fields where u
 
 function tasksJsonFormatHint(skills: CrewSkillInfo[], teamActive: boolean): string {
   const fields = ["title", "description", "dependsOn"];
-  if (skills.length > 0) fields.push("optionally skills (array of skill names from the Available Skills list that are relevant to the task)");
-  if (teamActive) fields.push("role", "riskLabels (array of high-risk labels such as auth or api-contract)");
+  if (skills.length > 0)
+    fields.push(
+      "optionally skills (array of skill names from the Available Skills list that are relevant to the task)",
+    );
+  if (teamActive)
+    fields.push("role", "riskLabels (array of high-risk labels such as auth or api-contract)");
   return `${fields.slice(0, -1).join(", ")}${fields.length > 1 ? ", and " : ""}${fields[fields.length - 1]}`;
 }
 
@@ -788,10 +936,18 @@ function extractPlanSections(output: string): PlanSections | null {
   const s3Start = firstFour[2].index;
   const s4Start = firstFour[3].index;
 
-  const s1Body = section(s1Start, s2Start).replace(/^##\s+1\.\s+.+\n?/, "").trim();
-  const s2Body = section(s2Start, s3Start).replace(/^##\s+2\.\s+.+\n?/, "").trim();
-  const s3Body = section(s3Start, s4Start).replace(/^##\s+3\.\s+.+\n?/, "").trim();
-  const s4Body = section(s4Start, end).replace(/^##\s+4\.\s+.+\n?/, "").trim();
+  const s1Body = section(s1Start, s2Start)
+    .replace(/^##\s+1\.\s+.+\n?/, "")
+    .trim();
+  const s2Body = section(s2Start, s3Start)
+    .replace(/^##\s+2\.\s+.+\n?/, "")
+    .trim();
+  const s3Body = section(s3Start, s4Start)
+    .replace(/^##\s+3\.\s+.+\n?/, "")
+    .trim();
+  const s4Body = section(s4Start, end)
+    .replace(/^##\s+4\.\s+.+\n?/, "")
+    .trim();
 
   if (!s1Body || !s2Body || !s3Body || !s4Body) return null;
 
@@ -810,15 +966,24 @@ function parseJsonTaskBlock(output: string): ParsedTask[] | null {
     const parsed = JSON.parse(match[1]);
     if (!Array.isArray(parsed)) return null;
     const tasks = parsed
-      .filter((t: unknown): t is Record<string, unknown> => !!t && typeof t === "object" && !Array.isArray(t))
-      .filter(t => typeof t.title === "string" && t.title.trim().length > 0)
-      .map(t => ({
+      .filter(
+        (t: unknown): t is Record<string, unknown> =>
+          !!t && typeof t === "object" && !Array.isArray(t),
+      )
+      .filter((t) => typeof t.title === "string" && t.title.trim().length > 0)
+      .map((t) => ({
         title: (t.title as string).trim(),
         description: typeof t.description === "string" ? t.description : "",
-        dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d: unknown) => typeof d === "string") : [],
-        skills: Array.isArray(t.skills) ? t.skills.filter((s: unknown) => typeof s === "string") : undefined,
+        dependsOn: Array.isArray(t.dependsOn)
+          ? t.dependsOn.filter((d: unknown) => typeof d === "string")
+          : [],
+        skills: Array.isArray(t.skills)
+          ? t.skills.filter((s: unknown) => typeof s === "string")
+          : undefined,
         role: typeof t.role === "string" && t.role.trim().length > 0 ? t.role.trim() : undefined,
-        riskLabels: Array.isArray(t.riskLabels) ? t.riskLabels.filter((s: unknown) => typeof s === "string") : undefined,
+        riskLabels: Array.isArray(t.riskLabels)
+          ? t.riskLabels.filter((s: unknown) => typeof s === "string")
+          : undefined,
       }));
     return tasks.length > 0 ? tasks : null;
   } catch {
@@ -828,7 +993,7 @@ function parseJsonTaskBlock(output: string): ParsedTask[] | null {
 
 /**
  * Parses tasks from planner output (markdown fallback).
- * 
+ *
  * Expected format:
  * ### Task 1: [Title]
  * [Description...]
@@ -836,7 +1001,7 @@ function parseJsonTaskBlock(output: string): ParsedTask[] | null {
  */
 function parseTasksFromOutput(output: string): ParsedTask[] {
   const tasks: ParsedTask[] = [];
-  
+
   const taskRegex = /###\s*Task\s*\d+:\s*(.+?)\n([\s\S]*?)(?=###\s*Task\s*\d+:|## |$)/gi;
   let match;
 
@@ -846,20 +1011,18 @@ function parseTasksFromOutput(output: string): ParsedTask[] {
 
     const depsMatch = body.match(/Dependencies?:\s*(.+?)(?:\n|$)/i);
     let dependsOn: string[] = [];
-    
+
     if (depsMatch) {
       const depsText = depsMatch[1].trim().toLowerCase();
       if (depsText !== "none" && depsText !== "n/a" && depsText !== "-") {
         dependsOn = depsText
           .split(/,\s*/)
-          .map(d => d.trim())
-          .filter(d => d.length > 0);
+          .map((d) => d.trim())
+          .filter((d) => d.length > 0);
       }
     }
 
-    const description = body
-      .replace(/Dependencies?:\s*.+?(?:\n|$)/i, "")
-      .trim();
+    const description = body.replace(/Dependencies?:\s*.+?(?:\n|$)/i, "").trim();
 
     tasks.push({ title, description, dependsOn });
   }
@@ -888,13 +1051,13 @@ function discoverPRD(cwd: string): DiscoveredPRD | null {
         const realPath = fs.realpathSync(filePath);
         if (seenPaths.has(realPath)) continue;
         seenPaths.add(realPath);
-        
+
         let content = fs.readFileSync(filePath, "utf-8");
-        
+
         if (content.length > MAX_PRD_SIZE) {
           content = content.slice(0, MAX_PRD_SIZE) + "\n\n[Content truncated]";
         }
-        
+
         return { relativePath: pattern, content };
       } catch {
         // Ignore read errors

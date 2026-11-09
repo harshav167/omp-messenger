@@ -27,7 +27,7 @@ import {
   normalizeChannels,
   parseMentions,
 } from "../lib.ts";
-import { buildRegistration, normalizeCwd } from "./registration.ts";
+import { buildRegistration, currentModelIdentity, normalizeCwd } from "./registration.ts";
 import type {
   ClaimResult,
   CompleteResult,
@@ -47,7 +47,6 @@ interface AgentsCache {
   filtered: Map<string, AgentRegistration[]>;
   timestamp: number;
 }
-
 
 interface FsRuntime {
   /** Agents cache per channel registry path. */
@@ -116,7 +115,10 @@ async function withSwarmLock<T>(baseDir: string, fn: () => T): Promise<T> {
     }
 
     try {
-      const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR);
+      const fd = fs.openSync(
+        lockPath,
+        fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR,
+      );
       fs.writeSync(fd, String(process.pid));
       fs.closeSync(fd);
       break;
@@ -200,7 +202,11 @@ function readAliveAgents(registry: string): AgentRegistration[] {
   return allAgents;
 }
 
-function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime): AgentRegistration[] {
+function getActiveAgents(
+  state: MessengerState,
+  dirs: Dirs,
+  runtime: FsRuntime,
+): AgentRegistration[] {
   refreshCacheGeneration(runtime);
   const now = Date.now();
   const excludeName = state.agentName;
@@ -213,9 +219,9 @@ function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime):
     const cachedFiltered = cached.filtered.get(cacheKey);
     if (cachedFiltered) return cachedFiltered;
 
-    let filtered = cached.allAgents.filter(agent => agent.name !== excludeName);
+    let filtered = cached.allAgents.filter((agent) => agent.name !== excludeName);
     if (scopeToFolder) {
-      filtered = filtered.filter(agent => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
+      filtered = filtered.filter((agent) => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
     }
     cached.filtered.set(cacheKey, filtered);
     return filtered;
@@ -223,9 +229,9 @@ function getActiveAgents(state: MessengerState, dirs: Dirs, runtime: FsRuntime):
 
   const allAgents = readAliveAgents(dirs.registry);
 
-  let filtered = allAgents.filter(agent => agent.name !== excludeName);
+  let filtered = allAgents.filter((agent) => agent.name !== excludeName);
   if (scopeToFolder) {
-    filtered = filtered.filter(agent => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
+    filtered = filtered.filter((agent) => agent.hostId === LOCAL_HOST_ID && agent.cwd === myCwd);
   }
   const filteredMap = new Map<string, AgentRegistration[]>();
   filteredMap.set(cacheKey, filtered);
@@ -247,14 +253,22 @@ function nameConflict(dirs: Dirs, name: string): boolean {
 }
 
 /** First channel where `name` is taken by another live agent, or null. */
-function nameConflictChannel(base: string, channels: readonly string[], name: string): string | null {
+function nameConflictChannel(
+  base: string,
+  channels: readonly string[],
+  name: string,
+): string | null {
   for (const channel of channels) {
     if (nameConflict(channelDirs(base, channel), name)) return channel;
   }
   return null;
 }
 
-function findAvailableName(baseName: string, base: string, channels: readonly string[]): string | null {
+function findAvailableName(
+  baseName: string,
+  base: string,
+  channels: readonly string[],
+): string | null {
   if (!nameConflictChannel(base, channels, baseName)) return baseName;
 
   for (let i = 2; i <= 99; i++) {
@@ -271,6 +285,20 @@ interface WriteRegistrationsResult {
   detail?: string;
 }
 
+function writeRegistrationAtomic(regPath: string, registration: AgentRegistration): void {
+  const temporary = `${regPath}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(registration, null, 2));
+    fs.renameSync(temporary, regPath);
+  } finally {
+    try {
+      fs.unlinkSync(temporary);
+    } catch {
+      /* Renamed or never created. */
+    }
+  }
+}
+
 /** Write the same registration file into every channel, then verify each write. */
 function writeRegistrationFiles(
   state: MessengerState,
@@ -283,17 +311,14 @@ function writeRegistrationFiles(
     ensureDirSync(dirs.registry);
     ensureDirSync(getMyInbox(state, dirs));
     const regPath = getRegistrationPath(state, dirs);
-    if (fs.existsSync(regPath)) {
-      try {
-        fs.unlinkSync(regPath);
-      } catch {
-        // Ignore
-      }
-    }
     try {
-      fs.writeFileSync(regPath, JSON.stringify(registration, null, 2));
+      writeRegistrationAtomic(regPath, registration);
     } catch (err) {
-      return { ok: false, reason: "write_failed", detail: err instanceof Error ? err.message : "unknown error" };
+      return {
+        ok: false,
+        reason: "write_failed",
+        detail: err instanceof Error ? err.message : "unknown error",
+      };
     }
   }
 
@@ -343,7 +368,10 @@ function register(
     if (isExplicitName) {
       if (!isValidAgentName(state.agentName)) {
         if (ctx.hasUI) {
-          ctx.ui.notify(`Invalid agent name "${state.agentName}" - use only letters, numbers, underscore, hyphen`, "error");
+          ctx.ui.notify(
+            `Invalid agent name "${state.agentName}" - use only letters, numbers, underscore, hyphen`,
+            "error",
+          );
         }
         return false;
       }
@@ -358,9 +386,12 @@ function register(
       const availableName = findAvailableName(state.agentName, base, channels);
       if (!availableName || !isValidAgentName(availableName)) {
         if (ctx.hasUI) {
-          ctx.ui.notify(availableName
-            ? `Generated agent name "${availableName}" is not a valid agent name`
-            : "Could not find available agent name after 99 attempts", "error");
+          ctx.ui.notify(
+            availableName
+              ? `Generated agent name "${availableName}" is not a valid agent name`
+              : "Could not find available agent name after 99 attempts",
+            "error",
+          );
         }
         return false;
       }
@@ -413,7 +444,8 @@ function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionCon
 
   try {
     const reg: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
-    const currentModel = ctx.model?.id ?? reg.model;
+    reg.sessionId = ctx.sessionManager.getSessionId();
+    const currentModel = currentModelIdentity(ctx) ?? reg.model;
     reg.model = currentModel;
     state.model = currentModel;
     reg.cwd = state.cwd;
@@ -427,12 +459,11 @@ function updateRegistration(state: MessengerState, dirs: Dirs, ctx: ExtensionCon
     reg.session = { ...state.session };
     reg.activity = { ...state.activity };
     reg.statusMessage = state.statusMessage;
-    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+    writeRegistrationAtomic(regPath, reg);
   } catch {
     // Ignore errors
   }
 }
-
 
 function unregisterChannel(state: MessengerState, dirs: Dirs): void {
   const regPath = getRegistrationPath(state, dirs);
@@ -445,7 +476,6 @@ function unregisterChannel(state: MessengerState, dirs: Dirs): void {
   }
   invalidateAgentsCache();
 }
-
 
 function renameAgent(
   state: MessengerState,
@@ -520,7 +550,7 @@ function renameAgent(
     const newInbox = join(dirs.inbox, newName);
     if (fs.existsSync(newInbox)) {
       try {
-        const staleFiles = fs.readdirSync(newInbox).filter(f => f.endsWith(".json"));
+        const staleFiles = fs.readdirSync(newInbox).filter((f) => f.endsWith(".json"));
         for (const file of staleFiles) {
           try {
             fs.unlinkSync(join(newInbox, file));
@@ -550,7 +580,6 @@ function renameAgent(
   invalidateAgentsCache();
   return { success: true, oldName, newName };
 }
-
 
 // =============================================================================
 // Swarm Coordination
@@ -603,7 +632,9 @@ function assertStoreReadable(dirs: Dirs, file: string): void {
     } catch {
       // Leave it in place; the throw below still blocks the mutation.
     }
-    throw new Error(`${file} is corrupt and was quarantined to ${quarantine}; refusing to overwrite it.`);
+    throw new Error(
+      `${file} is corrupt and was quarantined to ${quarantine}; refusing to overwrite it.`,
+    );
   }
 }
 
@@ -685,11 +716,9 @@ function getClaims(dirs: Dirs): AllClaims {
   return filterStaleClaims(claims, dirs);
 }
 
-
 function getCompletions(dirs: Dirs): AllCompletions {
   return readCompletionsSync(dirs);
 }
-
 
 async function claimTask(
   dirs: Dirs,
@@ -698,7 +727,7 @@ async function claimTask(
   agent: string,
   sessionId: string,
   pid: number,
-  reason?: string
+  reason?: string,
 ): Promise<ClaimResult> {
   return withSwarmLock(dirs.base, () => {
     assertStoreReadable(dirs, CLAIMS_FILE);
@@ -723,7 +752,7 @@ async function claimTask(
       sessionId,
       pid,
       claimedAt: new Date().toISOString(),
-      reason
+      reason,
     };
     claims[specPath][taskId] = newClaim;
     writeClaimsSync(dirs, claims);
@@ -731,12 +760,11 @@ async function claimTask(
   });
 }
 
-
 async function unclaimTask(
   dirs: Dirs,
   specPath: string,
   taskId: string,
-  agent: string
+  agent: string,
 ): Promise<UnclaimResult> {
   return withSwarmLock(dirs.base, () => {
     assertStoreReadable(dirs, CLAIMS_FILE);
@@ -762,13 +790,12 @@ async function unclaimTask(
   });
 }
 
-
 async function completeTask(
   dirs: Dirs,
   specPath: string,
   taskId: string,
   agent: string,
-  notes?: string
+  notes?: string,
 ): Promise<CompleteResult> {
   return withSwarmLock(dirs.base, () => {
     assertStoreReadable(dirs, CLAIMS_FILE);
@@ -802,7 +829,7 @@ async function completeTask(
     const completion: CompletionEntry = {
       completedBy: agent,
       completedAt: new Date().toISOString(),
-      notes
+      notes,
     };
     completions[specPath][taskId] = completion;
 
@@ -844,7 +871,10 @@ function processAllPendingMessages(
 
     let files: string[];
     try {
-      files = fs.readdirSync(inbox).filter(f => f.endsWith(".json")).sort();
+      files = fs
+        .readdirSync(inbox)
+        .filter((f) => f.endsWith(".json"))
+        .sort();
     } catch {
       return;
     }
@@ -1030,7 +1060,6 @@ function stopWatcher(runtime: FsRuntime, channel: string): void {
   }
 }
 
-
 // =============================================================================
 // Target Validation
 // =============================================================================
@@ -1089,7 +1118,9 @@ function countAliveMembers(registry: string): number {
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
     try {
-      const registration: AgentRegistration = JSON.parse(fs.readFileSync(join(registry, file), "utf-8"));
+      const registration: AgentRegistration = JSON.parse(
+        fs.readFileSync(join(registry, file), "utf-8"),
+      );
       if (isProcessAlive(registration.pid)) members++;
     } catch {
       // Ignore malformed registrations.
@@ -1098,7 +1129,10 @@ function countAliveMembers(registry: string): number {
   return members;
 }
 
-function channelInfo(base: string, name: string): { name: string; members: number; createdAt: string } {
+function channelInfo(
+  base: string,
+  name: string,
+): { name: string; members: number; createdAt: string } {
   const dirs = channelDirs(base, name);
   let createdAt = new Date(0).toISOString();
   try {
@@ -1149,8 +1183,8 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
       }
       if (state.registered) {
         // Reconcile membership: join additions first so the set never empties mid-flight.
-        const added = channels.filter(c => !state.channels.includes(c));
-        const removed = state.channels.filter(c => !channels.includes(c));
+        const added = channels.filter((c) => !state.channels.includes(c));
+        const removed = state.channels.filter((c) => !channels.includes(c));
         if (added.length > 0 && !(await mesh.joinChannels(ctx, added))) return false;
         if (removed.length > 0) await mesh.leaveChannels(removed);
         return true;
@@ -1177,7 +1211,7 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
         state.channels = next;
         return true;
       }
-      const added = next.filter(c => !state.channels.includes(c));
+      const added = next.filter((c) => !state.channels.includes(c));
       if (added.length === 0) {
         state.channels = next;
         return true;
@@ -1217,7 +1251,7 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
         stopWatcher(runtime, channel);
         runtime.watches.delete(channel);
         unregisterChannel(state, channelDirs(base, channel));
-        state.channels = state.channels.filter(c => c !== channel);
+        state.channels = state.channels.filter((c) => c !== channel);
       }
       if (state.channels.length === 0) state.registered = false;
     },
@@ -1229,9 +1263,10 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
 
       let names: string[];
       try {
-        names = fs.readdirSync(channelsDir, { withFileTypes: true })
-          .filter(entry => entry.isDirectory())
-          .map(entry => entry.name)
+        names = fs
+          .readdirSync(channelsDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
           .sort();
       } catch {
         return channels;
@@ -1343,13 +1378,24 @@ export function createFsMesh(base: string, state: MessengerState, deliver: Deliv
       if (body === "") return { ok: false, error: "empty" };
       // The filesystem mesh keeps no channel log: a post is a fan-out of direct deliveries.
       const dirs = channelDirs(base, channel);
-      const members = readAliveAgents(dirs.registry).map(agent => agent.name).filter(name => name !== state.agentName);
+      const members = readAliveAgents(dirs.registry)
+        .map((agent) => agent.name)
+        .filter((name) => name !== state.agentName);
       const mentions = parseMentions(body, [...members, state.agentName]);
       const id = randomUUID();
       const delivered: string[] = [];
       try {
         for (const member of members) {
-          sendMessageToAgent(dirs, member, body, state.agentName, opts?.replyTo ?? null, !isMentioned(mentions, member), channel, { id, mentions });
+          sendMessageToAgent(
+            dirs,
+            member,
+            body,
+            state.agentName,
+            opts?.replyTo ?? null,
+            !isMentioned(mentions, member),
+            channel,
+            { id, mentions },
+          );
           delivered.push(member);
         }
       } catch {

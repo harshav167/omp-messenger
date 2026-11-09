@@ -1,6 +1,6 @@
 /**
  * Crew - Task Handlers
- * 
+ *
  * Operations: create, split, show, list, start, done, block, unblock, ready, reset, progress, approve, reject
  * Simplified: tasks belong to the plan, not an epic
  */
@@ -24,14 +24,15 @@ function revisionHint(task: Task): string {
 
 function rejectedTasksText(tasks: Task[]): string {
   if (tasks.length === 0) return "";
-  return `\n\nRejected tasks need revision:\n${tasks.map(t => `  - ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}\n    Revise with: \`${revisionHint(t)}\`\n    Or revise dependents too: \`omp_messenger({ action: "task.revise-tree", id: "${t.id}", prompt: "Address approval feedback" })\``).join("\n")}`;
+  return `\n\nRejected tasks need revision:\n${tasks.map((t) => `  - ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}\n    Revise with: \`${revisionHint(t)}\`\n    Or revise dependents too: \`omp_messenger({ action: "task.revise-tree", id: "${t.id}", prompt: "Address approval feedback" })\``).join("\n")}`;
 }
 
 export async function execute(
   op: string,
   params: CrewParams,
   state: MessengerState,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  ownerSignal?: AbortSignal,
 ) {
   const cwd = ctx.cwd;
 
@@ -63,11 +64,29 @@ export async function execute(
     case "reject":
       return taskApproval(cwd, params, state, "rejected");
     case "revise":
-      return taskRevise(cwd, params, state);
+      return taskRevise(
+        cwd,
+        params,
+        state,
+        ctx.agent?.id,
+        ctx.sessionManager?.getSessionId?.(),
+        ownerSignal,
+      );
     case "revise-tree":
-      return taskReviseTree(cwd, params, state);
+      return taskReviseTree(
+        cwd,
+        params,
+        state,
+        ctx.agent?.id,
+        ctx.sessionManager?.getSessionId?.(),
+        ownerSignal,
+      );
     default:
-      return result(`Unknown task operation: ${op}`, { mode: "task", error: "unknown_operation", operation: op });
+      return result(`Unknown task operation: ${op}`, {
+        mode: "task",
+        error: "unknown_operation",
+        operation: op,
+      });
   }
 }
 
@@ -84,15 +103,22 @@ function taskActionHint(cwd: string, task: Task): string {
 
 function taskCreate(cwd: string, params: CrewParams) {
   if (!params.title) {
-    return result("Error: title required for task.create", { mode: "task.create", error: "missing_title" });
+    return result("Error: title required for task.create", {
+      mode: "task.create",
+      error: "missing_title",
+    });
   }
 
   // Verify plan exists
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("Error: No plan exists. Create one first with omp_messenger({ action: \"plan\" })", { 
-      mode: "task.create", error: "no_plan" 
-    });
+    return result(
+      'Error: No plan exists. Create one first with omp_messenger({ action: "plan" })',
+      {
+        mode: "task.create",
+        error: "no_plan",
+      },
+    );
   }
 
   // Validate dependencies exist
@@ -100,7 +126,11 @@ function taskCreate(cwd: string, params: CrewParams) {
     for (const depId of params.dependsOn) {
       const dep = store.getTask(cwd, depId);
       if (!dep) {
-        return result(`Error: Dependency ${depId} not found`, { mode: "task.create", error: "dependency_not_found", dependency: depId });
+        return result(`Error: Dependency ${depId} not found`, {
+          mode: "task.create",
+          error: "dependency_not_found",
+          dependency: depId,
+        });
       }
     }
   }
@@ -108,20 +138,25 @@ function taskCreate(cwd: string, params: CrewParams) {
   const teamEnabled = isTeamEnabled(cwd);
   const role = teamEnabled ? teamStore.canonicalRoleForTask(cwd, params.role) : undefined;
   if (teamEnabled && params.role?.trim() && teamStore.getActiveTeam(cwd) && !role) {
-    return result(`Error: unknown Team role: ${params.role.trim()}`, { mode: "task.create", error: "invalid_role", role: params.role.trim() });
+    return result(`Error: unknown Team role: ${params.role.trim()}`, {
+      mode: "task.create",
+      error: "invalid_role",
+      role: params.role.trim(),
+    });
   }
 
   const riskLabels = teamEnabled ? teamStore.normalizeRiskLabels(params.riskLabels) : undefined;
-  const approval = teamEnabled ? params.approval ?? teamStore.approvalForTask(cwd, role, riskLabels) : undefined;
+  const approval = teamEnabled
+    ? (params.approval ?? teamStore.approvalForTask(cwd, role, riskLabels))
+    : undefined;
   const task = store.createTask(cwd, params.title, params.content, params.dependsOn, {
     ...(role ? { role } : {}),
     ...(riskLabels && riskLabels.length > 0 ? { risk_labels: riskLabels } : {}),
     ...(approval ? { approval } : {}),
   });
 
-  const depsText = task.depends_on.length > 0 
-    ? `\n**Depends on:** ${task.depends_on.join(", ")}`
-    : "";
+  const depsText =
+    task.depends_on.length > 0 ? `\n**Depends on:** ${task.depends_on.join(", ")}` : "";
   const teamText = `${task.role ? `\n**Role:** ${task.role}` : ""}${task.risk_labels?.length ? `\n**Risk labels:** ${task.risk_labels.join(", ")}` : ""}${task.approval?.required ? `\n**Approval:** ${task.approval.status}` : ""}`;
 
   const text = `✅ Created task **${task.id}**
@@ -141,7 +176,7 @@ ${taskActionHint(cwd, task)}`;
       role: task.role,
       risk_labels: task.risk_labels,
       approval: task.approval,
-    }
+    },
   });
 }
 
@@ -157,11 +192,19 @@ function taskSplit(cwd: string, params: CrewParams, state: MessengerState) {
   }
 
   if (task.status === "done") {
-    return result(`Error: Cannot split completed task ${id}`, { mode: "task.split", error: "already_done", id });
+    return result(`Error: Cannot split completed task ${id}`, {
+      mode: "task.split",
+      error: "already_done",
+      id,
+    });
   }
 
   if (task.milestone) {
-    return result(`Error: Cannot split milestone task ${id}`, { mode: "task.split", error: "already_milestone", id });
+    return result(`Error: Cannot split milestone task ${id}`, {
+      mode: "task.split",
+      error: "already_milestone",
+      id,
+    });
   }
 
   if (!subtasks) {
@@ -169,13 +212,15 @@ function taskSplit(cwd: string, params: CrewParams, state: MessengerState) {
     const progress = store.getTaskProgress(cwd, id);
     const suggestedCount = count ?? 2;
     const allTasks = store.getTasks(cwd);
-    const dependents = allTasks.filter(t => t.depends_on.includes(id));
+    const dependents = allTasks.filter((t) => t.depends_on.includes(id));
     const depsText = task.depends_on.length > 0 ? task.depends_on.join(", ") : "(none)";
-    const dependentsText = dependents.length > 0
-      ? `${dependents.map(t => t.id).join(", ")} (will be rewired to depend on all subtasks)`
-      : "(none)";
+    const dependentsText =
+      dependents.length > 0
+        ? `${dependents.map((t) => t.id).join(", ")} (will be rewired to depend on all subtasks)`
+        : "(none)";
     const specText = spec && spec.trim().length > 0 ? spec : "(no spec content)";
-    const progressText = progress && progress.trim().length > 0 ? progress : "(no progress entries)";
+    const progressText =
+      progress && progress.trim().length > 0 ? progress : "(no progress entries)";
 
     const text = `# Split Task ${task.id}: ${task.title}
 
@@ -214,17 +259,25 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
       spec,
       progress,
       suggestedCount,
-      dependents: dependents.map(t => t.id),
+      dependents: dependents.map((t) => t.id),
     });
   }
 
   if (subtasks.length < 2) {
-    return result("Error: task.split requires at least 2 subtasks", { mode: "task.split", error: "insufficient_subtasks", id });
+    return result("Error: task.split requires at least 2 subtasks", {
+      mode: "task.split",
+      error: "insufficient_subtasks",
+      id,
+    });
   }
 
   for (const sub of subtasks) {
     if (!sub.title || !sub.title.trim()) {
-      return result("Error: each subtask requires a non-empty title", { mode: "task.split", error: "invalid_subtask_title", id });
+      return result("Error: each subtask requires a non-empty title", {
+        mode: "task.split",
+        error: "invalid_subtask_title",
+        id,
+      });
     }
   }
 
@@ -245,11 +298,11 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
   }
 
   const allTasks = store.getTasks(cwd);
-  const subtaskIds = created.map(t => t.id);
+  const subtaskIds = created.map((t) => t.id);
   for (const t of allTasks) {
     if (t.id !== id && t.depends_on.includes(id) && !subtaskIds.includes(t.id)) {
       store.updateTask(cwd, t.id, {
-        depends_on: [...t.depends_on.filter(d => d !== id), ...subtaskIds],
+        depends_on: [...t.depends_on.filter((d) => d !== id), ...subtaskIds],
       });
     }
   }
@@ -274,16 +327,25 @@ The parent becomes a milestone that auto-completes when all subtasks are done.`;
     approval: undefined,
   });
 
-  store.setTaskSpec(cwd, id, `# ${task.title}\n\nMilestone: completes when ${subtaskIds.join(", ")} are done.\n`);
+  store.setTaskSpec(
+    cwd,
+    id,
+    `# ${task.title}\n\nMilestone: completes when ${subtaskIds.join(", ")} are done.\n`,
+  );
 
-  logFeedEvent(cwd, state.agentName || "unknown", "task.split", id,
-    `Split into ${created.length} subtasks: ${subtaskIds.join(", ")}`);
+  logFeedEvent(
+    cwd,
+    state.agentName || "unknown",
+    "task.split",
+    id,
+    `Split into ${created.length} subtasks: ${subtaskIds.join(", ")}`,
+  );
 
   return result(`Split ${id} into ${created.length} subtasks`, {
     mode: "task.split",
     phase: "execute",
     parent: id,
-    subtasks: created.map(t => ({ id: t.id, title: t.title })),
+    subtasks: created.map((t) => ({ id: t.id, title: t.title })),
   });
 }
 
@@ -320,9 +382,8 @@ function taskShow(cwd: string, params: CrewParams) {
       break;
   }
 
-  const depsText = task.depends_on.length > 0 
-    ? `\n**Depends on:** ${task.depends_on.join(", ")}`
-    : "";
+  const depsText =
+    task.depends_on.length > 0 ? `\n**Depends on:** ${task.depends_on.join(", ")}` : "";
 
   // Spec preview
   let specPreview = "";
@@ -361,11 +422,20 @@ ${statusIcon} **Status:** ${task.status}${statusDetails}
 
 function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
   const { id, message } = params;
-  if (!id) return result("Error: id required for task.progress", { mode: "task.progress", error: "missing_id" });
-  if (!message) return result("Error: message required for task.progress", { mode: "task.progress", error: "missing_message" });
+  if (!id)
+    return result("Error: id required for task.progress", {
+      mode: "task.progress",
+      error: "missing_id",
+    });
+  if (!message)
+    return result("Error: message required for task.progress", {
+      mode: "task.progress",
+      error: "missing_message",
+    });
 
   const task = store.getTask(cwd, id);
-  if (!task) return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
+  if (!task)
+    return result(`Error: Task ${id} not found`, { mode: "task.progress", error: "not_found", id });
 
   store.appendTaskProgress(cwd, id, state.agentName || "unknown", message);
   return result(`Progress logged for ${id}`, { mode: "task.progress", id });
@@ -378,36 +448,43 @@ function taskProgress(cwd: string, params: CrewParams, state: MessengerState) {
 function taskList(cwd: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one with: omp_messenger({ action: \"plan\" })", { 
-      mode: "task.list", tasks: [], hasPlan: false 
+    return result('No plan found. Create one with: omp_messenger({ action: "plan" })', {
+      mode: "task.list",
+      tasks: [],
+      hasPlan: false,
     });
   }
 
   const tasks = store.getTasks(cwd);
   if (tasks.length === 0) {
-    return result(`No tasks in plan. Create with: \`omp_messenger({ action: "task.create", title: "..." })\``, {
-      mode: "task.list",
-      tasks: [],
-      prd: plan.prd,
-    });
+    return result(
+      `No tasks in plan. Create with: \`omp_messenger({ action: "task.create", title: "..." })\``,
+      {
+        mode: "task.list",
+        tasks: [],
+        prd: plan.prd,
+      },
+    );
   }
 
   const lines: string[] = [`# Tasks for ${store.getPlanLabel(plan)}\n`];
-  
+
   for (const task of tasks) {
     const icon = { todo: "⬜", in_progress: "🔄", done: "✅", blocked: "🚫" }[task.status];
     const deps = task.depends_on.length > 0 ? ` → deps: ${task.depends_on.join(", ")}` : "";
     const assignee = task.assigned_to ? ` [${task.assigned_to}]` : "";
-    lines.push(`${icon} **${task.id}**: ${task.title}${taskMetadataMarkers(task)}${assignee}${deps}`);
+    lines.push(
+      `${icon} **${task.id}**: ${task.title}${taskMetadataMarkers(task)}${assignee}${deps}`,
+    );
   }
 
-  const done = tasks.filter(t => t.status === "done").length;
+  const done = tasks.filter((t) => t.status === "done").length;
   lines.push(`\n**Progress:** ${done}/${tasks.length}`);
 
   return result(lines.join("\n"), {
     mode: "task.list",
     prd: plan.prd,
-    tasks: tasks.map(t => ({
+    tasks: tasks.map((t) => ({
       id: t.id,
       title: t.title,
       status: t.status,
@@ -455,9 +532,10 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
 
   const started = actionResult.task;
   const spec = store.getTaskSpec(cwd, id);
-  const specPreview = spec && !spec.includes("*Spec pending*")
-    ? `\n\n**Spec:**\n\`\`\`\n${spec.length > 1000 ? spec.slice(0, 1000) + "..." : spec}\n\`\`\``
-    : "";
+  const specPreview =
+    spec && !spec.includes("*Spec pending*")
+      ? `\n\n**Spec:**\n\`\`\`\n${spec.length > 1000 ? spec.slice(0, 1000) + "..." : spec}\n\`\`\``
+      : "";
 
   const text = `🔄 Started task **${id}**
 
@@ -478,7 +556,7 @@ If blocked: \`omp_messenger({ action: "task.block", id: "${id}", reason: "..." }
       assigned_to: started.assigned_to,
       attempt_count: started.attempt_count,
       base_commit: started.base_commit,
-    }
+    },
   });
 }
 
@@ -499,7 +577,10 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
 
   if (task.status !== "in_progress") {
     return result(`Error: Task ${id} is ${task.status}, not in_progress`, {
-      mode: "task.done", error: "invalid_status", id, status: task.status
+      mode: "task.done",
+      error: "invalid_status",
+      id,
+      status: task.status,
     });
   }
 
@@ -508,14 +589,18 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
 
   const completed = store.completeTask(cwd, id, summary, evidence);
   if (!completed) {
-    return result(`Error: Failed to complete task ${id}`, { mode: "task.done", error: "complete_failed", id });
+    return result(`Error: Failed to complete task ${id}`, {
+      mode: "task.done",
+      error: "complete_failed",
+      id,
+    });
   }
 
   logFeedEvent(cwd, state.agentName || "unknown", "task.done", id, summary);
 
   const plan = store.getPlan(cwd);
   const tasks = store.getTasks(cwd);
-  const remaining = tasks.filter(t => t.status !== "done");
+  const remaining = tasks.filter((t) => t.status !== "done");
 
   let nextSteps = "";
   if (remaining.length === 0) {
@@ -523,14 +608,14 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
   } else {
     const config = loadCrewConfig(store.getCrewDir(cwd));
     const ready = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-    const actionable = ready.filter(t => !teamStore.taskNeedsApproval(cwd, t));
-    const rejected = ready.filter(t => teamStore.taskNeedsRevision(cwd, t));
-    const needsApproval = ready.filter(t => teamStore.taskPendingApproval(cwd, t));
+    const actionable = ready.filter((t) => !teamStore.taskNeedsApproval(cwd, t));
+    const rejected = ready.filter((t) => teamStore.taskNeedsRevision(cwd, t));
+    const needsApproval = ready.filter((t) => teamStore.taskPendingApproval(cwd, t));
     if (actionable.length > 0) {
-      nextSteps = `\n\n**Ready tasks:** ${actionable.map(t => t.id).join(", ")}`;
+      nextSteps = `\n\n**Ready tasks:** ${actionable.map((t) => t.id).join(", ")}`;
     }
     if (needsApproval.length > 0) {
-      nextSteps += `\n\n**Needs approval:** ${needsApproval.map(t => t.id).join(", ")}`;
+      nextSteps += `\n\n**Needs approval:** ${needsApproval.map((t) => t.id).join(", ")}`;
     }
     nextSteps += rejectedTasksText(rejected);
   }
@@ -551,7 +636,7 @@ function taskDone(cwd: string, params: CrewParams, state: MessengerState) {
     progress: {
       completed: plan?.completed_count ?? 0,
       total: plan?.task_count ?? 0,
-    }
+    },
   });
 }
 
@@ -566,10 +651,19 @@ function taskBlock(cwd: string, params: CrewParams, state: MessengerState) {
   }
 
   if (!params.reason) {
-    return result("Error: reason required for task.block", { mode: "task.block", error: "missing_reason" });
+    return result("Error: reason required for task.block", {
+      mode: "task.block",
+      error: "missing_reason",
+    });
   }
 
-  const actionResult = executeTaskAction(cwd, "block", id, state.agentName || "unknown", params.reason);
+  const actionResult = executeTaskAction(
+    cwd,
+    "block",
+    id,
+    state.agentName || "unknown",
+    params.reason,
+  );
   if (!actionResult.success || !actionResult.task) {
     return result(`Error: ${actionResult.message}`, {
       mode: "task.block",
@@ -592,7 +686,7 @@ Unblock with: \`omp_messenger({ action: "task.unblock", id: "${id}" })\``;
       title: blocked.title,
       status: blocked.status,
       blocked_reason: blocked.blocked_reason,
-    }
+    },
   });
 }
 
@@ -603,7 +697,10 @@ Unblock with: \`omp_messenger({ action: "task.unblock", id: "${id}" })\``;
 function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
   const id = params.id;
   if (!id) {
-    return result("Error: id required for task.unblock", { mode: "task.unblock", error: "missing_id" });
+    return result("Error: id required for task.unblock", {
+      mode: "task.unblock",
+      error: "missing_id",
+    });
   }
 
   const actionResult = executeTaskAction(cwd, "unblock", id, state.agentName || "unknown");
@@ -624,7 +721,7 @@ function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
       id: unblocked.id,
       title: unblocked.title,
       status: unblocked.status,
-    }
+    },
   });
 }
 
@@ -635,8 +732,10 @@ function taskUnblock(cwd: string, params: CrewParams, state: MessengerState) {
 function taskReady(cwd: string) {
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one with: omp_messenger({ action: \"plan\" })", { 
-      mode: "task.ready", ready: [], hasPlan: false 
+    return result('No plan found. Create one with: omp_messenger({ action: "plan" })', {
+      mode: "task.ready",
+      ready: [],
+      hasPlan: false,
     });
   }
 
@@ -653,28 +752,29 @@ function taskReady(cwd: string) {
 
   if (ready.length === 0) {
     const tasks = store.getTasks(cwd);
-    const inProgress = tasks.filter(t => t.status === "in_progress");
-    const blocked = tasks.filter(t => t.status === "blocked");
-    const done = tasks.filter(t => t.status === "done");
+    const inProgress = tasks.filter((t) => t.status === "in_progress");
+    const blocked = tasks.filter((t) => t.status === "blocked");
+    const done = tasks.filter((t) => t.status === "done");
 
     let reason = "";
     if (done.length === tasks.length) {
       reason = "All tasks are done!";
     } else if (inProgress.length > 0) {
-      reason = `${inProgress.length} task(s) in progress: ${inProgress.map(t => t.id).join(", ")}`;
+      reason = `${inProgress.length} task(s) in progress: ${inProgress.map((t) => t.id).join(", ")}`;
     } else if (rejected.length > 0) {
       reason = "No startable tasks; rejected tasks need revision.";
     } else if (needsApproval.length > 0) {
       reason = "No startable tasks; ready tasks need lead approval.";
     } else if (blocked.length > 0) {
-      reason = `${blocked.length} task(s) blocked: ${blocked.map(t => t.id).join(", ")}`;
+      reason = `${blocked.length} task(s) blocked: ${blocked.map((t) => t.id).join(", ")}`;
     } else {
       reason = "All remaining tasks have unmet dependencies.";
     }
 
-    const approvalText = needsApproval.length > 0
-      ? `\n\nNeeds approval:\n${needsApproval.map(t => `  - ${t.id}: ${t.title}`).join("\n")}`
-      : "";
+    const approvalText =
+      needsApproval.length > 0
+        ? `\n\nNeeds approval:\n${needsApproval.map((t) => `  - ${t.id}: ${t.title}`).join("\n")}`
+        : "";
     const revisionText = rejectedTasksText(rejected);
     return result(`No ready tasks.\n\n${reason}${approvalText}${revisionText}`, {
       mode: "task.ready",
@@ -693,14 +793,16 @@ function taskReady(cwd: string) {
   lines.push(`Or run all: \`omp_messenger({ action: "work" })\``);
 
   if (needsApproval.length > 0) {
-    lines.push(`\nNeeds approval:\n${needsApproval.map(t => `  - ${t.id}: ${t.title}`).join("\n")}`);
+    lines.push(
+      `\nNeeds approval:\n${needsApproval.map((t) => `  - ${t.id}: ${t.title}`).join("\n")}`,
+    );
   }
   const revisionText = rejectedTasksText(rejected);
   if (revisionText) lines.push(revisionText);
 
   return result(lines.join("\n"), {
     mode: "task.ready",
-    ready: ready.map(t => ({
+    ready: ready.map((t) => ({
       id: t.id,
       title: t.title,
     })),
@@ -713,7 +815,12 @@ function taskReady(cwd: string) {
 // task.approve / task.reject
 // =============================================================================
 
-function taskApproval(cwd: string, params: CrewParams, state: MessengerState, status: "approved" | "rejected") {
+function taskApproval(
+  cwd: string,
+  params: CrewParams,
+  state: MessengerState,
+  status: "approved" | "rejected",
+) {
   const id = params.id;
   const action = status === "approved" ? "approve" : "reject";
   const mode = `task.${action}`;
@@ -731,15 +838,22 @@ function taskApproval(cwd: string, params: CrewParams, state: MessengerState, st
     return result(`Error: Task ${id} not found`, { mode, error: "not_found", id });
   }
   if (!task.approval?.required) {
-    return result(`Task ${id} does not require approval.`, { mode, error: "approval_not_required", id });
+    return result(`Task ${id} does not require approval.`, {
+      mode,
+      error: "approval_not_required",
+      id,
+    });
   }
   if (task.status === "in_progress" || task.status === "done") {
-    return result(`Error: Task ${id} is ${task.status}; approval can only change before work starts.`, {
-      mode,
-      error: "invalid_status",
-      id,
-      status: task.status,
-    });
+    return result(
+      `Error: Task ${id} is ${task.status}; approval can only change before work starts.`,
+      {
+        mode,
+        error: "invalid_status",
+        id,
+        status: task.status,
+      },
+    );
   }
 
   const approval = {
@@ -750,15 +864,24 @@ function taskApproval(cwd: string, params: CrewParams, state: MessengerState, st
     decided_at: new Date().toISOString(),
   };
   const updated = store.updateTask(cwd, id, { approval });
-  logFeedEvent(cwd, actor, status === "approved" ? "task.approve" : "task.reject", id, params.reason);
+  logFeedEvent(
+    cwd,
+    actor,
+    status === "approved" ? "task.approve" : "task.reject",
+    id,
+    params.reason,
+  );
 
-  const nextStep = status === "rejected"
-    ? `\n\nNext: revise with \`${revisionHint(task)}\`, or use \`omp_messenger({ action: "task.revise-tree", id: "${id}", prompt: "Address approval feedback" })\` if dependents need updates too.`
-    : "";
+  const nextStep =
+    status === "rejected"
+      ? `\n\nNext: revise with \`${revisionHint(task)}\`, or use \`omp_messenger({ action: "task.revise-tree", id: "${id}", prompt: "Address approval feedback" })\` if dependents need updates too.`
+      : "";
 
   return result(`${status === "approved" ? "Approved" : "Rejected"} task **${id}**.${nextStep}`, {
     mode,
-    task: updated ? { id: updated.id, title: updated.title, approval: updated.approval } : undefined,
+    task: updated
+      ? { id: updated.id, title: updated.title, approval: updated.approval }
+      : undefined,
   });
 }
 
@@ -784,16 +907,19 @@ function taskReset(cwd: string, params: CrewParams, state: MessengerState) {
   }
 
   const resetTasks = actionResult.resetTasks ?? [];
-  const text = cascade && resetTasks.length > 1
-    ? `🔄 Reset ${resetTasks.length} tasks:\n${resetTasks.map(t => `  - ${t.id}`).join("\n")}`
-    : `🔄 Reset task **${id}**`;
+  const text =
+    cascade && resetTasks.length > 1
+      ? `🔄 Reset ${resetTasks.length} tasks:\n${resetTasks.map((t) => `  - ${t.id}`).join("\n")}`
+      : `🔄 Reset task **${id}**`;
 
   const resetTask = store.getTask(cwd, id);
-  const hint = resetTask ? taskActionHint(cwd, resetTask) : `Start with: \`omp_messenger({ action: "task.start", id: "${id}" })\``;
+  const hint = resetTask
+    ? taskActionHint(cwd, resetTask)
+    : `Start with: \`omp_messenger({ action: "task.start", id: "${id}" })\``;
 
   return result(`${text}\n\n${hint}`, {
     mode: "task.reset",
-    reset: resetTasks.map(t => t.id),
+    reset: resetTasks.map((t) => t.id),
     cascade,
   });
 }

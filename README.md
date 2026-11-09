@@ -61,21 +61,23 @@ Use the visible controls:
 - The transcript scrolls like an omp session: a new message stays in view while you are at the bottom, and your place holds while you read older messages. Tern's ↓ button returns to the newest message.
 - **Load older messages** enters an older history window. **Jump to latest** in the header returns from it.
 
-Drafts are separate for each channel. Native selection and undo work when Tern's **Native composer editing** setting is enabled. Failed sends preserve the draft. If delivery is not confirmed, inspect history before retrying because the server might have received the message.
+Drafts are separate for each channel. Native selection and undo work when Tern's **Native composer editing** setting is enabled. Failed sends preserve the draft. If delivery is not confirmed, resubmitting the unchanged draft reuses its original request and message ids, so the server can return the accepted result without delivering twice. Editing the draft starts a new message identity. Inspect history before retrying because the server might have received the first attempt.
 
 The optional slash commands have completion. They are shortcuts, not requirements for the GUI.
 
+`/cp` sends the current channel's whole chat to the terminal clipboard as plain text: every message from the server's history, not only the loaded window, oldest first, as `[date time] sender: text`. Individual deliveries read `sender → recipient (individual)`. The app writes OSC 52, intended for the clipboard of the machine running Tern, even when the app runs remotely. OSC 52 has no acknowledgement, so the status says the text was sent rather than confirming that Tern accepted it. Terminal clipboard permission and size limits apply.
+
 Deleting a channel removes its history and task completions. Connected agents receive a message through their existing WebSocket. Agents with no remaining channel move to `main` when their name is available there. A persisted deletion marker prevents an offline agent's stale automatic membership from recreating the channel. An explicit join can recreate it. The `main` channel cannot be deleted.
 
-The server must run the updated code before the new channel lifecycle works. Upgrade the existing deployment without replacing `mesh/.env` or deleting its volume:
+The server must run the updated code before the new channel lifecycle works. Upgrade the existing deployment without replacing `mesh/.env` or deleting its `mesh-data` volume:
 
 ```bash
 docker compose -f mesh/docker-compose.yml --env-file mesh/.env up -d --build
 ```
 
-In the local development setup, Docker Compose runs this service in OrbStack. The compose file maps port `8765` and mounts the named `mesh-data` volume at `/data`. Message history is stored in SQLite there. Without a data directory, the server retains a bounded in-memory log for its process lifetime.
+In the local development setup, Docker Compose runs this service in OrbStack. The compose file maps port `8765` and mounts the named `mesh-data` volume at `/data`. Message history is stored there in `mesh.sqlite`. The server keeps the newest 2,000 messages per channel. Within that retained-history window, a repeated client message id is an idempotent retry: the server returns the original entry and delivery outcome without delivering it again. After an unconfirmed send or post, the OMP client makes at most two attempts with the exact frame and id, waiting for reconnection when necessary. Retry identity expires when the original entry leaves the 2,000-message window. `OMP_MESSENGER_MESH_DATA_DIR` or `--data-dir` selects another storage directory; without one, the server retains a bounded in-memory log for its process lifetime. `/healthz` performs a write probe and returns HTTP 503 while storage is unavailable. A failed history write does not deliver the message or crash other connections. Back up SQLite while the server is stopped, or use SQLite's online backup support.
 
-The Tern plugin is linked independently from the OMP extension. Linked launcher and stylesheet files hot-reload. The already-running Bun Messenger application does not; reopen it after rebuilding. Restart existing OMP sessions to load an updated extension.
+The Tern plugin is linked independently from the OMP extension. The linked Luau launcher hot-reloads. The Bun application and its bundled stylesheet do not: run `bun run build:tern`, then close and reopen Messenger. `OMP_MESSENGER_BUN` optionally selects the Bun executable used by the launcher. Restart existing OMP sessions to load an updated extension.
 
 ### Tern acceptance checks
 
@@ -481,7 +483,7 @@ Create `~/.omp/agent/omp-messenger.json`:
 | `crewEventsInFeed` | Include crew task events in activity feed | `true` |
 | `contextMode` | Context injection level: `full`, `minimal`, `none` | `"full"` |
 
-Config priority: project `.omp/omp-messenger.json` > user `~/.omp/agent/omp-messenger.json` > `~/.omp/agent/settings.json` `"messenger"` key > defaults.
+Config priority: project `.omp/omp-messenger.json` > user `<OMP agent dir>/omp-messenger.json` > defaults. The agent directory follows OMP's active profile and `PI_CODING_AGENT_DIR`.
 
 ## How It Works
 
@@ -491,7 +493,7 @@ Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerT
 
 Crew workers run as in-process omp subagents through the SDK injected into the extension (`runSubprocess` / `runSubagentFollowUpTurn`), with the agent's system prompt, model, and tool restrictions from its `.md` definition. A worker's session file lives under `<project>/.omp/messenger/crew/artifacts/<Name>.jsonl`, which is how the worker's own extension instance learns its mesh name and auto-joins. Progress comes from the SDK's `onProgress` callback — the overlay shows each worker's current tool, call count, and token usage in real time — and workers also appear in omp's Agent Hub. Aborting a work run triggers graceful shutdown: each worker receives a mesh message asking it to stop, followed by a grace period before its run is aborted. Lobby workers stay alive as idle omp subagents and receive task assignments through follow-up turns.
 
-Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.omp/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to sqlite on a volume), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. One session registers the same identity in every configured channel, so peers, claims, and completions are the union across them. Activity feed and crew data stay project-scoped under `.omp/messenger/`.
+Coordination goes through a `Mesh` seam with two implementations. The default filesystem mesh keeps shared state (registry, inboxes, swarm claims/completions) in `~/.omp/agent/messenger/` (channels other than `main` under `channels/<name>/`) and detects dead agents via PID checks. In mesh mode every session is a pure outbound WebSocket client of the `mesh/server.ts` process — the server holds presence, claims, and per-channel completions (optionally persisted to SQLite in the configured data directory), fans out presence with pub/sub topics, and clients reconnect with backoff and re-assert their registration and claims. One session registers the same identity in every configured channel, so peers, claims, and completions are the union across them. Activity feed and crew data stay project-scoped under `.omp/messenger/`.
 
 ## Credits
 

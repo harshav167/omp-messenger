@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import type { AgentMailMessage, AgentRegistration, HistoryEntry } from "../../lib.ts";
 import {
+  HISTORY_PAGE_MAX,
   MESH_SUBPROTOCOL,
   parseFrame,
   type ChannelSnapshot,
@@ -53,7 +54,9 @@ export interface MeshClientOptions {
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const HEARTBEAT_MS = 15_000;
+const STALE_CONNECTION_MS = 45_000;
 const NAME_RETRY_LIMIT = 5;
+type UnconfirmedFrame = Extract<ClientFrame, { t: "send" | "post" }>;
 
 function registration(name: string, cwd: string): AgentRegistration {
   const now = new Date().toISOString();
@@ -79,13 +82,19 @@ export class MessengerMesh {
   #watched: string[] = [];
   #agent: AgentRegistration;
   #pending = new Map<string, { resolve: (result: ReplyResult | null) => void; timer: Timer }>();
+  #unconfirmed = new Map<string, UnconfirmedFrame>();
   #backoff = 1000;
   #retryTimer: Timer | undefined;
   #heartbeat: Timer | undefined;
+  #welcomeTimer: Timer | undefined;
+  #lastFrameAt = 0;
   #closed = false;
   #nameRetries = 0;
 
-  constructor(private readonly opts: MeshClientOptions, private readonly on: MeshClientEvents) {
+  constructor(
+    private readonly opts: MeshClientOptions,
+    private readonly on: MeshClientEvents,
+  ) {
     this.#channels = [...opts.channels];
     this.#agent = registration(opts.name, opts.cwd);
   }
@@ -125,30 +134,38 @@ export class MessengerMesh {
       return;
     }
     this.#ws = ws;
+    this.#welcomeTimer = setTimeout(
+      () => this.#disconnect(ws, "welcome timeout"),
+      REQUEST_TIMEOUT_MS,
+    );
     ws.addEventListener("open", () => {
-      this.#send({ t: "hello", token: this.opts.token, channels: this.#channels, agent: this.#agent, claims: [], identityKey: this.opts.identityKey });
+      if (this.#ws !== ws) return;
+      this.#send({
+        t: "hello",
+        token: this.opts.token,
+        channels: this.#channels,
+        agent: this.#agent,
+        claims: [],
+        identityKey: this.opts.identityKey,
+      });
     });
     ws.addEventListener("message", (event) => {
       if (this.#ws !== ws) return;
       const frame = parseFrame<ServerFrame>(event.data);
-      if (frame) this.#handle(frame);
+      if (frame) {
+        this.#lastFrameAt = Date.now();
+        this.#handle(frame);
+      }
     });
     ws.addEventListener("close", () => {
-      if (this.#ws !== ws) return;
-      this.#ws = null;
-      clearInterval(this.#heartbeat);
-      for (const pending of this.#pending.values()) {
-        clearTimeout(pending.timer);
-        pending.resolve(null);
-      }
-      this.#pending.clear();
-      this.#scheduleReconnect("connection closed");
+      this.#disconnect(ws, "connection closed");
     });
   }
 
   close(): void {
     this.#closed = true;
     clearTimeout(this.#retryTimer);
+    clearTimeout(this.#welcomeTimer);
     clearInterval(this.#heartbeat);
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
@@ -159,53 +176,143 @@ export class MessengerMesh {
     this.#ws = null;
     if (ws) {
       if (ws.readyState === WebSocket.OPEN) this.#send({ t: "bye" }, ws);
-      ws.close(1000);
+      try {
+        ws.close(1000);
+      } catch {
+        /* Already closed or unavailable. */
+      }
     }
   }
 
   /** Post to a channel's group chat. */
   async post(channel: string, text: string): Promise<PostResult | null> {
-    return this.#request({ t: "post", id: randomUUID(), channel, text }, (r): r is PostResult =>
-      !Array.isArray(r) && "ok" in r && (r.ok ? "entry" in r && "delivered" in r : "error" in r && !("channel" in r)));
+    const route = `post\0${channel}`;
+    const previous = this.#unconfirmed.get(route);
+    const frame: Extract<ClientFrame, { t: "post" }> =
+      previous?.t === "post" && previous.text === text
+        ? previous
+        : { t: "post", id: randomUUID(), channel, text, messageId: randomUUID() };
+    this.#unconfirmed.set(route, frame);
+    const result = await this.#request(
+      frame,
+      (r): r is PostResult =>
+        !Array.isArray(r) &&
+        "ok" in r &&
+        (r.ok ? "entry" in r && "delivered" in r : "error" in r && !("channel" in r)),
+    );
+    if (result !== null && this.#unconfirmed.get(route) === frame) {
+      this.#unconfirmed.delete(route);
+    }
+    return result;
   }
 
   async send(channel: string, to: string, text: string): Promise<SendResult | null> {
-    const message: AgentMailMessage = {
-      id: randomUUID(), from: this.name, to, text, channel,
-      timestamp: new Date().toISOString(), replyTo: null,
-    };
-    return this.#request({ t: "send", id: randomUUID(), channel, to, message }, (reply): reply is SendResult =>
-      !Array.isArray(reply) && "ok" in reply && (reply.ok ? "message" in reply : "error" in reply));
+    const route = `send\0${channel}\0${to}`;
+    const previous = this.#unconfirmed.get(route);
+    const frame: Extract<ClientFrame, { t: "send" }> =
+      previous?.t === "send" && previous.message.text === text
+        ? previous
+        : {
+            t: "send",
+            id: randomUUID(),
+            channel,
+            to,
+            message: {
+              id: randomUUID(),
+              from: this.name,
+              to,
+              text,
+              channel,
+              timestamp: new Date().toISOString(),
+              replyTo: null,
+            },
+          };
+    this.#unconfirmed.set(route, frame);
+    const result = await this.#request(
+      frame,
+      (reply): reply is SendResult =>
+        !Array.isArray(reply) &&
+        "ok" in reply &&
+        (reply.ok ? "message" in reply : "error" in reply),
+    );
+    if (result !== null && this.#unconfirmed.get(route) === frame) {
+      this.#unconfirmed.delete(route);
+    }
+    return result;
   }
 
   /** A page of a channel's log, older than `before` (newest when omitted). */
   async history(channel: string, before?: number, limit = 200): Promise<HistoryPage | null> {
     return this.#request(
-      { t: "history", id: randomUUID(), channel, limit, ...(before === undefined ? {} : { before }) },
-      (r): r is HistoryPage => !Array.isArray(r) && "ok" in r && (r.ok ? "entries" in r && Array.isArray(r.entries) : "error" in r),
+      {
+        t: "history",
+        id: randomUUID(),
+        channel,
+        limit,
+        ...(before === undefined ? {} : { before }),
+      },
+      (r): r is HistoryPage =>
+        !Array.isArray(r) &&
+        "ok" in r &&
+        (r.ok ? "entries" in r && Array.isArray(r.entries) : "error" in r),
     );
+  }
+
+  /** Every entry of a channel's log, oldest first, read page by page from the newest back. */
+  async allHistory(
+    channel: string,
+    pageSize = HISTORY_PAGE_MAX,
+  ): Promise<{ ok: true; entries: HistoryEntry[] } | { ok: false; error: string }> {
+    const pages: HistoryEntry[][] = [];
+    let before: number | undefined;
+    for (;;) {
+      const page = await this.history(channel, before, pageSize);
+      if (!page) return { ok: false, error: "the mesh did not answer" };
+      if (page.ok === false) return { ok: false, error: page.error };
+      pages.unshift(page.entries);
+      if (!page.hasMore || page.entries.length === 0) return { ok: true, entries: pages.flat() };
+      before = page.entries[0]!.seq;
+    }
   }
 
   /** Every channel the mesh knows, joined or not. */
   async listChannels(): Promise<ChannelInfo[] | null> {
-    return this.#request({ t: "channels", id: randomUUID() }, (r): r is ChannelInfo[] => Array.isArray(r));
+    return this.#request({ t: "channels", id: randomUUID() }, (r): r is ChannelInfo[] =>
+      Array.isArray(r),
+    );
   }
 
   /** Delete a channel and its history; its members are removed and told. Refused for main. */
   async deleteChannel(channel: string): Promise<DeleteChannelReply | null> {
-    return this.#request({ t: "delete_channel", id: randomUUID(), channel }, (r): r is DeleteChannelReply =>
-      !Array.isArray(r) && "ok" in r && (r.ok ? "deleted" in r && "removed" in r : "error" in r && !("channel" in r)));
+    return this.#request(
+      { t: "delete_channel", id: randomUUID(), channel },
+      (r): r is DeleteChannelReply =>
+        !Array.isArray(r) &&
+        "ok" in r &&
+        (r.ok ? "deleted" in r && "removed" in r : "error" in r && !("channel" in r)),
+    );
   }
 
   /** Join `channel` as a member (and watch it); returns its snapshot or why it failed. */
   async join(channel: string): Promise<ChannelSnapshot | string> {
-    const reply = await this.#request({ t: "join", id: randomUUID(), channels: [channel] }, (r): r is JoinReply =>
-      !Array.isArray(r) && "ok" in r && (r.ok ? "channels" in r && r.channels.every(c => typeof c === "object") : "channel" in r));
+    const reply = await this.#request(
+      { t: "join", id: randomUUID(), channels: [channel] },
+      (r): r is JoinReply =>
+        !Array.isArray(r) &&
+        "ok" in r &&
+        (r.ok ? "channels" in r && r.channels.every((c) => typeof c === "object") : "channel" in r),
+    );
     if (!reply) return "mesh unreachable";
-    if (reply.ok === false) return reply.error === "name_taken" ? `name ${this.name} is taken in #${reply.channel}` : `${reply.error} (#${reply.channel})`;
+    if (reply.ok === false)
+      return reply.error === "name_taken"
+        ? `name ${this.name} is taken in #${reply.channel}`
+        : `${reply.error} (#${reply.channel})`;
     if (!this.#channels.includes(channel)) this.#channels = [...this.#channels, channel].sort();
     await this.#watch();
-    return reply.channels.find(snapshot => snapshot.channel === channel) ?? `#${channel} missing from the reply`;
+    return (
+      reply.channels.find((snapshot) => snapshot.channel === channel) ??
+      `#${channel} missing from the reply`
+    );
   }
 
   /**
@@ -216,28 +323,40 @@ export class MessengerMesh {
     const next = [...new Set([...this.#channels, ...names])].sort();
     if (next.join("\n") === this.#watched.join("\n")) return;
     this.#watched = next;
-    void this.#watch();
+    void this.#watch().catch((error) => console.error("Messenger watch failed:", error));
   }
 
   async #watch(): Promise<void> {
     const channels = [...new Set([...this.#channels, ...this.#watched])].sort();
-    const reply = await this.#request({ t: "watch", id: randomUUID(), channels }, (r): r is WatchReply =>
-      !Array.isArray(r) && "ok" in r && (r.ok ? "watching" in r : "channel" in r));
-    if (reply?.ok) for (const snapshot of reply.watching) this.on.peers(snapshot.channel, snapshot.peers);
+    const reply = await this.#request(
+      { t: "watch", id: randomUUID(), channels },
+      (r): r is WatchReply =>
+        !Array.isArray(r) && "ok" in r && (r.ok ? "watching" in r : "channel" in r),
+    );
+    if (reply?.ok)
+      for (const snapshot of reply.watching) this.on.peers(snapshot.channel, snapshot.peers);
   }
 
   #handle(frame: ServerFrame): void {
     switch (frame.t) {
       case "welcome":
+        clearTimeout(this.#welcomeTimer);
+        this.#lastFrameAt = Date.now();
         this.#agent = { ...this.#agent, name: frame.name };
-        this.#channels = frame.channels.map(snapshot => snapshot.channel).sort();
+        this.#channels = frame.channels.map((snapshot) => snapshot.channel).sort();
         this.#backoff = 1000;
         this.#nameRetries = 0;
         clearInterval(this.#heartbeat);
-        this.#heartbeat = setInterval(() => this.#send({ t: "ping" }), HEARTBEAT_MS);
+        this.#heartbeat = setInterval(() => {
+          const ws = this.#ws;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          if (Date.now() - this.#lastFrameAt > STALE_CONNECTION_MS)
+            this.#disconnect(ws, "connection stale");
+          else this.#send({ t: "ping" }, ws);
+        }, HEARTBEAT_MS);
         this.on.state("connected");
         this.on.welcome(frame.name, frame.channels);
-        void this.#watch();
+        void this.#watch().catch((error) => console.error("Messenger watch failed:", error));
         return;
       case "reject":
         if (frame.error === "name_taken" && this.#nameRetries < NAME_RETRY_LIMIT) {
@@ -247,7 +366,12 @@ export class MessengerMesh {
           return;
         }
         this.#closed = true;
-        this.on.state("rejected", frame.error === "bad_token" ? "the mesh rejected the token" : `${frame.error}${frame.channel ? ` (#${frame.channel})` : ""}`);
+        this.on.state(
+          "rejected",
+          frame.error === "bad_token"
+            ? "the mesh rejected the token"
+            : `${frame.error}${frame.channel ? ` (#${frame.channel})` : ""}`,
+        );
         this.#ws?.close();
         return;
       case "peers":
@@ -276,19 +400,22 @@ export class MessengerMesh {
         this.on.channels(frame.channels);
         return;
       case "channel_deleted":
-        this.#watched = this.#watched.filter(channel => channel !== frame.channel);
+        this.#watched = this.#watched.filter((channel) => channel !== frame.channel);
         this.on.deleted(frame.channel, frame.by);
         return;
       case "removed":
         this.#channels = [...frame.channels].sort();
-        this.#watched = this.#watched.filter(c => c !== frame.channel);
+        this.#watched = this.#watched.filter((c) => c !== frame.channel);
         this.on.removed(frame.channel, frame.by, frame.channels, frame.added);
         return;
     }
   }
 
   /** Send a request; resolves with the reply when `accept` recognizes its shape, else null (also on timeout or disconnect). */
-  async #request<T extends ReplyResult>(frame: Extract<ClientFrame, { id: string }>, accept: (result: ReplyResult) => result is T): Promise<T | null> {
+  async #request<T extends ReplyResult>(
+    frame: Extract<ClientFrame, { id: string }>,
+    accept: (result: ReplyResult) => result is T,
+  ): Promise<T | null> {
     const { promise, resolve } = Promise.withResolvers<ReplyResult | null>();
     if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return null;
     const timer = setTimeout(() => {
@@ -302,7 +429,30 @@ export class MessengerMesh {
   }
 
   #send(frame: ClientFrame, ws = this.#ws): void {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify(frame));
+    } catch {
+      this.#disconnect(ws, "connection send failed");
+    }
+  }
+
+  #disconnect(ws: WebSocket, detail: string): void {
+    if (this.#ws !== ws) return;
+    this.#ws = null;
+    clearTimeout(this.#welcomeTimer);
+    clearInterval(this.#heartbeat);
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    this.#pending.clear();
+    try {
+      ws.close();
+    } catch {
+      /* Already closed or unavailable. */
+    }
+    this.#scheduleReconnect(detail);
   }
 
   #scheduleReconnect(detail: string): void {

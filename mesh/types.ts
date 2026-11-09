@@ -2,8 +2,9 @@
  * omp-messenger - Mesh transport contract
  *
  * A Mesh is the coordination layer behind the messenger: presence, reservations,
- * messages, and swarm claims scoped to one channel. Two implementations exist:
- * the filesystem mesh (default, single host) and the mesh-server client.
+ * messages, and swarm claims scoped to one channel. The OMP extension has two
+ * implementations: filesystem (default, single host) and WebSocket. The Tern
+ * application consumes the same wire protocol through its own client.
  */
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -26,11 +27,10 @@ export type SendError =
   | "invalid_registration"
   | "write_failed"
   | "unreachable"
+  | "storage_failed"
   | "ambiguous_channel";
 
-export type SendResult =
-  | { ok: true; message: AgentMailMessage }
-  | { ok: false; error: SendError };
+export type SendResult = { ok: true; message: AgentMailMessage } | { ok: false; error: SendError };
 
 export interface SendOptions {
   replyTo?: string;
@@ -45,7 +45,14 @@ export interface SendOptions {
   channel?: string;
 }
 
-export type PostError = "not_joined" | "empty" | "invalid_channel" | "ambiguous_channel" | "unreachable" | "write_failed";
+export type PostError =
+  | "not_joined"
+  | "empty"
+  | "invalid_channel"
+  | "ambiguous_channel"
+  | "unreachable"
+  | "write_failed"
+  | "storage_failed";
 
 export type PostOutcome =
   | { ok: true; channel: string; delivered: string[]; mentions: string[] }
@@ -67,11 +74,17 @@ export interface ChannelInfo {
 
 export type DeleteChannelResult =
   | { ok: true; deleted: string; removed: string[] }
-  | { ok: false; error: "invalid_channel" | "protected" | "storage_failed" | "unsupported" | "unreachable" };
+  | {
+      ok: false;
+      error: "invalid_channel" | "protected" | "storage_failed" | "unsupported" | "unreachable";
+    };
 
 export type RenameResult =
   | { success: true; oldName: string; newName: string }
-  | { success: false; error: "not_registered" | "invalid_name" | "name_taken" | "same_name" | "race_lost" };
+  | {
+      success: false;
+      error: "not_registered" | "invalid_name" | "name_taken" | "same_name" | "race_lost";
+    };
 
 export type ClaimResult =
   | { success: true; claimedAt: string }
@@ -81,10 +94,16 @@ export type ClaimResult =
 export function isClaimSuccess(r: ClaimResult): r is { success: true; claimedAt: string } {
   return r.success === true;
 }
-export function isClaimAlreadyClaimed(r: ClaimResult): r is { success: false; error: "already_claimed"; conflict: ClaimEntry } {
+export function isClaimAlreadyClaimed(
+  r: ClaimResult,
+): r is { success: false; error: "already_claimed"; conflict: ClaimEntry } {
   return "error" in r && r.error === "already_claimed";
 }
-export function isClaimAlreadyHaveClaim(r: ClaimResult): r is { success: false; error: "already_have_claim"; existing: { spec: string; taskId: string } } {
+export function isClaimAlreadyHaveClaim(r: ClaimResult): r is {
+  success: false;
+  error: "already_have_claim";
+  existing: { spec: string; taskId: string };
+} {
   return "error" in r && r.error === "already_have_claim";
 }
 
@@ -96,7 +115,9 @@ export type UnclaimResult =
 export function isUnclaimSuccess(r: UnclaimResult): r is { success: true } {
   return r.success === true;
 }
-export function isUnclaimNotYours(r: UnclaimResult): r is { success: false; error: "not_your_claim"; claimedBy: string } {
+export function isUnclaimNotYours(
+  r: UnclaimResult,
+): r is { success: false; error: "not_your_claim"; claimedBy: string } {
   return "error" in r && r.error === "not_your_claim";
 }
 
@@ -104,15 +125,20 @@ export type CompleteResult =
   | { success: true; completedAt: string }
   | { success: false; error: "not_claimed" }
   | { success: false; error: "not_your_claim"; claimedBy: string }
-  | { success: false; error: "already_completed"; completion: CompletionEntry };
+  | { success: false; error: "already_completed"; completion: CompletionEntry }
+  | { success: false; error: "storage_failed" };
 
 export function isCompleteSuccess(r: CompleteResult): r is { success: true; completedAt: string } {
   return r.success === true;
 }
-export function isCompleteAlreadyCompleted(r: CompleteResult): r is { success: false; error: "already_completed"; completion: CompletionEntry } {
+export function isCompleteAlreadyCompleted(
+  r: CompleteResult,
+): r is { success: false; error: "already_completed"; completion: CompletionEntry } {
   return "error" in r && r.error === "already_completed";
 }
-export function isCompleteNotYours(r: CompleteResult): r is { success: false; error: "not_your_claim"; claimedBy: string } {
+export function isCompleteNotYours(
+  r: CompleteResult,
+): r is { success: false; error: "not_your_claim"; claimedBy: string } {
   return "error" in r && r.error === "not_your_claim";
 }
 
@@ -177,7 +203,13 @@ export interface Mesh {
   claims(): AllClaims;
   completions(): AllCompletions;
   /** Claim in `channel` (default: the first joined channel). */
-  claim(ctx: ExtensionContext, spec: string, taskId: string, reason?: string, channel?: string): Promise<ClaimResult>;
+  claim(
+    ctx: ExtensionContext,
+    spec: string,
+    taskId: string,
+    reason?: string,
+    channel?: string,
+  ): Promise<ClaimResult>;
   unclaim(spec: string, taskId: string, channel?: string): Promise<UnclaimResult>;
   complete(spec: string, taskId: string, notes?: string, channel?: string): Promise<CompleteResult>;
   /** Stop inbox delivery / close the socket; the instance stays reusable (join again). */

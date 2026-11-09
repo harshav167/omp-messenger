@@ -58,7 +58,13 @@ describe("executeRevise", () => {
       taskId: "__reviser__",
       agent: "crew-planner",
       name: "Reviser",
-      progress: { toolCallCount: 0, tokens: 0, currentTool: undefined, currentToolArgs: undefined, recentTools: [] },
+      progress: {
+        toolCallCount: 0,
+        tokens: 0,
+        currentTool: undefined,
+        currentToolArgs: undefined,
+        recentTools: [],
+      },
       startedAt: Date.now(),
     });
 
@@ -92,12 +98,15 @@ describe("executeRevise", () => {
 
   it("revises task with prompt and updates spec", async () => {
     const task = store.createTask(tmpDir, "old title", "old spec content");
-    spawnAgents.mockResolvedValue([{
-      exitCode: 0,
-      output: '```revised-task\n{"title": "new title", "spec": "# New Spec\\nRevised content"}\n```',
-      error: null,
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 0,
+        output:
+          '```revised-task\n{"title": "new title", "spec": "# New Spec\\nRevised content"}\n```',
+        error: null,
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
 
     const r = await executeRevise(tmpDir, task.id, "make it better", "agent");
     expect(r.success).toBe(true);
@@ -111,12 +120,14 @@ describe("executeRevise", () => {
 
   it("revises task without prompt", async () => {
     const task = store.createTask(tmpDir, "test task", "old spec");
-    spawnAgents.mockResolvedValue([{
-      exitCode: 0,
-      output: '```revised-task\n{"spec": "# Better Spec\\nImproved"}\n```',
-      error: null,
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 0,
+        output: '```revised-task\n{"spec": "# Better Spec\\nImproved"}\n```',
+        error: null,
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
 
     const r = await executeRevise(tmpDir, task.id, undefined, "agent");
     expect(r.success).toBe(true);
@@ -127,14 +138,39 @@ describe("executeRevise", () => {
     expect(spec).toContain("Improved");
   });
 
+  it("does not start a revision after its owner is cancelled", async () => {
+    const task = store.createTask(tmpDir, "test task", "old spec");
+    const originalSpec = store.getTaskSpec(tmpDir, task.id);
+    const owner = new AbortController();
+    owner.abort();
+
+    const result = await executeRevise(
+      tmpDir,
+      task.id,
+      "new instruction",
+      "agent",
+      undefined,
+      undefined,
+      "session-a",
+      owner.signal,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBe("Revision cancelled");
+    expect(spawnAgents).not.toHaveBeenCalled();
+    expect(store.getTaskSpec(tmpDir, task.id)).toBe(originalSpec);
+  });
+
   it("handles planner failure gracefully", async () => {
     const task = store.createTask(tmpDir, "test task", "spec");
-    spawnAgents.mockResolvedValue([{
-      exitCode: 1,
-      output: "",
-      error: "planner crashed",
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 1,
+        output: "",
+        error: "planner crashed",
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
 
     const r = await executeRevise(tmpDir, task.id, "fix it", "agent");
     expect(r.success).toBe(false);
@@ -146,12 +182,14 @@ describe("executeRevise", () => {
 
   it("handles unparseable planner output gracefully", async () => {
     const task = store.createTask(tmpDir, "test task", "spec");
-    spawnAgents.mockResolvedValue([{
-      exitCode: 0,
-      output: "some random output without the expected block",
-      error: null,
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 0,
+        output: "some random output without the expected block",
+        error: null,
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
 
     const r = await executeRevise(tmpDir, task.id, undefined, "agent");
     expect(r.success).toBe(false);
@@ -160,12 +198,14 @@ describe("executeRevise", () => {
 
   it("appends revision prompt to task progress log", async () => {
     const task = store.createTask(tmpDir, "test task", "spec");
-    spawnAgents.mockResolvedValue([{
-      exitCode: 0,
-      output: '```revised-task\n{"spec": "new spec"}\n```',
-      error: null,
-      progress: { toolCallCount: 0, tokens: 0 },
-    }]);
+    spawnAgents.mockResolvedValue([
+      {
+        exitCode: 0,
+        output: '```revised-task\n{"spec": "new spec"}\n```',
+        error: null,
+        progress: { toolCallCount: 0, tokens: 0 },
+      },
+    ]);
 
     await executeRevise(tmpDir, task.id, "split auth", "agent");
     const progress = store.getTaskProgress(tmpDir, task.id);

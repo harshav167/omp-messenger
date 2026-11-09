@@ -1,6 +1,6 @@
 /**
  * Crew - Work Handler
- * 
+ *
  * Spawns workers for ready tasks with concurrency control.
  * Simplified: works on current plan's tasks
  */
@@ -18,7 +18,15 @@ import * as teamStore from "../team/store.ts";
 import { reviewImplementation } from "./review.ts";
 import * as store from "../store.ts";
 import { getCrewDir } from "../store.ts";
-import { autonomousState, isAutonomousForCwd, startAutonomous, stopAutonomous, addWaveResult, clampConcurrency } from "../state.ts";
+import {
+  autonomousState,
+  getAutonomousRunId,
+  isAutonomousForCwd,
+  startAutonomous,
+  stopAutonomous,
+  addWaveResult,
+  clampConcurrency,
+} from "../state.ts";
 import { getAvailableLobbyWorkers, assignTaskToLobbyWorker } from "../lobby.ts";
 import { logFeedEvent } from "../../feed.ts";
 import { approvalTaskSummaries } from "../utils/task-format.ts";
@@ -27,9 +35,11 @@ function revisionHint(taskId: string): string {
   return `omp_messenger({ action: "task.revise", id: "${taskId}", prompt: "Address approval feedback" })`;
 }
 
-function rejectedTasksText(tasks: { id: string; title: string; approval?: { feedback?: string } }[]): string {
+function rejectedTasksText(
+  tasks: { id: string; title: string; approval?: { feedback?: string } }[],
+): string {
   if (tasks.length === 0) return "";
-  return `\n\nRejected tasks need revision:\n${tasks.map(t => `  - ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}\n    Revise with: \`${revisionHint(t.id)}\``).join("\n")}`;
+  return `\n\nRejected tasks need revision:\n${tasks.map((t) => `  - ${t.id}: ${t.title}${t.approval?.feedback ? ` — ${t.approval.feedback}` : ""}\n    Revise with: \`${revisionHint(t.id)}\``).join("\n")}`;
 }
 
 export async function execute(
@@ -39,27 +49,36 @@ export async function execute(
   appendEntry: AppendEntryFn,
   signal?: AbortSignal,
   sessionModel?: string,
+  ownerSignal?: AbortSignal,
 ) {
   const cwd = ctx.cwd;
+  const cancellation =
+    signal && ownerSignal ? AbortSignal.any([signal, ownerSignal]) : (signal ?? ownerSignal);
   const config = loadCrewConfig(getCrewDir(cwd));
   const { autonomous, concurrency: concurrencyOverride } = params;
+  if (cancellation?.aborted) {
+    return result("Work cancelled.", { mode: "work", error: "cancelled", ready: [] });
+  }
 
   // Verify plan exists
   const plan = store.getPlan(cwd);
   if (!plan) {
-    return result("No plan found. Create one first:\n\n  omp_messenger({ action: \"plan\" })\n  omp_messenger({ action: \"plan\", prd: \"path/to/PRD.md\" })", {
-      mode: "work",
-      error: "no_plan"
-    });
+    return result(
+      'No plan found. Create one first:\n\n  omp_messenger({ action: "plan" })\n  omp_messenger({ action: "plan", prd: "path/to/PRD.md" })',
+      {
+        mode: "work",
+        error: "no_plan",
+      },
+    );
   }
 
   // Check for worker agent
   const availableAgents = discoverCrewAgents(cwd);
-  const hasWorker = availableAgents.some(a => a.name === "crew-worker");
+  const hasWorker = availableAgents.some((a) => a.name === "crew-worker");
   if (!hasWorker) {
     return result("Error: crew-worker agent not found. Required for task execution.", {
       mode: "work",
-      error: "no_worker"
+      error: "no_worker",
     });
   }
 
@@ -81,9 +100,19 @@ export async function execute(
         status: "blocked",
         blocked_reason: `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
       });
-      store.appendTaskProgress(cwd, task.id, "system",
-        `Auto-blocked after ${task.attempt_count} attempts (max: ${config.work.maxAttemptsPerTask})`);
-      logFeedEvent(cwd, "crew", "task.block", task.id, `Max attempts (${config.work.maxAttemptsPerTask}) reached`);
+      store.appendTaskProgress(
+        cwd,
+        task.id,
+        "system",
+        `Auto-blocked after ${task.attempt_count} attempts (max: ${config.work.maxAttemptsPerTask})`,
+      );
+      logFeedEvent(
+        cwd,
+        "crew",
+        "task.block",
+        task.id,
+        `Max attempts (${config.work.maxAttemptsPerTask}) reached`,
+      );
     } else {
       readyTasks.push(task);
     }
@@ -91,28 +120,29 @@ export async function execute(
 
   if (readyTasks.length === 0) {
     const tasks = store.getTasks(cwd);
-    const inProgress = tasks.filter(t => t.status === "in_progress");
-    const blocked = tasks.filter(t => t.status === "blocked");
-    const done = tasks.filter(t => t.status === "done");
+    const inProgress = tasks.filter((t) => t.status === "in_progress");
+    const blocked = tasks.filter((t) => t.status === "blocked");
+    const done = tasks.filter((t) => t.status === "done");
 
     let reason = "";
     if (done.length === tasks.length) {
       reason = "🎉 All tasks are done! Plan is complete.";
     } else if (inProgress.length > 0) {
-      reason = `${inProgress.length} task(s) in progress: ${inProgress.map(t => t.id).join(", ")}`;
+      reason = `${inProgress.length} task(s) in progress: ${inProgress.map((t) => t.id).join(", ")}`;
     } else if (rejected.length > 0) {
       reason = "No startable tasks; rejected tasks need revision.";
     } else if (needsApproval.length > 0) {
       reason = "No startable tasks; ready tasks need lead approval.";
     } else if (blocked.length > 0) {
-      reason = `${blocked.length} task(s) blocked: ${blocked.map(t => `${t.id} (${t.blocked_reason})`).join(", ")}`;
+      reason = `${blocked.length} task(s) blocked: ${blocked.map((t) => `${t.id} (${t.blocked_reason})`).join(", ")}`;
     } else {
       reason = "All remaining tasks have unmet dependencies.";
     }
 
-    const approvalText = needsApproval.length > 0
-      ? `\n\nNeeds approval:\n${needsApproval.map(t => `  - ${t.id}: ${t.title}`).join("\n")}`
-      : "";
+    const approvalText =
+      needsApproval.length > 0
+        ? `\n\nNeeds approval:\n${needsApproval.map((t) => `  - ${t.id}: ${t.title}`).join("\n")}`
+        : "";
 
     const revisionText = rejectedTasksText(rejected);
 
@@ -123,14 +153,15 @@ export async function execute(
       reason,
       needsApproval: approvalTaskSummaries(needsApproval),
       rejected: approvalTaskSummaries(rejected),
-      inProgress: inProgress.map(t => t.id),
-      blocked: blocked.map(t => t.id)
+      inProgress: inProgress.map((t) => t.id),
+      blocked: blocked.map((t) => t.id),
     });
   }
 
   // Determine concurrency
-  const requestedConcurrency = concurrencyOverride
-    ?? (autonomous && isAutonomousForCwd(cwd)
+  const requestedConcurrency =
+    concurrencyOverride ??
+    (autonomous && isAutonomousForCwd(cwd)
       ? autonomousState.concurrency
       : config.concurrency.workers);
   autonomousState.concurrency = clampConcurrency(requestedConcurrency, config.concurrency.max);
@@ -140,19 +171,32 @@ export async function execute(
     startAutonomous(cwd, autonomousState.concurrency);
     appendEntry("crew-state", autonomousState);
   }
+  const autonomousRunId = autonomous ? getAutonomousRunId() : null;
+  const currentWave = autonomous ? autonomousState.waveNumber : 1;
+  const ownsAutonomousRun = (): boolean =>
+    autonomous && isAutonomousForCwd(cwd) && getAutonomousRunId() === autonomousRunId;
 
   const skills = discoverCrewSkills(cwd);
 
   // Assign tasks to lobby workers first (they're already running and warmed up)
   const prdLabel = store.getPlanLabel(plan);
   const lobbyAssigned = new Set<string>();
-  const lobbyWorkers = getAvailableLobbyWorkers(cwd);
+  const lobbyWorkers = getAvailableLobbyWorkers(cwd, ctx.sessionManager?.getSessionId?.());
   for (const lobbyWorker of lobbyWorkers) {
-    const task = readyTasks.find(t => !lobbyAssigned.has(t.id));
+    if (cancellation?.aborted) break;
+    const task = readyTasks.find((t) => !lobbyAssigned.has(t.id));
     if (!task) break;
 
-    const others = readyTasks.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, teamStore.buildTeamPromptContext(cwd, task));
+    const others = readyTasks.filter((t) => t.id !== task.id);
+    const prompt = buildWorkerPrompt(
+      task,
+      prdLabel,
+      cwd,
+      config,
+      others,
+      skills,
+      teamStore.buildTeamPromptContext(cwd, task),
+    );
     store.updateTask(cwd, task.id, {
       status: "in_progress",
       started_at: new Date().toISOString(),
@@ -160,31 +204,43 @@ export async function execute(
       assigned_to: lobbyWorker.name,
       attempt_count: task.attempt_count + 1,
     });
-    if (!await assignTaskToLobbyWorker(lobbyWorker, task.id, prompt, mesh)) {
+    if (!(await assignTaskToLobbyWorker(lobbyWorker, task.id, prompt, mesh, cancellation))) {
       store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
       continue;
     }
-    store.appendTaskProgress(cwd, task.id, "system", `Assigned to lobby worker ${lobbyWorker.name} (attempt ${task.attempt_count + 1})`);
+    store.appendTaskProgress(
+      cwd,
+      task.id,
+      "system",
+      `Assigned to lobby worker ${lobbyWorker.name} (attempt ${task.attempt_count + 1})`,
+    );
     logFeedEvent(cwd, lobbyWorker.name, "task.start", task.id, task.title);
     lobbyAssigned.add(task.id);
   }
 
   // Build prompts for remaining tasks — spawnAgents throttles via autonomousState.concurrency
-  const remainingTasks = readyTasks.filter(t => !lobbyAssigned.has(t.id));
+  const remainingTasks = readyTasks.filter((t) => !lobbyAssigned.has(t.id));
   const teamRoles = teamStore.resolveRoles(cwd);
-  const workerTasks = remainingTasks.map(task => {
+  const workerTasks = remainingTasks.map((task) => {
     const roleName = teamStore.resolveRoleName(cwd, task.role);
     const roleModel = roleName ? teamRoles[roleName]?.model : undefined;
-    const taskModel = resolveModel(
-      task.model,
-      params.model,
-      roleModel,
-      config.models?.worker,
-      sessionModel,
+    const taskModel = resolveModel(task.model, params.model, roleModel, config.models?.worker);
+    const others = readyTasks.filter((t) => t.id !== task.id);
+    const prompt = buildWorkerPrompt(
+      task,
+      prdLabel,
+      cwd,
+      config,
+      others,
+      skills,
+      teamStore.buildTeamPromptContext(cwd, task),
     );
-    const others = readyTasks.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, teamStore.buildTeamPromptContext(cwd, task));
-    store.appendTaskProgress(cwd, task.id, "system", `Assigned to crew-worker (attempt ${task.attempt_count + 1})`);
+    store.appendTaskProgress(
+      cwd,
+      task.id,
+      "system",
+      `Assigned to crew-worker (attempt ${task.attempt_count + 1})`,
+    );
 
     return {
       agent: "crew-worker",
@@ -194,15 +250,14 @@ export async function execute(
     };
   });
 
-  const workerResults = await spawnAgents(
-    workerTasks,
-    cwd,
-    {
-      signal,
-      mesh,
-      localProtocolOptions: ctx.localProtocolOptions,
-    },
-  );
+  const workerResults = await spawnAgents(workerTasks, cwd, {
+    signal: cancellation,
+    mesh,
+    parentAgentId: ctx.agent?.id,
+    ownerSessionId: ctx.sessionManager?.getSessionId?.(),
+    ownerSignal,
+    localProtocolOptions: ctx.localProtocolOptions,
+  });
 
   // Process results
   const succeeded: string[] = [];
@@ -216,7 +271,18 @@ export async function execute(
       failed.push(`unknown-result-${i}`);
       continue;
     }
+    if (r.started === false) {
+      failed.push(taskId);
+      continue;
+    }
     const task = store.getTask(cwd, taskId);
+    if (
+      task?.status === "in_progress" &&
+      r.workerName !== undefined &&
+      task.assigned_to !== r.workerName
+    ) {
+      continue;
+    }
 
     if (r.exitCode === 0) {
       if (task?.status === "done") {
@@ -224,8 +290,14 @@ export async function execute(
       } else if (task?.status === "blocked") {
         blocked.push(taskId);
       } else if (task?.status === "in_progress") {
-        store.appendTaskProgress(cwd, taskId, "system",
-          r.wasGracefullyShutdown ? "Task interrupted (shutdown), reset to todo" : "Worker exited without completing task, reset to todo");
+        store.appendTaskProgress(
+          cwd,
+          taskId,
+          "system",
+          r.wasGracefullyShutdown
+            ? "Task interrupted (shutdown), reset to todo"
+            : "Worker exited without completing task, reset to todo",
+        );
         store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
         failed.push(taskId);
       } else {
@@ -238,19 +310,34 @@ export async function execute(
         } else if (task?.status === "blocked") {
           blocked.push(taskId);
         } else if (task?.status === "in_progress") {
-          store.appendTaskProgress(cwd, taskId, "system", "Task interrupted (shutdown), reset to todo");
+          store.appendTaskProgress(
+            cwd,
+            taskId,
+            "system",
+            "Task interrupted (shutdown), reset to todo",
+          );
           store.updateTask(cwd, taskId, { status: "todo", assigned_to: undefined });
           failed.push(taskId);
         } else {
           failed.push(taskId);
         }
       } else if (autonomous && task?.status === "in_progress") {
-        store.appendTaskProgress(cwd, taskId, "system", `Worker crashed: ${r.error ?? "Unknown error"}`);
+        store.appendTaskProgress(
+          cwd,
+          taskId,
+          "system",
+          `Worker crashed: ${r.error ?? "Unknown error"}`,
+        );
         store.blockTask(cwd, taskId, `Worker failed: ${r.error ?? "Unknown error"}`);
         blocked.push(taskId);
       } else {
         if (task?.status === "in_progress") {
-          store.appendTaskProgress(cwd, taskId, "system", `Worker failed: ${r.error ?? "Unknown error"}`);
+          store.appendTaskProgress(
+            cwd,
+            taskId,
+            "system",
+            `Worker failed: ${r.error ?? "Unknown error"}`,
+          );
         }
         failed.push(taskId);
       }
@@ -259,10 +346,10 @@ export async function execute(
 
   // Auto-review succeeded tasks
   if (config.review.enabled && succeeded.length > 0) {
-    const hasReviewer = availableAgents.some(a => a.name === "crew-reviewer");
+    const hasReviewer = availableAgents.some((a) => a.name === "crew-reviewer");
     if (hasReviewer) {
       for (const taskId of [...succeeded]) {
-        if (signal?.aborted) break;
+        if (cancellation?.aborted) break;
         const task = store.getTask(cwd, taskId);
         if (!task || !task.base_commit) continue;
         if ((task.review_count ?? 0) >= config.review.maxIterations) continue;
@@ -273,16 +360,32 @@ export async function execute(
           }
           succeeded.splice(succeeded.indexOf(taskId), 1);
           blocked.push(taskId);
-          logFeedEvent(cwd, "crew", "task.review", taskId,
-            `skipped — blocked: ${task.blocked_reason ?? task.status}`);
+          logFeedEvent(
+            cwd,
+            "crew",
+            "task.review",
+            taskId,
+            `skipped — blocked: ${task.blocked_reason ?? task.status}`,
+          );
           continue;
         }
 
-        const rr = await reviewImplementation(cwd, taskId, config.models?.reviewer ?? sessionModel);
+        const rr = await reviewImplementation(
+          cwd,
+          taskId,
+          config.models?.reviewer,
+          ctx.agent?.id,
+          ctx.sessionManager?.getSessionId?.(),
+          ownerSignal,
+        );
         const verdict = rr.details?.verdict as string | undefined;
         if (!verdict) {
-          store.appendTaskProgress(cwd, taskId, "system",
-            `Auto-review skipped: ${rr.details?.error ?? "unknown"}`);
+          store.appendTaskProgress(
+            cwd,
+            taskId,
+            "system",
+            `Auto-review skipped: ${rr.details?.error ?? "unknown"}`,
+          );
           continue;
         }
 
@@ -312,27 +415,26 @@ export async function execute(
 
   syncCompletedCount(cwd);
 
-  // Save current wave number BEFORE addWaveResult increments it
-  const currentWave = autonomous ? autonomousState.waveNumber : 1;
-  
-  if (autonomous) {
+  if (ownsAutonomousRun()) {
     addWaveResult({
       waveNumber: currentWave,
-      tasksAttempted: remainingTasks.map(t => t.id),
+      tasksAttempted: remainingTasks.map((t) => t.id),
       succeeded,
       failed,
       blocked,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
 
-    if (signal?.aborted) {
+    if (cancellation?.aborted) {
       stopAutonomous("manual");
       appendEntry("crew-state", autonomousState);
     } else {
-      const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" }).filter(t => !teamStore.taskNeedsApproval(cwd, t));
+      const nextReady = store
+        .getReadyTasks(cwd, { advisory: config.dependencies === "advisory" })
+        .filter((t) => !teamStore.taskNeedsApproval(cwd, t));
       const allTasks = store.getTasks(cwd);
-      const allDone = allTasks.every(t => t.status === "done");
-      const allBlockedOrDone = allTasks.every(t => t.status === "done" || t.status === "blocked");
+      const allDone = allTasks.every((t) => t.status === "done");
+      const allBlockedOrDone = allTasks.every((t) => t.status === "done" || t.status === "blocked");
 
       if (allDone) {
         stopAutonomous("completed");
@@ -341,7 +443,7 @@ export async function execute(
           prd: plan.prd,
           status: "completed",
           totalWaves: currentWave,
-          totalTasks: allTasks.length
+          totalTasks: allTasks.length,
         });
       } else if (allBlockedOrDone || nextReady.length === 0) {
         stopAutonomous("blocked");
@@ -349,14 +451,14 @@ export async function execute(
         appendEntry("crew_wave_blocked", {
           prd: plan.prd,
           status: "blocked",
-          blockedTasks: allTasks.filter(t => t.status === "blocked").map(t => t.id)
+          blockedTasks: allTasks.filter((t) => t.status === "blocked").map((t) => t.id),
         });
       } else {
         appendEntry("crew-state", autonomousState);
         appendEntry("crew_wave_continue", {
           prd: plan.prd,
           nextWave: autonomousState.waveNumber,
-          readyTasks: nextReady.map(t => t.id)
+          readyTasks: nextReady.map((t) => t.id),
         });
       }
     }
@@ -364,33 +466,38 @@ export async function execute(
 
   // Build result
   const updatedPlan = store.getPlan(cwd);
-  const progress = updatedPlan 
+  const progress = updatedPlan
     ? `${updatedPlan.completed_count}/${updatedPlan.task_count}`
     : "unknown";
 
   const nextReady = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
-  const actionableNextReady = nextReady.filter(t => !teamStore.taskNeedsApproval(cwd, t));
-  const finalNeedsApproval = nextReady.filter(t => teamStore.taskPendingApproval(cwd, t));
-  const finalRejected = nextReady.filter(t => teamStore.taskNeedsRevision(cwd, t));
+  const actionableNextReady = nextReady.filter((t) => !teamStore.taskNeedsApproval(cwd, t));
+  const finalNeedsApproval = nextReady.filter((t) => teamStore.taskPendingApproval(cwd, t));
+  const finalRejected = nextReady.filter((t) => teamStore.taskNeedsRevision(cwd, t));
 
   let statusText = "";
   if (succeeded.length > 0) statusText += `\n✅ Completed: ${succeeded.join(", ")}`;
   if (failed.length > 0) statusText += `\n❌ Failed: ${failed.join(", ")}`;
   if (blocked.length > 0) statusText += `\n🚫 Blocked: ${blocked.join(", ")}`;
-  if (finalNeedsApproval.length > 0) statusText += `\n🛑 Needs approval: ${finalNeedsApproval.map(t => t.id).join(", ")}`;
-  if (finalRejected.length > 0) statusText += `\n↩️ Rejected: ${finalRejected.map(t => t.id).join(", ")}`;
-  const nextText = actionableNextReady.length > 0
-    ? `\n\n**Ready for next wave:** ${actionableNextReady.map(t => t.id).join(", ")}`
-    : "";
-  const continueText = autonomous && !signal?.aborted && actionableNextReady.length > 0
-    ? "Autonomous mode: Continuing to next wave..."
-    : signal?.aborted && autonomous
-      ? "Autonomous mode stopped (cancelled)."
+  if (finalNeedsApproval.length > 0)
+    statusText += `\n🛑 Needs approval: ${finalNeedsApproval.map((t) => t.id).join(", ")}`;
+  if (finalRejected.length > 0)
+    statusText += `\n↩️ Rejected: ${finalRejected.map((t) => t.id).join(", ")}`;
+  const nextText =
+    actionableNextReady.length > 0
+      ? `\n\n**Ready for next wave:** ${actionableNextReady.map((t) => t.id).join(", ")}`
       : "";
+  const continueText =
+    autonomous && !cancellation?.aborted && actionableNextReady.length > 0
+      ? "Autonomous mode: Continuing to next wave..."
+      : cancellation?.aborted && autonomous
+        ? "Autonomous mode stopped (cancelled)."
+        : "";
 
-  const lobbyText = lobbyAssigned.size > 0
-    ? `\n🏢 Lobby workers assigned: ${Array.from(lobbyAssigned).join(", ")}`
-    : "";
+  const lobbyText =
+    lobbyAssigned.size > 0
+      ? `\n🏢 Lobby workers assigned: ${Array.from(lobbyAssigned).join(", ")}`
+      : "";
 
   const text = `# Work Wave ${currentWave}
 
@@ -405,21 +512,21 @@ ${continueText}`;
     mode: "work",
     prd: plan.prd,
     wave: currentWave,
-    attempted: remainingTasks.map(t => t.id),
+    attempted: remainingTasks.map((t) => t.id),
     succeeded,
     failed,
     blocked,
     needsApproval: approvalTaskSummaries(finalNeedsApproval),
     rejected: approvalTaskSummaries(finalRejected),
-    nextReady: actionableNextReady.map(t => t.id),
-    autonomous: !!autonomous
+    nextReady: actionableNextReady.map((t) => t.id),
+    autonomous: !!autonomous,
   });
 }
 
 function syncCompletedCount(cwd: string): void {
   const plan = store.getPlan(cwd);
   if (!plan) return;
-  const doneCount = store.getTasks(cwd).filter(t => t.status === "done").length;
+  const doneCount = store.getTasks(cwd).filter((t) => t.status === "done").length;
   if (plan.completed_count !== doneCount) {
     store.updatePlan(cwd, { completed_count: doneCount });
   }

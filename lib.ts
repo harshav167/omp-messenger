@@ -97,7 +97,7 @@ const MENTION_PATTERN = /(^|[^A-Za-z0-9_@-])@([A-Za-z0-9_][A-Za-z0-9_-]*)/g;
  * email address or a stray `@` never addresses anyone.
  */
 export function parseMentions(text: string, members: readonly string[]): string[] {
-  const byLower = new Map(members.map(name => [name.toLowerCase(), name]));
+  const byLower = new Map(members.map((name) => [name.toLowerCase(), name]));
   const found = new Set<string>();
   for (const match of text.matchAll(MENTION_PATTERN)) {
     const token = match[2].toLowerCase();
@@ -139,9 +139,10 @@ export function normalizeAgentMailMessage(
   input: unknown,
   defaults: { id: string; from: string; to: string; timestamp: string },
 ): AgentMailMessage {
-  const raw = input && typeof input === "object" && !Array.isArray(input)
-    ? input as AgentMailMessageInput
-    : {};
+  const raw =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as AgentMailMessageInput)
+      : {};
 
   return {
     id: stringField(raw.id, defaults.id),
@@ -151,7 +152,9 @@ export function normalizeAgentMailMessage(
     timestamp: stringField(raw.timestamp, stringField(raw.ts, defaults.timestamp)),
     replyTo: typeof raw.replyTo === "string" ? raw.replyTo : null,
     ...(raw.gentle === true ? { gentle: true } : {}),
-    ...(typeof raw.channel === "string" && isValidChannelName(raw.channel) ? { channel: raw.channel } : {}),
+    ...(typeof raw.channel === "string" && isValidChannelName(raw.channel)
+      ? { channel: raw.channel }
+      : {}),
     ...(raw.kind === "post" ? { kind: "post" as const } : {}),
     ...(Array.isArray(raw.mentions)
       ? { mentions: raw.mentions.filter((m): m is string => typeof m === "string") }
@@ -161,7 +164,7 @@ export function normalizeAgentMailMessage(
 
 /** Sorted, de-duplicated, valid channel names; empty input → ["main"]. Throws on an invalid name. */
 export function normalizeChannels(input: readonly string[] | undefined): string[] {
-  const names = [...new Set((input ?? []).map(c => c.trim()).filter(c => c.length > 0))];
+  const names = [...new Set((input ?? []).map((c) => c.trim()).filter((c) => c.length > 0))];
   for (const name of names) {
     if (!isValidChannelName(name)) throw new Error(`Invalid channel name: ${name}`);
   }
@@ -246,7 +249,7 @@ export function computeStatus(
   lastActivityAt: string,
   hasTask: boolean,
   hasReservation: boolean,
-  thresholdMs: number
+  thresholdMs: number,
 ): ComputedStatus {
   const elapsed = Date.now() - new Date(lastActivityAt).getTime();
   if (isNaN(elapsed) || elapsed < 0) {
@@ -332,50 +335,172 @@ export const MAX_WATCHER_RETRIES = 5;
 export const MAX_CHAT_HISTORY = 50;
 
 const AGENT_COLORS = [
-  "38;2;178;129;214",  // purple
-  "38;2;215;135;175",  // pink  
-  "38;2;254;188;56",   // gold
-  "38;2;137;210;129",  // green
-  "38;2;0;175;175",    // cyan
-  "38;2;23;143;185",   // blue
-  "38;2;228;192;15",   // yellow
-  "38;2;255;135;135",  // coral
+  "38;2;178;129;214", // purple
+  "38;2;215;135;175", // pink
+  "38;2;254;188;56", // gold
+  "38;2;137;210;129", // green
+  "38;2;0;175;175", // cyan
+  "38;2;23;143;185", // blue
+  "38;2;228;192;15", // yellow
+  "38;2;255;135;135", // coral
 ];
 
 const DEFAULT_ADJECTIVES = [
-  "Swift", "Bright", "Calm", "Dark", "Epic", "Fast", "Gold", "Happy",
-  "Iron", "Jade", "Keen", "Loud", "Mint", "Nice", "Oak", "Pure",
-  "Quick", "Red", "Sage", "True", "Ultra", "Vivid", "Wild", "Young", "Zen"
+  "Swift",
+  "Bright",
+  "Calm",
+  "Dark",
+  "Epic",
+  "Fast",
+  "Gold",
+  "Happy",
+  "Iron",
+  "Jade",
+  "Keen",
+  "Loud",
+  "Mint",
+  "Nice",
+  "Oak",
+  "Pure",
+  "Quick",
+  "Red",
+  "Sage",
+  "True",
+  "Ultra",
+  "Vivid",
+  "Wild",
+  "Young",
+  "Zen",
 ];
 
 const DEFAULT_NOUNS = [
-  "Arrow", "Bear", "Castle", "Dragon", "Eagle", "Falcon", "Grove", "Hawk",
-  "Ice", "Jaguar", "Knight", "Lion", "Moon", "Nova", "Owl", "Phoenix",
-  "Quartz", "Raven", "Storm", "Tiger", "Union", "Viper", "Wolf", "Xenon", "Yak", "Zenith"
+  "Arrow",
+  "Bear",
+  "Castle",
+  "Dragon",
+  "Eagle",
+  "Falcon",
+  "Grove",
+  "Hawk",
+  "Ice",
+  "Jaguar",
+  "Knight",
+  "Lion",
+  "Moon",
+  "Nova",
+  "Owl",
+  "Phoenix",
+  "Quartz",
+  "Raven",
+  "Storm",
+  "Tiger",
+  "Union",
+  "Viper",
+  "Wolf",
+  "Xenon",
+  "Yak",
+  "Zenith",
 ];
 
 const NATURE_ADJECTIVES = [
-  "Oak", "River", "Mountain", "Cedar", "Storm", "Meadow", "Frost", "Coral",
-  "Willow", "Stone", "Ember", "Moss", "Tide", "Fern", "Cloud", "Pine"
+  "Oak",
+  "River",
+  "Mountain",
+  "Cedar",
+  "Storm",
+  "Meadow",
+  "Frost",
+  "Coral",
+  "Willow",
+  "Stone",
+  "Ember",
+  "Moss",
+  "Tide",
+  "Fern",
+  "Cloud",
+  "Pine",
 ];
 const NATURE_NOUNS = [
-  "Tree", "Stone", "Wind", "Brook", "Peak", "Valley", "Lake", "Ridge",
-  "Creek", "Glade", "Fox", "Heron", "Sage", "Thorn", "Dawn", "Dusk"
+  "Tree",
+  "Stone",
+  "Wind",
+  "Brook",
+  "Peak",
+  "Valley",
+  "Lake",
+  "Ridge",
+  "Creek",
+  "Glade",
+  "Fox",
+  "Heron",
+  "Sage",
+  "Thorn",
+  "Dawn",
+  "Dusk",
 ];
 
 const SPACE_ADJECTIVES = [
-  "Nova", "Lunar", "Cosmic", "Solar", "Stellar", "Astral", "Nebula", "Orbit",
-  "Pulse", "Quasar", "Void", "Zenith", "Aurora", "Comet", "Warp", "Ion"
+  "Nova",
+  "Lunar",
+  "Cosmic",
+  "Solar",
+  "Stellar",
+  "Astral",
+  "Nebula",
+  "Orbit",
+  "Pulse",
+  "Quasar",
+  "Void",
+  "Zenith",
+  "Aurora",
+  "Comet",
+  "Warp",
+  "Ion",
 ];
 const SPACE_NOUNS = [
-  "Star", "Dust", "Ray", "Flare", "Drift", "Core", "Ring", "Gate",
-  "Spark", "Beam", "Wave", "Shard", "Forge", "Bolt", "Glow", "Arc"
+  "Star",
+  "Dust",
+  "Ray",
+  "Flare",
+  "Drift",
+  "Core",
+  "Ring",
+  "Gate",
+  "Spark",
+  "Beam",
+  "Wave",
+  "Shard",
+  "Forge",
+  "Bolt",
+  "Glow",
+  "Arc",
 ];
 
 const MINIMAL_NAMES = [
-  "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
-  "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi",
-  "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega"
+  "Alpha",
+  "Beta",
+  "Gamma",
+  "Delta",
+  "Epsilon",
+  "Zeta",
+  "Eta",
+  "Theta",
+  "Iota",
+  "Kappa",
+  "Lambda",
+  "Mu",
+  "Nu",
+  "Xi",
+  "Omicron",
+  "Pi",
+  "Rho",
+  "Sigma",
+  "Tau",
+  "Upsilon",
+  "Phi",
+  "Chi",
+  "Psi",
+  "Omega",
 ];
 
 export interface NameThemeConfig {
@@ -409,7 +534,8 @@ export function generateMemorableName(themeConfig?: NameThemeConfig): string {
     case "custom": {
       // Custom words flow into registry/inbox paths unchecked downstream, so keep only
       // words that are themselves valid name fragments; fall back to defaults otherwise.
-      const safe = (words: string[] | undefined) => (words ?? []).filter(w => /^[A-Za-z][A-Za-z0-9_-]*$/.test(w));
+      const safe = (words: string[] | undefined) =>
+        (words ?? []).filter((w) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(w));
       const customAdjectives = safe(themeConfig?.customWords?.adjectives);
       const customNouns = safe(themeConfig?.customWords?.nouns);
       adjectives = customAdjectives.length > 0 ? customAdjectives : DEFAULT_ADJECTIVES;
@@ -436,9 +562,13 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-export function isValidAgentName(name: string): boolean {
-  if (!name || name.length > 50) return false;
-  return /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/.test(name);
+export function isValidAgentName(name: unknown): name is string {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= 50 &&
+    /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/.test(name)
+  );
 }
 
 /** Channel names: lowercase alphanumerics, `_`, `-`; 1–48 chars; must start alphanumeric. */
@@ -476,7 +606,7 @@ export function agentColorCode(name: string): string {
   if (cached) return cached;
 
   let hash = 0;
-  for (const char of name) hash = ((hash << 5) - hash) + char.charCodeAt(0);
+  for (const char of name) hash = (hash << 5) - hash + char.charCodeAt(0);
   const color = AGENT_COLORS[Math.abs(hash) % AGENT_COLORS.length];
   colorCache.set(name, color);
   return color;
@@ -510,13 +640,13 @@ export function displaySpecPath(absPath: string, cwd: string): string {
 
 export function truncatePathLeft(filePath: string, maxLen: number): string {
   if (filePath.length <= maxLen) return filePath;
-  if (maxLen <= 1) return '…';
+  if (maxLen <= 1) return "…";
   const truncated = filePath.slice(-(maxLen - 1));
-  const slashIdx = truncated.indexOf('/');
+  const slashIdx = truncated.indexOf("/");
   if (slashIdx > 0) {
-    return '…' + truncated.slice(slashIdx);
+    return "…" + truncated.slice(slashIdx);
   }
-  return '…' + truncated;
+  return "…" + truncated;
 }
 
 export function buildSelfRegistration(state: MessengerState): AgentRegistration {
@@ -539,7 +669,10 @@ export function buildSelfRegistration(state: MessengerState): AgentRegistration 
 }
 
 /** Reservation conflicts for `filePath` among `peers` (pure; callers supply `mesh.peers()`). */
-export function findReservationConflicts(filePath: string, peers: AgentRegistration[]): ReservationConflict[] {
+export function findReservationConflicts(
+  filePath: string,
+  peers: AgentRegistration[],
+): ReservationConflict[] {
   const conflicts: ReservationConflict[] = [];
   for (const agent of peers) {
     if (!agent.reservations) continue;
@@ -561,7 +694,7 @@ export function findReservationConflicts(filePath: string, peers: AgentRegistrat
 /** The single active swarm claim held by `agent`, if any (pure; callers supply `mesh.claims()`). */
 export function findAgentClaim(
   claims: AllClaims,
-  agent: string
+  agent: string,
 ): { spec: string; taskId: string; reason?: string } | null {
   for (const [spec, tasks] of Object.entries(claims)) {
     for (const [taskId, claim] of Object.entries(tasks)) {
@@ -576,30 +709,30 @@ export function findAgentClaim(
 export function agentHasTask(
   name: string,
   allClaims: AllClaims,
-  crewTasks: Array<{ assigned_to?: string; status: string }>
+  crewTasks: Array<{ assigned_to?: string; status: string }>,
 ): boolean {
   for (const tasks of Object.values(allClaims)) {
     for (const claim of Object.values(tasks)) {
       if (claim.agent === name) return true;
     }
   }
-  return crewTasks.some(t => t.assigned_to === name && t.status === "in_progress");
+  return crewTasks.some((t) => t.assigned_to === name && t.status === "in_progress");
 }
 
 export type DisplayMode = "same-folder-branch" | "same-folder" | "different";
 
 export function getDisplayMode(agents: AgentRegistration[]): DisplayMode {
   if (agents.length === 0) return "different";
-  
-  const folders = agents.map(a => extractFolder(a.cwd));
+
+  const folders = agents.map((a) => extractFolder(a.cwd));
   const uniqueFolders = new Set(folders);
-  
+
   if (uniqueFolders.size > 1) return "different";
-  
-  const branches = agents.map(a => a.gitBranch).filter(Boolean);
+
+  const branches = agents.map((a) => a.gitBranch).filter(Boolean);
   const uniqueBranches = new Set(branches);
-  
+
   if (uniqueBranches.size <= 1) return "same-folder-branch";
-  
+
   return "same-folder";
 }

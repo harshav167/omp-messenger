@@ -87,21 +87,37 @@ function executeTaskAction(
   }
 
   const result = runTaskAction(cwd, action, taskId, agentName, reason, {
-    isWorkerActive: id => hasLiveWorker(cwd, id),
+    isWorkerActive: (id) => hasLiveWorker(cwd, id),
   });
   return { success: result.success, message: result.message };
 }
 
-export function setNotification(viewState: CrewViewState, tui: TUI, success: boolean, message: string): void {
+export function setNotification(
+  viewState: CrewViewState,
+  tui: TUI,
+  success: boolean,
+  message: string,
+): void {
   if (viewState.notificationTimer) clearTimeout(viewState.notificationTimer);
-  viewState.notification = { message: `${success ? "✓" : "✗"} ${message}`, expiresAt: Date.now() + 2000 };
+  viewState.notification = {
+    message: `${success ? "✓" : "✗"} ${message}`,
+    expiresAt: Date.now() + 2000,
+  };
   viewState.notificationTimer = setTimeout(() => {
     viewState.notificationTimer = null;
-    tui.requestRender();
+    try {
+      tui.requestRender();
+    } catch (error) {
+      console.error("omp-messenger notification refresh failed", error);
+    }
   }, 2000);
 }
 
-function addToChatHistory(state: MessengerState, recipient: string, message: AgentMailMessage): void {
+function addToChatHistory(
+  state: MessengerState,
+  recipient: string,
+  message: AgentMailMessage,
+): void {
   let history = state.chatHistory.get(recipient);
   if (!history) {
     history = [];
@@ -130,7 +146,13 @@ function previewText(text: string): string {
   return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
 
-export function handleConfirmInput(data: string, viewState: CrewViewState, cwd: string, agentName: string, tui: TUI): void {
+export function handleConfirmInput(
+  data: string,
+  viewState: CrewViewState,
+  cwd: string,
+  agentName: string,
+  tui: TUI,
+): void {
   const action = viewState.confirmAction;
   if (!action) return;
   if (matchesKey(data, "y")) {
@@ -146,7 +168,10 @@ export function handleConfirmInput(data: string, viewState: CrewViewState, cwd: 
     if (action.type === "delete") {
       const tasks = crewStore.getTasks(cwd);
       if (tasks.length > 0) {
-        viewState.selectedTaskIndex = Math.max(0, Math.min(viewState.selectedTaskIndex, tasks.length - 1));
+        viewState.selectedTaskIndex = Math.max(
+          0,
+          Math.min(viewState.selectedTaskIndex, tasks.length - 1),
+        );
       } else {
         viewState.selectedTaskIndex = 0;
         if (viewState.mode === "detail") viewState.mode = "list";
@@ -207,6 +232,9 @@ export function handleRevisePromptInput(
   task: Task | undefined,
   agentName: string,
   tui: TUI,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
 ): void {
   if (matchesKey(data, "escape")) {
     viewState.inputMode = "normal";
@@ -236,12 +264,29 @@ export function handleRevisePromptInput(
     const t = tui;
     const fn = scope === "tree" ? "executeReviseTree" : "executeRevise";
     import("./crew/handlers/revise.ts")
-      .then(m => m[fn](cwd, task.id, prompt, agentName))
-      .then(result => {
+      .then((m) =>
+        m[fn](
+          cwd,
+          task.id,
+          prompt,
+          agentName,
+          undefined,
+          parentAgentId,
+          ownerSessionId,
+          ownerSignal,
+        ),
+      )
+      .then((result) => {
         setNotification(vs, t, result.success, result.message);
       })
-      .catch(err => {
-        logFeedEvent(cwd, agentName, scope === "tree" ? "task.revise-tree" : "task.revise", task.id, `failed: ${err instanceof Error ? err.message : "unknown"}`);
+      .catch((err) => {
+        logFeedEvent(
+          cwd,
+          agentName,
+          scope === "tree" ? "task.revise-tree" : "task.revise",
+          task.id,
+          `failed: ${err instanceof Error ? err.message : "unknown"}`,
+        );
       });
     tui.requestRender();
     return;
@@ -294,7 +339,7 @@ function collectMentionCandidates(
 
   if (!prefix) return names;
   const lower = prefix.toLowerCase();
-  return names.filter(n => n.toLowerCase().startsWith(lower));
+  return names.filter((n) => n.toLowerCase().startsWith(lower));
 }
 
 function sendDirectMessage(
@@ -306,17 +351,20 @@ function sendDirectMessage(
   tui: TUI,
   viewState: CrewViewState,
 ): void {
-  void mesh.send(target, text).then(result => {
-    if (result.ok === true) {
-      addToChatHistory(state, target, result.message);
-      logFeedEvent(cwd, state.agentName, "message", target, previewText(text));
-      resetMessageInput(viewState);
-      setNotification(viewState, tui, true, `Sent to ${target}`);
-    } else {
-      setNotification(viewState, tui, false, `Failed: ${result.error}`);
-    }
-    tui.requestRender();
-  });
+  void mesh
+    .send(target, text)
+    .then((result) => {
+      if (result.ok === true) {
+        addToChatHistory(state, target, result.message);
+        logFeedEvent(cwd, state.agentName, "message", target, previewText(text));
+        resetMessageInput(viewState);
+        setNotification(viewState, tui, true, `Sent to ${target}`);
+      } else {
+        setNotification(viewState, tui, false, `Failed: ${result.error}`);
+      }
+      tui.requestRender();
+    })
+    .catch((error) => console.error("omp-messenger send failed", error));
 }
 
 function sendBroadcastMessage(
@@ -334,20 +382,27 @@ function sendBroadcastMessage(
     return;
   }
 
-  void Promise.all(peers.map(peer => mesh.send(peer.name, text))).then(results => {
-    const sentCount = results.filter(result => result.ok).length;
-    if (sentCount === 0) {
-      setNotification(viewState, tui, false, "Broadcast failed");
-      tui.requestRender();
-      return;
-    }
+  void Promise.all(peers.map((peer) => mesh.send(peer.name, text)))
+    .then((results) => {
+      const sentCount = results.filter((result) => result.ok).length;
+      if (sentCount === 0) {
+        setNotification(viewState, tui, false, "Broadcast failed");
+        tui.requestRender();
+        return;
+      }
 
-    addToBroadcastHistory(state, text);
-    logFeedEvent(cwd, state.agentName, "message", undefined, previewText(text));
-    resetMessageInput(viewState);
-    setNotification(viewState, tui, true, `Broadcast to ${sentCount} peer${sentCount === 1 ? "" : "s"}`);
-    tui.requestRender();
-  });
+      addToBroadcastHistory(state, text);
+      logFeedEvent(cwd, state.agentName, "message", undefined, previewText(text));
+      resetMessageInput(viewState);
+      setNotification(
+        viewState,
+        tui,
+        true,
+        `Broadcast to ${sentCount} peer${sentCount === 1 ? "" : "s"}`,
+      );
+      tui.requestRender();
+    })
+    .catch((error) => console.error("omp-messenger broadcast failed", error));
 }
 
 export function handleMessageInput(
@@ -378,7 +433,9 @@ export function handleMessageInput(
       viewState.mentionIndex = 0;
     } else {
       const delta = reverse ? -1 : 1;
-      viewState.mentionIndex = (viewState.mentionIndex + delta + viewState.mentionCandidates.length) % viewState.mentionCandidates.length;
+      viewState.mentionIndex =
+        (viewState.mentionIndex + delta + viewState.mentionCandidates.length) %
+        viewState.mentionCandidates.length;
     }
 
     viewState.messageInput = `@${viewState.mentionCandidates[viewState.mentionIndex]} `;
@@ -464,7 +521,12 @@ export function handleCrewKeyBinding(
     return;
   }
   if (matchesKey(data, "shift+s") && task.status !== "done" && !task.milestone) {
-    setNotification(viewState, tui, true, `Split: omp_messenger({ action: "task.split", id: "${task.id}" })`);
+    setNotification(
+      viewState,
+      tui,
+      true,
+      `Split: omp_messenger({ action: "task.split", id: "${task.id}" })`,
+    );
     tui.requestRender();
     return;
   }

@@ -38,7 +38,14 @@ import {
 } from "./mesh/types.ts";
 import * as crewStore from "./crew/store.ts";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.ts";
-import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.ts";
+import {
+  readFeedEvents,
+  logFeedEvent,
+  pruneFeed,
+  formatFeedLine,
+  isCrewEvent,
+  type FeedEvent,
+} from "./feed.ts";
 import { isAutonomousForCwd, isPlanningForCwd } from "./crew/state.ts";
 import { loadCrewConfig } from "./crew/utils/config.ts";
 
@@ -49,6 +56,7 @@ const SEND_ERROR_TEXT: Record<SendError, string> = {
   invalid_registration: "invalid registration",
   write_failed: "write failed",
   unreachable: "mesh unreachable",
+  storage_failed: "mesh storage unavailable; message not delivered",
   ambiguous_channel: "recipient is in several channels — pass channel",
 };
 
@@ -58,6 +66,7 @@ const POST_ERROR_TEXT: Record<PostError, string> = {
   invalid_channel: "invalid channel name",
   ambiguous_channel: "you are in several channels — pass channel",
   unreachable: "mesh unreachable",
+  storage_failed: "mesh storage unavailable; message not delivered",
   write_failed: "write failed",
 };
 
@@ -68,7 +77,7 @@ const POST_ERROR_TEXT: Record<PostError, string> = {
 function result(text: string, details: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text }],
-    details
+    details,
   };
 }
 
@@ -78,8 +87,8 @@ function result(text: string, details: Record<string, unknown>) {
 
 export function notRegisteredError() {
   return result(
-    "Not registered. Use omp_messenger({ action: \"join\" }) to join the agent mesh first.",
-    { mode: "error", error: "not_registered" }
+    'Not registered. Use omp_messenger({ action: "join" }) to join the agent mesh first.',
+    { mode: "error", error: "not_registered" },
   );
 }
 
@@ -96,17 +105,17 @@ export async function executeJoin(
   specPath?: string,
   nameTheme?: NameThemeConfig,
   feedRetention?: number,
-  channels?: string[]
+  channels?: string[],
 ) {
   if (state.registered) {
     // Re-join with a channel set reconciles membership (add-then-leave), as documented
     // for join { channels }. Without channels it is a pure status no-op.
     if (channels && channels.length > 0) {
-      if (!await mesh.join(ctx, { channels, nameTheme })) {
-        return result(
-          "Failed to reconcile channel membership. Check logs for details.",
-          { mode: "join", error: "registration_failed" }
-        );
+      if (!(await mesh.join(ctx, { channels, nameTheme }))) {
+        return result("Failed to reconcile channel membership. Check logs for details.", {
+          mode: "join",
+          error: "registration_failed",
+        });
       }
       logFeedEvent(ctx.cwd, state.agentName, "join");
     }
@@ -119,18 +128,18 @@ export async function executeJoin(
         name: state.agentName,
         peerCount: agents.length,
         channels: mesh.channels(),
-      }
+      },
     );
   }
 
   state.isHuman = ctx.hasUI;
   const cwd = ctx.cwd;
 
-  if (!await mesh.join(ctx, { channels, nameTheme })) {
-    return result(
-      "Failed to join the agent mesh. Check logs for details.",
-      { mode: "join", error: "registration_failed" }
-    );
+  if (!(await mesh.join(ctx, { channels, nameTheme }))) {
+    return result("Failed to join the agent mesh. Check logs for details.", {
+      mode: "join",
+      error: "registration_failed",
+    });
   }
 
   updateStatusFn(ctx);
@@ -158,7 +167,7 @@ export async function executeJoin(
   }
 
   if (agents.length > 0) {
-    text += `\n\nActive peers: ${agents.map(a => a.name).join(", ")}`;
+    text += `\n\nActive peers: ${agents.map((a) => a.name).join(", ")}`;
     text += `\n\nUse omp_messenger({ action: "list" }) for details, or omp_messenger({ action: "send", to: "Name", message: "..." }) to send.`;
   }
 
@@ -171,7 +180,7 @@ export async function executeJoin(
     name: state.agentName,
     location: locationPart,
     peerCount: agents.length,
-    peers: agents.map(a => a.name),
+    peers: agents.map((a) => a.name),
     spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined,
     channels: mesh.channels(),
   });
@@ -181,20 +190,21 @@ export async function executeJoinChannels(
   _state: MessengerState,
   mesh: Mesh,
   ctx: ExtensionContext,
-  channels?: string[]
+  channels?: string[],
 ) {
   if (!channels || channels.length === 0) {
-    return result(
-      "Error: channels is required",
-      { mode: "channels.join", error: "missing_channels" }
-    );
+    return result("Error: channels is required", {
+      mode: "channels.join",
+      error: "missing_channels",
+    });
   }
 
-  if (!await mesh.joinChannels(ctx, channels)) {
-    return result(
-      `Failed to join channels: ${channels.join(", ")}`,
-      { mode: "channels.join", error: "join_failed", channels }
-    );
+  if (!(await mesh.joinChannels(ctx, channels))) {
+    return result(`Failed to join channels: ${channels.join(", ")}`, {
+      mode: "channels.join",
+      error: "join_failed",
+      channels,
+    });
   }
 
   return result(`Channels: ${mesh.channels().join(", ")}`, {
@@ -207,19 +217,19 @@ export async function executeLeaveChannels(
   state: MessengerState,
   mesh: Mesh,
   ctx: ExtensionContext,
-  channels?: string[]
+  channels?: string[],
 ) {
   if (!channels || channels.length === 0) {
-    return result(
-      "Error: channels is required",
-      { mode: "channels.leave", error: "missing_channels" }
-    );
+    return result("Error: channels is required", {
+      mode: "channels.leave",
+      error: "missing_channels",
+    });
   }
 
   // Leaving every joined channel unregisters entirely — that must clear the same
   // guards as action:"leave" (planning/autonomous/in-progress tasks, claim release,
   // reservations, feed, status), not slip past them through a channel-shaped door.
-  const leavingEverything = mesh.channels().every(c => channels.includes(c));
+  const leavingEverything = mesh.channels().every((c) => channels.includes(c));
   if (leavingEverything) {
     return executeLeave(state, mesh, ctx);
   }
@@ -233,23 +243,30 @@ export async function executeLeaveChannels(
 }
 
 export async function executeDeleteChannel(mesh: Mesh, channel?: string) {
-  if (!channel) return result("Error: channel is required for channels.delete.", { mode: "channels.delete", error: "missing_channel" });
+  if (!channel)
+    return result("Error: channel is required for channels.delete.", {
+      mode: "channels.delete",
+      error: "missing_channel",
+    });
   const deleted = await mesh.deleteChannel(channel);
   if (deleted.ok === false) {
-    const reason = deleted.error === "unsupported" ? "Channel deletion requires the WebSocket mesh server."
-      : deleted.error === "protected" ? "#main cannot be deleted."
-        : deleted.error === "unreachable" ? "Deletion was not confirmed. Check the channel list before retrying."
-          : `Channel deletion failed: ${deleted.error}.`;
+    const reason =
+      deleted.error === "unsupported"
+        ? "Channel deletion requires the WebSocket mesh server."
+        : deleted.error === "protected"
+          ? "#main cannot be deleted."
+          : deleted.error === "unreachable"
+            ? "Deletion was not confirmed. Check the channel list before retrying."
+            : `Channel deletion failed: ${deleted.error}.`;
     return result(reason, { mode: "channels.delete", channel, error: deleted.error });
   }
-  return result(`Deleted #${deleted.deleted} and its history.${deleted.removed.length ? ` Removed and notified: ${deleted.removed.join(", ")}.` : ""}`, { mode: "channels.delete", ...deleted });
+  return result(
+    `Deleted #${deleted.deleted} and its history.${deleted.removed.length ? ` Removed and notified: ${deleted.removed.join(", ")}.` : ""}`,
+    { mode: "channels.delete", ...deleted },
+  );
 }
 
-export async function executeLeave(
-  state: MessengerState,
-  mesh: Mesh,
-  ctx: ExtensionContext,
-) {
+export async function executeLeave(state: MessengerState, mesh: Mesh, ctx: ExtensionContext) {
   if (!state.registered) {
     return notRegisteredError();
   }
@@ -258,27 +275,27 @@ export async function executeLeave(
 
   if (isPlanningForCwd(cwd)) {
     return result(
-      "Cannot leave while Crew planning is active for this project. Cancel it first with omp_messenger({ action: \"plan.cancel\" }).",
-      { mode: "leave", error: "planning_active" }
+      'Cannot leave while Crew planning is active for this project. Cancel it first with omp_messenger({ action: "plan.cancel" }).',
+      { mode: "leave", error: "planning_active" },
     );
   }
 
   if (isAutonomousForCwd(cwd)) {
     return result(
-      "Cannot leave while autonomous Crew work is active for this project. Stop it first with omp_messenger({ action: \"work.stop\" }).",
-      { mode: "leave", error: "autonomous_active" }
+      'Cannot leave while autonomous Crew work is active for this project. Stop it first with omp_messenger({ action: "work.stop" }).',
+      { mode: "leave", error: "autonomous_active" },
     );
   }
 
   const inProgressTasks = crewStore
     .getTasks(cwd)
-    .filter(task => task.status === "in_progress" && task.assigned_to === state.agentName)
-    .map(task => task.id);
+    .filter((task) => task.status === "in_progress" && task.assigned_to === state.agentName)
+    .map((task) => task.id);
 
   if (inProgressTasks.length > 0) {
     return result(
       `Cannot leave while Crew task${inProgressTasks.length === 1 ? "" : "s"} assigned to you ${inProgressTasks.length === 1 ? "is" : "are"} still in progress: ${inProgressTasks.join(", ")}. Finish, block, or reset ${inProgressTasks.length === 1 ? "it" : "them"} first.`,
-      { mode: "leave", error: "crew_tasks_in_progress", taskIds: inProgressTasks }
+      { mode: "leave", error: "crew_tasks_in_progress", taskIds: inProgressTasks },
     );
   }
 
@@ -296,7 +313,7 @@ export async function executeLeave(
             error: unclaimResult.error,
             activeClaim: { ...activeClaim, spec: claimDisplay },
             ...(isUnclaimNotYours(unclaimResult) ? { claimedBy: unclaimResult.claimedBy } : {}),
-          }
+          },
         );
       }
       releasedClaim = activeClaim;
@@ -309,12 +326,12 @@ export async function executeLeave(
           error: "unclaim_failed",
           message,
           activeClaim: { ...activeClaim, spec: claimDisplay },
-        }
+        },
       );
     }
   }
 
-  const releasedReservations = state.reservations.map(r => r.pattern);
+  const releasedReservations = state.reservations.map((r) => r.pattern);
   state.reservations = [];
   mesh.publish(ctx);
   for (const pattern of releasedReservations) {
@@ -325,10 +342,11 @@ export async function executeLeave(
     await mesh.leave();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return result(
-      `Could not leave omp-messenger: ${message}`,
-      { mode: "leave", error: "unregister_failed", message }
-    );
+    return result(`Could not leave omp-messenger: ${message}`, {
+      mode: "leave",
+      error: "unregister_failed",
+      message,
+    });
   }
 
   logFeedEvent(cwd, state.agentName, "leave");
@@ -349,11 +367,11 @@ export async function executeLeave(
       releasedReservations,
       releasedClaim: releasedClaim
         ? {
-          ...releasedClaim,
-          spec: displaySpecPath(releasedClaim.spec, cwd),
-        }
+            ...releasedClaim,
+            spec: displaySpecPath(releasedClaim.spec, cwd),
+          }
         : undefined,
-    }
+    },
   );
 }
 
@@ -380,7 +398,7 @@ export function executeStatus(state: MessengerState, mesh: Mesh, cwd: string) {
 
   text += `Peers: ${agents.length}\n`;
   if (state.reservations.length > 0) {
-    const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
+    const myRes = state.reservations.map((r) => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
   text += `\nUse omp_messenger({ action: "list" }) for details, omp_messenger({ action: "task.list" }) for tasks.`;
@@ -395,25 +413,30 @@ export function executeStatus(state: MessengerState, mesh: Mesh, cwd: string) {
     spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined,
     claim: myClaim
       ? {
-        ...myClaim,
-        spec: displaySpecPath(myClaim.spec, cwd)
-      }
+          ...myClaim,
+          spec: displaySpecPath(myClaim.spec, cwd),
+        }
       : undefined,
-    reservations: state.reservations
+    reservations: state.reservations,
   });
 }
 
 export async function executeChannels(mesh: Mesh) {
   const channels = await mesh.listChannels();
   const joined = mesh.channels();
-  const lines = channels.map(channel => {
+  const lines = channels.map((channel) => {
     const marker = joined.includes(channel.name) ? " (joined)" : "";
     return `  ${channel.name}${marker}  ${channel.members} member(s)  created ${channel.createdAt}`;
   });
   return result(`Channels:\n${lines.join("\n")}`, { mode: "channels", channels });
 }
 
-export function executeList(state: MessengerState, mesh: Mesh, cwd: string, config?: { stuckThreshold?: number }) {
+export function executeList(
+  state: MessengerState,
+  mesh: Mesh,
+  cwd: string,
+  config?: { stuckThreshold?: number },
+) {
   if (!state.registered) {
     return notRegisteredError();
   }
@@ -431,18 +454,19 @@ export function executeList(state: MessengerState, mesh: Mesh, cwd: string, conf
   function formatAgentLine(
     a: AgentRegistration | MeshPeer,
     isSelf: boolean,
-    hasTask: boolean
+    hasTask: boolean,
   ): string {
     const computed = computeStatus(
       a.activity?.lastActivityAt ?? a.startedAt,
       hasTask,
       (a.reservations?.length ?? 0) > 0,
-      thresholdMs
+      thresholdMs,
     );
     const indicator = STATUS_INDICATORS[computed.status];
-    const channelTag = !isSelf && multiChannel && "channels" in a && a.channels.length > 0
-      ? ` #${a.channels.join(",")}`
-      : "";
+    const channelTag =
+      !isSelf && multiChannel && "channels" in a && a.channels.length > 0
+        ? ` #${a.channels.join(",")}`
+        : "";
     const nameLabel = isSelf ? `${a.name} (you)` : `${a.name}${channelTag}`;
 
     const parts: string[] = [`${indicator} ${nameLabel}`];
@@ -467,7 +491,7 @@ export function executeList(state: MessengerState, mesh: Mesh, cwd: string, conf
     }
 
     if (a.reservations && a.reservations.length > 0) {
-      const resParts = a.reservations.map(r => r.pattern).join(", ");
+      const resParts = a.reservations.map((r) => r.pattern).join(", ");
       parts.push(`\u{1F4C1} ${resParts}`);
     }
 
@@ -480,10 +504,18 @@ export function executeList(state: MessengerState, mesh: Mesh, cwd: string, conf
 
   const allClaims = mesh.claims();
 
-  lines.push(formatAgentLine(buildSelfRegistration(state), true, agentHasTask(state.agentName, allClaims, crewStore.getTasks(cwd))));
+  lines.push(
+    formatAgentLine(
+      buildSelfRegistration(state),
+      true,
+      agentHasTask(state.agentName, allClaims, crewStore.getTasks(cwd)),
+    ),
+  );
 
   for (const a of peers) {
-    lines.push(formatAgentLine(a, false, agentHasTask(a.name, allClaims, crewStore.getTasks(a.cwd))));
+    lines.push(
+      formatAgentLine(a, false, agentHasTask(a.name, allClaims, crewStore.getTasks(a.cwd))),
+    );
   }
 
   const recentEvents = readFeedEvents(cwd, 5);
@@ -494,10 +526,13 @@ export function executeList(state: MessengerState, mesh: Mesh, cwd: string, conf
     }
   }
 
-  return result(
-    lines.join("\n").trim(),
-    { mode: "list", registered: true, agents: peers, self: state.agentName, totalCount }
-  );
+  return result(lines.join("\n").trim(), {
+    mode: "list",
+    registered: true,
+    agents: peers,
+    self: state.agentName,
+    totalCount,
+  });
 }
 
 export async function executeSend(
@@ -509,17 +544,17 @@ export async function executeSend(
   message?: string,
   replyTo?: string,
   gentle?: boolean,
-  channel?: string
+  channel?: string,
 ) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
   if (!message) {
-    return result(
-      "Error: message is required when sending.",
-      { mode: "send", error: "missing_message" }
-    );
+    return result("Error: message is required when sending.", {
+      mode: "send",
+      error: "missing_message",
+    });
   }
 
   // Message budgets are worker discipline: interactive sessions are never capped.
@@ -528,10 +563,13 @@ export async function executeSend(
   if (budget !== null && state.messagesSent >= budget) {
     return result(
       `Message budget reached (${state.messagesSent}/${budget} for ${crewConfig!.coordination} level). Focus on your task.`,
-      { mode: "send", error: "budget_exceeded" }
+      { mode: "send", error: "budget_exceeded" },
     );
   }
-  const remainingText = () => budget === null ? "" : ` (${budget - state.messagesSent} message${budget - state.messagesSent === 1 ? "" : "s"} remaining)`;
+  const remainingText = () =>
+    budget === null
+      ? ""
+      : ` (${budget - state.messagesSent} message${budget - state.messagesSent === 1 ? "" : "s"} remaining)`;
 
   let recipients: string[];
   if (broadcast) {
@@ -539,38 +577,53 @@ export async function executeSend(
       state.messagesSent++;
       const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
       logFeedEvent(cwd, state.agentName, "message", undefined, preview);
-      return result(
-        `Broadcast logged.${remainingText()}`,
-        { mode: "send", sent: ["feed"], failed: [] }
-      );
+      return result(`Broadcast logged.${remainingText()}`, {
+        mode: "send",
+        sent: ["feed"],
+        failed: [],
+      });
     }
     // A channel post: one logged message every member receives; members it mentions
     // (@name, @all) are interrupted, everyone else gets it without interruption.
     const posted = await mesh.post(message, { channel, replyTo });
     if (posted.ok === false) {
-      return result(`Failed to post: ${POST_ERROR_TEXT[posted.error]}`, { mode: "send", error: posted.error, sent: [], failed: [] });
+      return result(`Failed to post: ${POST_ERROR_TEXT[posted.error]}`, {
+        mode: "send",
+        error: posted.error,
+        sent: [],
+        failed: [],
+      });
     }
     state.messagesSent++;
     const preview = message.length > 200 ? message.slice(0, 197) + "..." : message;
     logFeedEvent(cwd, state.agentName, "message", undefined, preview);
-    const mentionText = posted.mentions.length > 0 ? ` Mentioned: ${posted.mentions.map(m => `@${m}`).join(", ")}.` : "";
+    const mentionText =
+      posted.mentions.length > 0
+        ? ` Mentioned: ${posted.mentions.map((m) => `@${m}`).join(", ")}.`
+        : "";
     return result(
       `Posted to #${posted.channel} (${posted.delivered.length} member${posted.delivered.length === 1 ? "" : "s"}).${mentionText}${remainingText()}`,
-      { mode: "send", channel: posted.channel, sent: posted.delivered, failed: [], mentions: posted.mentions },
+      {
+        mode: "send",
+        channel: posted.channel,
+        sent: posted.delivered,
+        failed: [],
+        mentions: posted.mentions,
+      },
     );
   } else if (to) {
     recipients = [...new Set(Array.isArray(to) ? to : [to])];
     if (recipients.length === 0) {
-      return result(
-        "Error: recipient list cannot be empty.",
-        { mode: "send", error: "empty_recipients" }
-      );
+      return result("Error: recipient list cannot be empty.", {
+        mode: "send",
+        error: "empty_recipients",
+      });
     }
   } else {
-    return result(
-      "Error: specify 'to' or 'broadcast: true'.",
-      { mode: "send", error: "missing_recipient" }
-    );
+    return result("Error: specify 'to' or 'broadcast: true'.", {
+      mode: "send",
+      error: "missing_recipient",
+    });
   }
 
   const sent: string[] = [];
@@ -591,11 +644,13 @@ export async function executeSend(
   }
 
   if (sent.length === 0) {
-    const failedStr = failed.map(f => `${f.name} (${f.error})`).join(", ");
-    return result(
-      `Failed to send: ${failedStr}`,
-      { mode: "send", error: "all_failed", sent: [], failed }
-    );
+    const failedStr = failed.map((f) => `${f.name} (${f.error})`).join(", ");
+    return result(`Failed to send: ${failedStr}`, {
+      mode: "send",
+      error: "all_failed",
+      sent: [],
+      failed,
+    });
   }
 
   state.messagesSent++;
@@ -611,7 +666,7 @@ export async function executeSend(
 
   let text = `Message sent to ${sent.join(", ")}.${remainingText()}`;
   if (failed.length > 0) {
-    const failedStr = failed.map(f => `${f.name} (${f.error})`).join(", ");
+    const failedStr = failed.map((f) => `${f.name} (${f.error})`).join(", ");
     text += ` Failed: ${failedStr}`;
   }
 
@@ -623,23 +678,23 @@ export function executeReserve(
   mesh: Mesh,
   ctx: ExtensionContext,
   patterns: string[],
-  reason?: string
+  reason?: string,
 ) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
   if (patterns.length === 0) {
-    return result(
-      "Error: at least one pattern required.",
-      { mode: "reserve", error: "empty_patterns" }
-    );
+    return result("Error: at least one pattern required.", {
+      mode: "reserve",
+      error: "empty_patterns",
+    });
   }
 
   const now = new Date().toISOString();
 
   for (const pattern of patterns) {
-    state.reservations = state.reservations.filter(r => r.pattern !== pattern);
+    state.reservations = state.reservations.filter((r) => r.pattern !== pattern);
     state.reservations.push({ pattern, reason, since: now });
   }
 
@@ -656,14 +711,14 @@ export function executeRelease(
   state: MessengerState,
   mesh: Mesh,
   ctx: ExtensionContext,
-  release: string[] | true
+  release: string[] | true,
 ) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
   if (release === true) {
-    const released = state.reservations.map(r => r.pattern);
+    const released = state.reservations.map((r) => r.pattern);
     state.reservations = [];
     mesh.publish(ctx);
     for (const pattern of released) {
@@ -671,20 +726,25 @@ export function executeRelease(
     }
     return result(
       released.length > 0 ? `Released all: ${released.join(", ")}` : "No reservations to release.",
-      { mode: "release", released }
+      { mode: "release", released },
     );
   }
 
   const patterns = release;
-  const releasedPatterns = state.reservations.filter(r => patterns.includes(r.pattern)).map(r => r.pattern);
-  state.reservations = state.reservations.filter(r => !patterns.includes(r.pattern));
+  const releasedPatterns = state.reservations
+    .filter((r) => patterns.includes(r.pattern))
+    .map((r) => r.pattern);
+  state.reservations = state.reservations.filter((r) => !patterns.includes(r.pattern));
 
   mesh.publish(ctx);
   for (const pattern of releasedPatterns) {
     logFeedEvent(ctx.cwd, state.agentName, "release", pattern);
   }
 
-  return result(`Released ${releasedPatterns.length} reservation(s).`, { mode: "release", released: releasedPatterns });
+  return result(`Released ${releasedPatterns.length} reservation(s).`, {
+    mode: "release",
+    released: releasedPatterns,
+  });
 }
 
 export async function executeRename(
@@ -693,7 +753,7 @@ export async function executeRename(
   ctx: ExtensionContext,
   newName: string,
   deliverFn: (msg: AgentMailMessage) => void,
-  updateStatusFn: (ctx: ExtensionContext) => void
+  updateStatusFn: (ctx: ExtensionContext) => void,
 ) {
   const renameResult = await mesh.rename(ctx, newName);
 
@@ -706,25 +766,23 @@ export async function executeRename(
       same_name: `Already named "${newName}".`,
       race_lost: `Name "${newName}" was claimed by another agent.`,
     };
-    return result(
-      `Error: ${errorMessages[errCode]}`,
-      { mode: "rename", error: errCode }
-    );
+    return result(`Error: ${errorMessages[errCode]}`, { mode: "rename", error: errCode });
   }
 
   updateStatusFn(ctx);
 
-  return result(
-    `Renamed from "${renameResult.oldName}" to "${renameResult.newName}".`,
-    { mode: "rename", oldName: renameResult.oldName, newName: renameResult.newName }
-  );
+  return result(`Renamed from "${renameResult.oldName}" to "${renameResult.newName}".`, {
+    mode: "rename",
+    oldName: renameResult.oldName,
+    newName: renameResult.newName,
+  });
 }
 
 export function executeSetSpec(
   state: MessengerState,
   mesh: Mesh,
   ctx: ExtensionContext,
-  specPath: string
+  specPath: string,
 ) {
   const cwd = ctx.cwd;
   const absPath = resolveSpecPath(specPath, cwd);
@@ -742,20 +800,21 @@ export async function executeClaim(
   taskId: string,
   specPath?: string,
   reason?: string,
-  channel?: string
+  channel?: string,
 ) {
   const cwd = ctx.cwd;
   const spec = specPath ? resolveSpecPath(specPath, cwd) : state.spec;
   if (!spec) {
-    return result(
-      "Error: No spec registered. Use `spec` parameter or join with a spec first.",
-      { mode: "claim", error: "no_spec" }
-    );
+    return result("Error: No spec registered. Use `spec` parameter or join with a spec first.", {
+      mode: "claim",
+      error: "no_spec",
+    });
   }
 
-  const warning = specPath && !existsSync(spec)
-    ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
-    : "";
+  const warning =
+    specPath && !existsSync(spec)
+      ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
+      : "";
 
   const claimResult = await mesh.claim(ctx, spec, taskId, reason, channel);
 
@@ -766,7 +825,7 @@ export async function executeClaim(
       spec: display,
       taskId,
       claimedAt: claimResult.claimedAt,
-      reason
+      reason,
     });
   }
 
@@ -777,16 +836,18 @@ export async function executeClaim(
       {
         mode: "claim",
         error: "already_have_claim",
-        existing: { spec: existingDisplay, taskId: claimResult.existing.taskId }
-      }
+        existing: { spec: existingDisplay, taskId: claimResult.existing.taskId },
+      },
     );
   }
 
   // isClaimAlreadyClaimed
-  return result(
-    `Error: ${taskId} is already claimed by ${claimResult.conflict.agent}.${warning}`,
-    { mode: "claim", error: "already_claimed", taskId, conflict: claimResult.conflict }
-  );
+  return result(`Error: ${taskId} is already claimed by ${claimResult.conflict.agent}.${warning}`, {
+    mode: "claim",
+    error: "already_claimed",
+    taskId,
+    conflict: claimResult.conflict,
+  });
 }
 
 export async function executeUnclaim(
@@ -795,33 +856,44 @@ export async function executeUnclaim(
   cwd: string,
   taskId: string,
   specPath?: string,
-  channel?: string
+  channel?: string,
 ) {
   const spec = specPath ? resolveSpecPath(specPath, cwd) : state.spec;
   if (!spec) {
     return result("Error: No spec registered.", { mode: "unclaim", error: "no_spec" });
   }
 
-  const warning = specPath && !existsSync(spec)
-    ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
-    : "";
+  const warning =
+    specPath && !existsSync(spec)
+      ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
+      : "";
 
   const unclaimResult = await mesh.unclaim(spec, taskId, channel);
   const display = displaySpecPath(spec, cwd);
 
   if (isUnclaimSuccess(unclaimResult)) {
-    return result(`Released claim on ${taskId}${warning}`, { mode: "unclaim", spec: display, taskId });
+    return result(`Released claim on ${taskId}${warning}`, {
+      mode: "unclaim",
+      spec: display,
+      taskId,
+    });
   }
 
   if (isUnclaimNotYours(unclaimResult)) {
-    return result(
-      `Error: ${taskId} is claimed by ${unclaimResult.claimedBy}, not you.${warning}`,
-      { mode: "unclaim", error: "not_your_claim", taskId, claimedBy: unclaimResult.claimedBy }
-    );
+    return result(`Error: ${taskId} is claimed by ${unclaimResult.claimedBy}, not you.${warning}`, {
+      mode: "unclaim",
+      error: "not_your_claim",
+      taskId,
+      claimedBy: unclaimResult.claimedBy,
+    });
   }
 
   // error === "not_claimed"
-  return result(`Error: ${taskId} is not claimed.${warning}`, { mode: "unclaim", error: "not_claimed", taskId });
+  return result(`Error: ${taskId} is not claimed.${warning}`, {
+    mode: "unclaim",
+    error: "not_claimed",
+    taskId,
+  });
 }
 
 export async function executeComplete(
@@ -831,16 +903,17 @@ export async function executeComplete(
   taskId: string,
   notes?: string,
   specPath?: string,
-  channel?: string
+  channel?: string,
 ) {
   const spec = specPath ? resolveSpecPath(specPath, cwd) : state.spec;
   if (!spec) {
     return result("Error: No spec registered.", { mode: "complete", error: "no_spec" });
   }
 
-  const warning = specPath && !existsSync(spec)
-    ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
-    : "";
+  const warning =
+    specPath && !existsSync(spec)
+      ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, cwd)}.`
+      : "";
 
   const completeResult = await mesh.complete(spec, taskId, notes, channel);
   const display = displaySpecPath(spec, cwd);
@@ -850,34 +923,38 @@ export async function executeComplete(
       mode: "complete",
       spec: display,
       taskId,
-      completedAt: completeResult.completedAt
+      completedAt: completeResult.completedAt,
     });
   }
 
   if (isCompleteAlreadyCompleted(completeResult)) {
     return result(
       `Error: ${taskId} was already completed by ${completeResult.completion.completedBy}.${warning}`,
-      { mode: "complete", error: "already_completed", taskId, completion: completeResult.completion }
+      {
+        mode: "complete",
+        error: "already_completed",
+        taskId,
+        completion: completeResult.completion,
+      },
     );
   }
 
   if (isCompleteNotYours(completeResult)) {
     return result(
       `Error: ${taskId} is claimed by ${completeResult.claimedBy}, not you.${warning}`,
-      { mode: "complete", error: "not_your_claim", taskId, claimedBy: completeResult.claimedBy }
+      { mode: "complete", error: "not_your_claim", taskId, claimedBy: completeResult.claimedBy },
     );
   }
 
   // error === "not_claimed"
-  return result(`Error: ${taskId} is not claimed.${warning}`, { mode: "complete", error: "not_claimed", taskId });
+  return result(`Error: ${taskId} is not claimed.${warning}`, {
+    mode: "complete",
+    error: "not_claimed",
+    taskId,
+  });
 }
 
-export function executeSwarm(
-  state: MessengerState,
-  mesh: Mesh,
-  cwd: string,
-  specPath?: string
-) {
+export function executeSwarm(state: MessengerState, mesh: Mesh, cwd: string, specPath?: string) {
   const claims = mesh.claims();
   const completions = mesh.completions();
   const agents = mesh.peers();
@@ -913,9 +990,7 @@ export function executeSwarm(
   if (specPath) {
     const absSpec = resolveSpecPath(specPath, cwd);
     const display = displaySpecPath(absSpec, cwd);
-    const warning = !existsSync(absSpec)
-      ? `\n\nWarning: Spec file not found at ${display}.`
-      : "";
+    const warning = !existsSync(absSpec) ? `\n\nWarning: Spec file not found at ${display}.` : "";
     const specClaims: SpecClaims = claims[absSpec] || {};
     const specCompletions: SpecCompletions = completions[absSpec] || {};
     const specAgentList = specAgents[display] || [];
@@ -924,12 +999,12 @@ export function executeSwarm(
     const completedIds = Object.keys(specCompletions);
     lines.push(`Completed: ${completedIds.length > 0 ? completedIds.join(", ") : "(none)"}`);
 
-    const inProgress = Object.entries(specClaims).map(([tid, c]) =>
-      `${tid} (${c.agent === state.agentName ? "you" : c.agent})`
+    const inProgress = Object.entries(specClaims).map(
+      ([tid, c]) => `${tid} (${c.agent === state.agentName ? "you" : c.agent})`,
     );
     lines.push(`In progress: ${inProgress.length > 0 ? inProgress.join(", ") : "(none)"}`);
 
-    const teammates = specAgentList.filter(name => name !== state.agentName);
+    const teammates = specAgentList.filter((name) => name !== state.agentName);
     if (teammates.length > 0) lines.push(`Teammates: ${teammates.join(", ")}`);
 
     return result(lines.join("\n") + warning, {
@@ -937,17 +1012,17 @@ export function executeSwarm(
       spec: display,
       agents: specAgentList,
       claims: specClaims,
-      completions: specCompletions
+      completions: specCompletions,
     });
   }
 
-  const allSpecs = new Set<string>([
-    ...absByDisplay.keys(),
-    ...Object.keys(specAgents)
-  ]);
+  const allSpecs = new Set<string>([...absByDisplay.keys(), ...Object.keys(specAgents)]);
 
   const lines = ["Swarm Status:", ""];
-  const specsData: Record<string, { agents: string[]; claims: SpecClaims; completions: SpecCompletions }> = {};
+  const specsData: Record<
+    string,
+    { agents: string[]; claims: SpecClaims; completions: SpecCompletions }
+  > = {};
 
   for (const display of Array.from(allSpecs).sort((a, b) => a.localeCompare(b))) {
     const absSpec = absByDisplay.get(display) ?? resolveSpecPath(display, cwd);
@@ -955,7 +1030,11 @@ export function executeSwarm(
     const specCompletions: SpecCompletions = completions[absSpec] || {};
     const specAgentList = specAgents[display] || [];
 
-    specsData[display] = { agents: specAgentList, claims: specClaims, completions: specCompletions };
+    specsData[display] = {
+      agents: specAgentList,
+      claims: specClaims,
+      completions: specCompletions,
+    };
 
     const isMySpec = display === mySpec;
     lines.push(`${display}${isMySpec ? " (your spec)" : ""}:`);
@@ -963,13 +1042,13 @@ export function executeSwarm(
     const completedIds = Object.keys(specCompletions);
     lines.push(`  Completed: ${completedIds.length > 0 ? completedIds.join(", ") : "(none)"}`);
 
-    const inProgress = Object.entries(specClaims).map(([tid, c]) =>
-      `${tid} (${c.agent === state.agentName ? "you" : c.agent})`
+    const inProgress = Object.entries(specClaims).map(
+      ([tid, c]) => `${tid} (${c.agent === state.agentName ? "you" : c.agent})`,
     );
     lines.push(`  In progress: ${inProgress.length > 0 ? inProgress.join(", ") : "(none)"}`);
 
-    const idle = specAgentList.filter(name =>
-      !Object.values(specClaims).some(c => c.agent === name)
+    const idle = specAgentList.filter(
+      (name) => !Object.values(specClaims).some((c) => c.agent === name),
     );
     if (idle.length > 0) lines.push(`  Idle: ${idle.join(", ")}`);
     lines.push("");
@@ -979,7 +1058,7 @@ export function executeSwarm(
     mode: "swarm",
     yourSpec: mySpec,
     yourClaim: myClaim?.taskId,
-    specs: specsData
+    specs: specsData,
   });
 }
 
@@ -987,7 +1066,7 @@ export function executeSetStatus(
   state: MessengerState,
   mesh: Mesh,
   ctx: ExtensionContext,
-  message?: string
+  message?: string,
 ) {
   if (!state.registered) {
     return notRegisteredError();
@@ -997,41 +1076,34 @@ export function executeSetStatus(
     state.statusMessage = undefined;
     state.customStatus = false;
     mesh.publish(ctx);
-    return result(
-      "Custom status cleared. Auto-status will resume.",
-      { mode: "set_status", cleared: true }
-    );
+    return result("Custom status cleared. Auto-status will resume.", {
+      mode: "set_status",
+      cleared: true,
+    });
   }
 
   state.statusMessage = message.trim();
   state.customStatus = true;
   mesh.publish(ctx);
-  return result(
-    `Status set to: ${state.statusMessage}`,
-    { mode: "set_status", message: state.statusMessage }
-  );
+  return result(`Status set to: ${state.statusMessage}`, {
+    mode: "set_status",
+    message: state.statusMessage,
+  });
 }
 
-export function executeFeed(
-  cwd: string,
-  limit?: number,
-  crewEventsInFeed: boolean = true
-) {
+export function executeFeed(cwd: string, limit?: number, crewEventsInFeed: boolean = true) {
   const effectiveLimit = limit ?? 20;
   let events: FeedEvent[];
   if (!crewEventsInFeed) {
     events = readFeedEvents(cwd, effectiveLimit * 2);
-    events = events.filter(e => !isCrewEvent(e.type));
+    events = events.filter((e) => !isCrewEvent(e.type));
     events = events.slice(-effectiveLimit);
   } else {
     events = readFeedEvents(cwd, effectiveLimit);
   }
 
   if (events.length === 0) {
-    return result(
-      "# Activity Feed\n\nNo activity yet.",
-      { mode: "feed", events: [] }
-    );
+    return result("# Activity Feed\n\nNo activity yet.", { mode: "feed", events: [] });
   }
 
   const lines: string[] = [`# Activity Feed (last ${events.length})`, ""];
@@ -1047,7 +1119,7 @@ export function executeWhois(
   mesh: Mesh,
   cwd: string,
   name: string,
-  config?: { stuckThreshold?: number }
+  config?: { stuckThreshold?: number },
 ) {
   if (!state.registered) {
     return notRegisteredError();
@@ -1056,29 +1128,24 @@ export function executeWhois(
   const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
 
   const agents = mesh.peers();
-  const agent = agents.find(a => a.name === name);
+  const agent = agents.find((a) => a.name === name);
   if (!agent) {
     if (name === state.agentName) {
       return executeWhoisSelf(state, mesh, cwd, thresholdMs);
     }
-    return result(
-      `Agent "${name}" not found or not active.`,
-      { mode: "whois", error: "not_found", name }
-    );
+    return result(`Agent "${name}" not found or not active.`, {
+      mode: "whois",
+      error: "not_found",
+      name,
+    });
   }
 
-  const channelTag = mesh.channels().length > 1 && agent.channels.length > 0
-    ? ` #${agent.channels.join(",")}`
-    : "";
+  const channelTag =
+    mesh.channels().length > 1 && agent.channels.length > 0 ? ` #${agent.channels.join(",")}` : "";
   return formatWhoisOutput(agent, false, mesh, cwd, thresholdMs, channelTag);
 }
 
-function executeWhoisSelf(
-  state: MessengerState,
-  mesh: Mesh,
-  cwd: string,
-  thresholdMs: number
-) {
+function executeWhoisSelf(state: MessengerState, mesh: Mesh, cwd: string, thresholdMs: number) {
   return formatWhoisOutput(buildSelfRegistration(state), true, mesh, cwd, thresholdMs);
 }
 
@@ -1088,7 +1155,7 @@ function formatWhoisOutput(
   mesh: Mesh,
   cwd: string,
   thresholdMs: number,
-  channelTag = ""
+  channelTag = "",
 ) {
   const allClaims = mesh.claims();
   const canReadLocalFiles = isSelf || agent.hostId === LOCAL_HOST_ID;
@@ -1099,7 +1166,7 @@ function formatWhoisOutput(
     agent.activity?.lastActivityAt ?? agent.startedAt,
     hasTask,
     (agent.reservations?.length ?? 0) > 0,
-    thresholdMs
+    thresholdMs,
   );
 
   const indicator = STATUS_INDICATORS[computed.status];
@@ -1115,7 +1182,9 @@ function formatWhoisOutput(
   lines.push(`${indicator} ${statusLabel}${idleStr}`);
   if (agent.model) lines.push(`Model: ${agent.model}`);
   if (agent.gitBranch) lines.push(`Branch: ${agent.gitBranch}`);
-  lines.push(`Session: ${sessionAge} - ${agent.session?.toolCalls ?? 0} tool calls - ${tokenStr} tokens`);
+  lines.push(
+    `Session: ${sessionAge} - ${agent.session?.toolCalls ?? 0} tool calls - ${tokenStr} tokens`,
+  );
 
   if (agent.statusMessage) {
     lines.push(`Status: ${agent.statusMessage}`);
@@ -1135,10 +1204,8 @@ function formatWhoisOutput(
     }
   }
 
-  const allFeedEvents = canReadLocalFiles
-    ? readFeedEvents(isSelf ? cwd : agent.cwd, 100)
-    : [];
-  const agentEvents = allFeedEvents.filter(e => e.agent === agent.name).slice(-10);
+  const allFeedEvents = canReadLocalFiles ? readFeedEvents(isSelf ? cwd : agent.cwd, 100) : [];
+  const agentEvents = allFeedEvents.filter((e) => e.agent === agent.name).slice(-10);
   if (agentEvents.length > 0) {
     lines.push("", "## Recent Activity");
     for (const e of agentEvents) {
@@ -1149,17 +1216,20 @@ function formatWhoisOutput(
   return result(lines.join("\n"), { mode: "whois", agent });
 }
 
-export function executeAutoRegisterPath(
-  action: "add" | "remove" | "list",
-  cwd: string
-) {
+export function executeAutoRegisterPath(action: "add" | "remove" | "list", cwd: string) {
   const paths = getAutoRegisterPaths();
 
   if (action === "list") {
     if (paths.length === 0) {
       return result(
-        "No auto-register paths configured.\n\nUse omp_messenger({ action: \"autoRegisterPath\", autoRegisterPath: \"add\" }) to add the current folder.",
-        { mode: "autoRegisterPath", action: "list", paths: [], currentFolder: cwd, isCurrentInList: false }
+        'No auto-register paths configured.\n\nUse omp_messenger({ action: "autoRegisterPath", autoRegisterPath: "add" }) to add the current folder.',
+        {
+          mode: "autoRegisterPath",
+          action: "list",
+          paths: [],
+          currentFolder: cwd,
+          isCurrentInList: false,
+        },
       );
     }
 
@@ -1171,23 +1241,27 @@ export function executeAutoRegisterPath(
     }
     lines.push("");
     lines.push(`Current folder: ${cwd}`);
-    lines.push(`Status: ${isCurrentInList ? "Will auto-register here" : "Will NOT auto-register here"}`);
+    lines.push(
+      `Status: ${isCurrentInList ? "Will auto-register here" : "Will NOT auto-register here"}`,
+    );
 
     return result(lines.join("\n"), {
       mode: "autoRegisterPath",
       action: "list",
       paths,
       currentFolder: cwd,
-      isCurrentInList
+      isCurrentInList,
     });
   }
 
   if (action === "add") {
     if (paths.includes(cwd)) {
-      return result(
-        `Current folder already in auto-register paths:\n  ${cwd}`,
-        { mode: "autoRegisterPath", action: "add", alreadyExists: true, path: cwd }
-      );
+      return result(`Current folder already in auto-register paths:\n  ${cwd}`, {
+        mode: "autoRegisterPath",
+        action: "add",
+        alreadyExists: true,
+        path: cwd,
+      });
     }
 
     const newPaths = [...paths, cwd];
@@ -1195,7 +1269,7 @@ export function executeAutoRegisterPath(
 
     return result(
       `Added to auto-register paths:\n  ${cwd}\n\nAgents starting in this folder will now auto-join the mesh.`,
-      { mode: "autoRegisterPath", action: "add", path: cwd, paths: newPaths }
+      { mode: "autoRegisterPath", action: "add", path: cwd, paths: newPaths },
     );
   }
 
@@ -1206,23 +1280,28 @@ export function executeAutoRegisterPath(
       if (isMatched) {
         return result(
           `Current folder matches a glob pattern but isn't an exact entry.\nManually edit ~/.omp/agent/omp-messenger.json to modify glob patterns.`,
-          { mode: "autoRegisterPath", action: "remove", notExact: true, path: cwd }
+          { mode: "autoRegisterPath", action: "remove", notExact: true, path: cwd },
         );
       }
-      return result(
-        `Current folder not in auto-register paths:\n  ${cwd}`,
-        { mode: "autoRegisterPath", action: "remove", notFound: true, path: cwd }
-      );
+      return result(`Current folder not in auto-register paths:\n  ${cwd}`, {
+        mode: "autoRegisterPath",
+        action: "remove",
+        notFound: true,
+        path: cwd,
+      });
     }
 
-    const newPaths = paths.filter(p => p !== cwd);
+    const newPaths = paths.filter((p) => p !== cwd);
     saveAutoRegisterPaths(newPaths);
 
     return result(
       `Removed from auto-register paths:\n  ${cwd}\n\nAgents starting in this folder will no longer auto-join.`,
-      { mode: "autoRegisterPath", action: "remove", path: cwd, paths: newPaths }
+      { mode: "autoRegisterPath", action: "remove", path: cwd, paths: newPaths },
     );
   }
 
-  return result("Invalid action. Use: add, remove, or list", { mode: "autoRegisterPath", error: "invalid_action" });
+  return result("Invalid action. Use: add, remove, or list", {
+    mode: "autoRegisterPath",
+    error: "invalid_action",
+  });
 }

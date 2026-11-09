@@ -9,7 +9,7 @@ export interface ToolEntry {
 
 export interface AgentProgress {
   agent: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
   currentTool?: string;
   currentToolArgs?: string;
   currentToolStartMs?: number;

@@ -10,5 +10,6 @@ services:
     volumes:
       - mesh-data:/data
     restart: unless-stopped
+
 volumes:
   mesh-data: {}

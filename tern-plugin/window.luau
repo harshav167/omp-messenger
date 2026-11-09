@@ -5,7 +5,7 @@ local function shell_quote(s: string): string
 	return "'" .. string.gsub(s, "'", "'\\''") .. "'"
 end
 
--- One Messenger per tab: focus the one in this tab, else open a new one beside the focused pane.
+-- One Messenger per tab: focus the one in this tab, restore a parked one, else open beside the focused pane.
 -- Several can run at once; the mesh server lets one person's windows share their name.
 local function open_messenger(cx: WindowCx)
 	local focused = cx.session:focused()
@@ -22,6 +22,15 @@ local function open_messenger(cx: WindowCx)
 				cx.layout:focus(pane.pane)
 				return
 			end
+		end
+	end
+	for _, pane in panes do
+		if pane.title == TITLE and pane.parked then
+			local ok, reason = cx.layout:unpark(pane.pane)
+			if not ok then
+				cx:toast("error", "Couldn't restore Messenger", reason or "Tern could not unpark the pane.")
+			end
+			return
 		end
 	end
 	local app = tern.plugin.dir .. "/dist/messenger.js"

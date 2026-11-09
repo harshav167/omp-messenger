@@ -10,6 +10,7 @@
 - Channel message history, paging, live observers, and channel-list updates.
 - Channel deletion notifications for agents and observers. Persisted deletion markers prevent stale automatic membership from recreating deleted channels.
 - Agent-tool `channels.delete` action using the same deletion path as the Tern app. It requires an explicit channel, protects `main`, and reports unsupported filesystem transport.
+- `/cp` in the Tern Messenger copies the current channel's whole chat to the clipboard as plain text over OSC 52.
 
 ### Changed
 
@@ -19,7 +20,13 @@
 
 ### Fixed
 
-- Preserve drafts after rejected or unconfirmed sends.
+- Contain mesh storage failures: failed history writes return `storage_failed` without delivering messages, crashing the server, or mutating completion state. `/healthz` now verifies write access.
+- Validate malformed and unsupported protocol frames, advertise server capabilities, and preserve claim timestamps across reconnects. Retry unconfirmed messages with the same id after reconnecting; within the retained 2,000-message window, duplicates return the original entry and delivery outcome without delivering twice. Migrate legacy duplicate SQLite ids without collisions or data loss.
+- Fix `/messenger config`, non-terminal autonomous continuations, subagent lifecycle isolation, reservation enforcement for every edit dialect, and unsafe extension timer/reconnect paths.
+- Honor model-selection policy, action-specific approval tiers, and next-turn registration context. Session switch, branch, and shutdown cancel queued and running crew agents, including overlay revisions and lobby assignments; stale planner and autonomous completions cannot alter a replacement run.
+- Replace legacy TypeBox, hard-coded agent directories, eager SDK loading, stale bare model ids, custom Tern HTML buttons/messages, and dead packaging entries with current SDK APIs.
+- Upgrade `@stencil-hq/tern` to 0.2.0 and OMP SDK packages to 18.16.0; add a TypeScript verification gate.
+- Preserve drafts after rejected or unconfirmed sends. Resubmitting an unchanged Tern draft reuses its original request and message ids so an accepted retry cannot deliver a duplicate.
 - Keep older history pages when the in-memory window reaches its limit.
 - Remove deleted channels from watching clients.
 - Apply edited user tokens even when an older inline token exists. Environment and project precedence remain unchanged.
@@ -28,7 +35,7 @@
 - Keep chat navigation, members, the channel header, and composer fixed while the native transcript scrolls and follows its tail. Add independent sidebar collapse controls and a docked jump-to-latest action.
 - Use the theme's white-text contrast contract for filled buttons.
 - Let one person run several Tern Messenger windows at once. Windows on one machine present a private key (`~/.omp/agent/messenger/identity.key`, 0600) and the server lets them share the human name instead of rejecting the second with `name_taken`. Direct messages reach every window, the member shows a remaining window when one closes, and presence lasts until the last one closes. Agents, OMP sessions and anyone without the key still cannot use a name that is connected.
-- Cmd+Shift+M focuses the Messenger in the current tab, or opens a new one there, instead of jumping to a Messenger in another tab.
+- Cmd+Shift+M focuses the Messenger in the current tab, or opens a new one there, instead of jumping to a Messenger in another tab. If the tab has no visible Messenger, the command restores a parked Messenger instead of launching a duplicate.
 
 ## [0.16.0] - 2026-09-21
 

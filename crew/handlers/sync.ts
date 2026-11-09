@@ -1,6 +1,6 @@
 /**
  * Crew - Sync Handler
- * 
+ *
  * Updates downstream specs after task completion.
  * Works with current plan's tasks.
  */
@@ -17,6 +17,7 @@ export async function execute(
   params: CrewParams,
   ctx: ExtensionContext,
   sessionModel?: string,
+  ownerSignal?: AbortSignal,
 ) {
   const cwd = ctx.cwd;
   const { target } = params;
@@ -24,7 +25,7 @@ export async function execute(
   if (!target) {
     return result("Error: target (completed task ID) required for sync action.", {
       mode: "sync",
-      error: "missing_target"
+      error: "missing_target",
     });
   }
 
@@ -33,7 +34,7 @@ export async function execute(
   if (!plan) {
     return result("Error: No plan found.", {
       mode: "sync",
-      error: "no_plan"
+      error: "no_plan",
     });
   }
 
@@ -43,34 +44,37 @@ export async function execute(
     return result(`Error: Task ${target} not found.`, {
       mode: "sync",
       error: "task_not_found",
-      target
+      target,
     });
   }
 
   if (task.status !== "done") {
-    return result(`Error: Task ${target} is ${task.status}, not done. Sync is for completed tasks.`, {
-      mode: "sync",
-      error: "task_not_done",
-      status: task.status
-    });
+    return result(
+      `Error: Task ${target} is ${task.status}, not done. Sync is for completed tasks.`,
+      {
+        mode: "sync",
+        error: "task_not_done",
+        status: task.status,
+      },
+    );
   }
 
   // Check for plan-sync agent
   const config = loadCrewConfig(store.getCrewDir(cwd));
   const availableAgents = discoverCrewAgents(cwd);
-  const hasSyncAgent = availableAgents.some(a => a.name === "crew-plan-sync");
+  const hasSyncAgent = availableAgents.some((a) => a.name === "crew-plan-sync");
   if (!hasSyncAgent) {
     return result("Error: crew-plan-sync agent not found.", {
       mode: "sync",
-      error: "no_sync_agent"
+      error: "no_sync_agent",
     });
   }
 
   const allTasks = store.getTasks(cwd);
-  
+
   // Find dependent tasks (tasks that depend on the completed task)
-  const dependentTasks = allTasks.filter(t => 
-    t.depends_on.includes(target) && t.status === "todo"
+  const dependentTasks = allTasks.filter(
+    (t) => t.depends_on.includes(target) && t.status === "todo",
   );
 
   if (dependentTasks.length === 0) {
@@ -78,7 +82,7 @@ export async function execute(
       mode: "sync",
       taskId: target,
       dependentTasks: [],
-      synced: false
+      synced: false,
     });
   }
 
@@ -87,13 +91,15 @@ export async function execute(
   const taskSummary = task.summary ?? "No summary";
 
   // Build task overview for dependent tasks
-  const dependentOverview = dependentTasks.map(t => {
-    const spec = store.getTaskSpec(cwd, t.id);
-    return `### ${t.id}: ${t.title}
+  const dependentOverview = dependentTasks
+    .map((t) => {
+      const spec = store.getTaskSpec(cwd, t.id);
+      return `### ${t.id}: ${t.title}
 
 ${spec || "*No spec*"}
 `;
-  }).join("\n");
+    })
+    .join("\n");
 
   // Build sync prompt
   const prompt = `# Spec Sync Request
@@ -124,16 +130,26 @@ ${dependentOverview}
 Follow the output format in your instructions.`;
 
   // Spawn sync agent
-  const [syncResult] = await spawnAgents([{
-    agent: "crew-plan-sync",
-    task: prompt,
-    modelOverride: config.models?.analyst ?? sessionModel,
-  }], cwd);
+  const [syncResult] = await spawnAgents(
+    [
+      {
+        agent: "crew-plan-sync",
+        task: prompt,
+        modelOverride: config.models?.analyst,
+      },
+    ],
+    cwd,
+    {
+      parentAgentId: ctx.agent?.id,
+      ownerSessionId: ctx.sessionManager?.getSessionId?.(),
+      ownerSignal,
+    },
+  );
 
   if (syncResult.exitCode !== 0) {
     return result(`Error: Sync agent failed: ${syncResult.error ?? "Unknown error"}`, {
       mode: "sync",
-      error: "sync_failed"
+      error: "sync_failed",
     });
   }
 
@@ -143,14 +159,13 @@ Follow the output format in your instructions.`;
   // Apply updates to task specs
   let updatedCount = 0;
   for (const update of updates) {
-    const matchingTask = dependentTasks.find(t => 
-      t.id === update.taskId || 
-      t.title.toLowerCase().includes(update.taskId.toLowerCase())
+    const matchingTask = dependentTasks.find(
+      (t) => t.id === update.taskId || t.title.toLowerCase().includes(update.taskId.toLowerCase()),
     );
 
     if (matchingTask && update.newContent) {
       const currentSpec = store.getTaskSpec(cwd, matchingTask.id) ?? "";
-      
+
       // Append update to spec (don't replace)
       const updatedSpec = `${currentSpec}
 
@@ -170,16 +185,16 @@ ${update.newContent}`;
 **Dependent tasks checked:** ${dependentTasks.length}
 **Specs updated:** ${updatedCount}
 
-${updates.length > 0 ? `## Updates\n${updates.map(u => `- **${u.taskId}**: ${u.reason}`).join("\n")}` : "## No Updates Needed\n\nDependent task specs are already up to date."}
+${updates.length > 0 ? `## Updates\n${updates.map((u) => `- **${u.taskId}**: ${u.reason}`).join("\n")}` : "## No Updates Needed\n\nDependent task specs are already up to date."}
 
-${updatedCount > 0 ? `\n**Ready tasks:** ${readyTasks.map(t => t.id).join(", ") || "none"}` : ""}`;
+${updatedCount > 0 ? `\n**Ready tasks:** ${readyTasks.map((t) => t.id).join(", ") || "none"}` : ""}`;
 
   return result(text, {
     mode: "sync",
     taskId: target,
-    dependentTasks: dependentTasks.map(t => t.id),
+    dependentTasks: dependentTasks.map((t) => t.id),
     updatedCount,
-    updates: updates.map(u => ({ taskId: u.taskId, reason: u.reason }))
+    updates: updates.map((u) => ({ taskId: u.taskId, reason: u.reason })),
   });
 }
 
@@ -195,13 +210,13 @@ interface SyncUpdate {
 
 /**
  * Parses sync updates from the sync agent output.
- * 
+ *
  * Expected format:
  * ### Updated: [task-id]
- * 
+ *
  * Changes made:
  * - Updated section X to reflect...
- * 
+ *
  * New content:
  * [content to add to spec]
  */
@@ -218,8 +233,12 @@ function parseSyncUpdates(output: string): SyncUpdate[] {
 
     // Extract reason (Changes made section)
     const reasonMatch = body.match(/Changes made:?\s*([\s\S]*?)(?=New content:|$)/i);
-    const reason = reasonMatch 
-      ? reasonMatch[1].trim().replace(/^[-*]\s*/gm, "").split("\n")[0].trim()
+    const reason = reasonMatch
+      ? reasonMatch[1]
+          .trim()
+          .replace(/^[-*]\s*/gm, "")
+          .split("\n")[0]
+          .trim()
       : "Updated based on implementation";
 
     // Extract new content

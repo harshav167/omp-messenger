@@ -1,6 +1,6 @@
 /**
  * Crew - Review Handler
- * 
+ *
  * Spawns reviewer with git diff context for task or plan review.
  * Simplified: works with current plan
  */
@@ -19,26 +19,30 @@ export async function execute(
   params: CrewParams,
   ctx: ExtensionContext,
   sessionModel?: string,
+  ownerSignal?: AbortSignal,
 ) {
   const cwd = ctx.cwd;
   const { target, type } = params;
   const config = loadCrewConfig(store.getCrewDir(cwd));
-  const reviewerModel = config.models?.reviewer ?? sessionModel;
+  const reviewerModel = config.models?.reviewer;
 
   if (!target) {
-    return result("Error: target (task ID) required for review action.\n\nUsage: omp_messenger({ action: \"review\", target: \"task-1\" })", {
-      mode: "review",
-      error: "missing_target"
-    });
+    return result(
+      'Error: target (task ID) required for review action.\n\nUsage: omp_messenger({ action: "review", target: "task-1" })',
+      {
+        mode: "review",
+        error: "missing_target",
+      },
+    );
   }
 
   // Check for reviewer agent
   const availableAgents = discoverCrewAgents(cwd);
-  const hasReviewer = availableAgents.some(a => a.name === "crew-reviewer");
+  const hasReviewer = availableAgents.some((a) => a.name === "crew-reviewer");
   if (!hasReviewer) {
     return result("Error: crew-reviewer agent not found. Required for code review.", {
       mode: "review",
-      error: "no_reviewer"
+      error: "no_reviewer",
     });
   }
 
@@ -53,10 +57,18 @@ export async function execute(
   // Determine review type: "impl" for task, "plan" for plan review
   const reviewType = type ?? (target.startsWith("task-") ? "impl" : "plan");
 
+  const ownerSessionId = ctx.sessionManager?.getSessionId?.();
   if (reviewType === "impl") {
-    return reviewImplementation(cwd, target, reviewerModel);
+    return reviewImplementation(
+      cwd,
+      target,
+      reviewerModel,
+      ctx.agent?.id,
+      ownerSessionId,
+      ownerSignal,
+    );
   } else {
-    return reviewPlan(cwd, reviewerModel);
+    return reviewPlan(cwd, reviewerModel, ctx.agent?.id, ownerSessionId, ownerSignal);
   }
 }
 
@@ -64,22 +76,32 @@ export async function execute(
 // Implementation Review
 // =============================================================================
 
-export async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string) {
+export async function reviewImplementation(
+  cwd: string,
+  taskId: string,
+  modelOverride?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
+) {
   const task = store.getTask(cwd, taskId);
   if (!task) {
     return result(`Error: Task ${taskId} not found.`, {
       mode: "review",
       error: "task_not_found",
-      target: taskId
+      target: taskId,
     });
   }
 
   if (task.status !== "done" && task.status !== "in_progress") {
-    return result(`Error: Task ${taskId} is ${task.status}. Can only review in_progress or done tasks.`, {
-      mode: "review",
-      error: "invalid_status",
-      status: task.status
-    });
+    return result(
+      `Error: Task ${taskId} is ${task.status}. Can only review in_progress or done tasks.`,
+      {
+        mode: "review",
+        error: "invalid_status",
+        status: task.status,
+      },
+    );
   }
 
   // Get git diff
@@ -87,7 +109,7 @@ export async function reviewImplementation(cwd: string, taskId: string, modelOve
   if (!baseCommit) {
     return result(`Error: Task ${taskId} has no base_commit. Cannot generate diff.`, {
       mode: "review",
-      error: "no_base_commit"
+      error: "no_base_commit",
     });
   }
 
@@ -95,9 +117,10 @@ export async function reviewImplementation(cwd: string, taskId: string, modelOve
   const diffResult = getGitDiff(baseCommit, cwd, taskBranch ?? undefined);
   const diff = diffResult.text;
   const commitLog = getCommitLog(baseCommit, cwd, taskBranch ?? undefined);
-  const diffError = taskBranch && diffResult.status === "empty"
-    ? `**ERROR:** Task branch \`${taskBranch}\` exists but has no changes relative to base ${baseCommit.slice(0, 12)}. The implementation appears to be missing from the branch.`
-    : null;
+  const diffError =
+    taskBranch && diffResult.status === "empty"
+      ? `**ERROR:** Task branch \`${taskBranch}\` exists but has no changes relative to base ${baseCommit.slice(0, 12)}. The implementation appears to be missing from the branch.`
+      : null;
 
   // Get task spec for context
   const taskSpec = store.getTaskSpec(cwd, taskId) ?? "";
@@ -121,9 +144,12 @@ ${taskSpec || "*No spec available*"}
 ${commitLog || "*No commits*"}
 
 ### Diff
-${diffError ?? `\`\`\`diff
+${
+  diffError ??
+  `\`\`\`diff
 ${diff}
-\`\`\``}
+\`\`\``
+}
 
 ## Your Review
 
@@ -131,16 +157,22 @@ Review this implementation following the crew-reviewer protocol.
 Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback.`;
 
   // Spawn reviewer
-  const [reviewResult] = await spawnAgents([{
-    agent: "crew-reviewer",
-    task: prompt,
-    modelOverride,
-  }], cwd);
+  const [reviewResult] = await spawnAgents(
+    [
+      {
+        agent: "crew-reviewer",
+        task: prompt,
+        modelOverride,
+      },
+    ],
+    cwd,
+    { parentAgentId, ownerSessionId, ownerSignal },
+  );
 
   if (reviewResult.exitCode !== 0) {
     return result(`Error: Reviewer failed: ${reviewResult.error ?? "Unknown error"}`, {
       mode: "review",
-      error: "reviewer_failed"
+      error: "reviewer_failed",
     });
   }
 
@@ -154,8 +186,8 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
       summary: verdict.summary,
       issues: verdict.issues,
       suggestions: verdict.suggestions,
-      reviewed_at: new Date().toISOString()
-    }
+      reviewed_at: new Date().toISOString(),
+    },
   });
   const shortSummary = verdict.summary.split("\n")[0].slice(0, 120);
   const progressMsg = `Review: ${verdict.verdict} — ${shortSummary}`;
@@ -167,9 +199,9 @@ Output your verdict as SHIP, NEEDS_WORK, or MAJOR_RETHINK with detailed feedback
 
 ${verdict.summary}
 
-${verdict.issues.length > 0 ? `## Issues\n${verdict.issues.map(i => `- ${i}`).join("\n")}` : ""}
+${verdict.issues.length > 0 ? `## Issues\n${verdict.issues.map((i) => `- ${i}`).join("\n")}` : ""}
 
-${verdict.suggestions.length > 0 ? `## Suggestions\n${verdict.suggestions.map(s => `- ${s}`).join("\n")}` : ""}
+${verdict.suggestions.length > 0 ? `## Suggestions\n${verdict.suggestions.map((s) => `- ${s}`).join("\n")}` : ""}
 
 ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEEDS_WORK" ? "⚠️ Address issues and re-review." : "🔄 Consider re-planning this task."}`;
 
@@ -179,7 +211,7 @@ ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEED
     taskId,
     verdict: verdict.verdict,
     issueCount: verdict.issues.length,
-    suggestionCount: verdict.suggestions.length
+    suggestionCount: verdict.suggestions.length,
   });
 }
 
@@ -187,12 +219,18 @@ ${verdict.verdict === "SHIP" ? "✅ Ready to merge!" : verdict.verdict === "NEED
 // Plan Review
 // =============================================================================
 
-async function reviewPlan(cwd: string, modelOverride?: string) {
+async function reviewPlan(
+  cwd: string,
+  modelOverride?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
+) {
   const plan = store.getPlan(cwd);
   if (!plan) {
     return result("Error: No plan found.", {
       mode: "review",
-      error: "no_plan"
+      error: "no_plan",
     });
   }
 
@@ -200,14 +238,17 @@ async function reviewPlan(cwd: string, modelOverride?: string) {
   const tasks = store.getTasks(cwd);
 
   // Build task overview
-  const taskOverview = tasks.map(t => {
-    const spec = store.getTaskSpec(cwd, t.id);
-    const deps = t.depends_on.length > 0 ? ` (deps: ${t.depends_on.join(", ")})` : "";
-    const specPreview = spec && !spec.includes("*Spec pending*")
-      ? `\n  ${spec.slice(0, 200)}${spec.length > 200 ? "..." : ""}`
-      : "";
-    return `- ${t.id}: ${t.title}${deps}${specPreview}`;
-  }).join("\n");
+  const taskOverview = tasks
+    .map((t) => {
+      const spec = store.getTaskSpec(cwd, t.id);
+      const deps = t.depends_on.length > 0 ? ` (deps: ${t.depends_on.join(", ")})` : "";
+      const specPreview =
+        spec && !spec.includes("*Spec pending*")
+          ? `\n  ${spec.slice(0, 200)}${spec.length > 200 ? "..." : ""}`
+          : "";
+      return `- ${t.id}: ${t.title}${deps}${specPreview}`;
+    })
+    .join("\n");
 
   // Build review prompt
   const prompt = `# Plan Review Request
@@ -239,16 +280,22 @@ Review this plan for:
 Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or MAJOR_RETHINK (fundamental issues).`;
 
   // Spawn reviewer
-  const [reviewResult] = await spawnAgents([{
-    agent: "crew-reviewer",
-    task: prompt,
-    modelOverride,
-  }], cwd);
+  const [reviewResult] = await spawnAgents(
+    [
+      {
+        agent: "crew-reviewer",
+        task: prompt,
+        modelOverride,
+      },
+    ],
+    cwd,
+    { parentAgentId, ownerSessionId, ownerSignal },
+  );
 
   if (reviewResult.exitCode !== 0) {
     return result(`Error: Reviewer failed: ${reviewResult.error ?? "Unknown error"}`, {
       mode: "review",
-      error: "reviewer_failed"
+      error: "reviewer_failed",
     });
   }
 
@@ -262,9 +309,9 @@ Output your verdict as SHIP (plan is solid), NEEDS_WORK (minor adjustments), or 
 
 ${verdict.summary}
 
-${verdict.issues.length > 0 ? `## Issues\n${verdict.issues.map(i => `- ${i}`).join("\n")}` : ""}
+${verdict.issues.length > 0 ? `## Issues\n${verdict.issues.map((i) => `- ${i}`).join("\n")}` : ""}
 
-${verdict.suggestions.length > 0 ? `## Suggestions\n${verdict.suggestions.map(s => `- ${s}`).join("\n")}` : ""}
+${verdict.suggestions.length > 0 ? `## Suggestions\n${verdict.suggestions.map((s) => `- ${s}`).join("\n")}` : ""}
 
 ${verdict.verdict === "SHIP" ? "✅ Plan is ready for execution!" : verdict.verdict === "NEEDS_WORK" ? "⚠️ Adjust plan before starting work." : "🔄 Consider re-planning with more context."}`;
 
@@ -274,7 +321,7 @@ ${verdict.verdict === "SHIP" ? "✅ Plan is ready for execution!" : verdict.verd
     prd: plan.prd,
     verdict: verdict.verdict,
     issueCount: verdict.issues.length,
-    suggestionCount: verdict.suggestions.length
+    suggestionCount: verdict.suggestions.length,
   });
 }
 
@@ -306,10 +353,12 @@ type GitDiffResult =
 function getGitDiff(baseCommit: string, cwd: string, ref?: string): GitDiffResult {
   const range = ref ? `${baseCommit}...${ref}` : `${baseCommit}..HEAD`;
   try {
-    const diff = execSync(
-      `git diff ${range}`,
-      { cwd, encoding: "utf-8", maxBuffer: 5 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
-    );
+    const diff = execSync(`git diff ${range}`, {
+      cwd,
+      encoding: "utf-8",
+      maxBuffer: 5 * 1024 * 1024,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     if (diff.length > 50000) {
       return { status: "content", text: diff.slice(0, 50000) + "\n\n[Diff truncated - too large]" };
     }
@@ -323,10 +372,13 @@ function getGitDiff(baseCommit: string, cwd: string, ref?: string): GitDiffResul
 function getCommitLog(baseCommit: string, cwd: string, ref?: string): string {
   const range = ref ? `${baseCommit}..${ref}` : `${baseCommit}..HEAD`;
   try {
-    return execSync(
-      `git log ${range} --oneline --no-decorate`,
-      { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
-    ).trim() || "*No commits*";
+    return (
+      execSync(`git log ${range} --oneline --no-decorate`, {
+        cwd,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      }).trim() || "*No commits*"
+    );
   } catch {
     return "*No commits*";
   }

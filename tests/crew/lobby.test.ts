@@ -30,12 +30,14 @@ describe("lobby workers", () => {
     expect(worker?.lobbyId).toBe(worker?.name);
     expect(worker?.taskId).toBe(`__lobby-${worker?.name}__`);
     expect(worker?.assignedTaskId).toBeNull();
-    expect(fake.runSubprocess).toHaveBeenCalledWith(expect.objectContaining({
-      id: worker?.name,
-      keepAlive: true,
-      enableIrc: false,
-      parentAgentId: "Main",
-    }));
+    expect(fake.runSubprocess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: worker?.name,
+        keepAlive: true,
+        enableIrc: false,
+        parentAgentId: "Main",
+      }),
+    );
   });
 
   it("counts only available workers for the requested cwd", () => {
@@ -64,10 +66,12 @@ describe("lobby workers", () => {
     const assigned = await lobby.assignTaskToLobbyWorker(worker, "task-3", "# Task 3", mesh);
 
     expect(assigned).toBe(true);
-    expect(fake.runSubagentFollowUpTurn).toHaveBeenCalledWith(expect.objectContaining({
-      id: worker.name,
-      message: expect.stringMatching(/^# ⚡ TASK ASSIGNMENT/),
-    }));
+    expect(fake.runSubagentFollowUpTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: worker.name,
+        message: expect.stringMatching(/^# ⚡ TASK ASSIGNMENT/),
+      }),
+    );
     expect(readdirSync(join(dirs.cwd, ".omp", "messenger", "inbox"))).toEqual([]);
   });
 
@@ -146,11 +150,13 @@ describe("lobby workers", () => {
     const worker = lobby.spawnWorkerForTask(dirs.cwd, task.id, "task prompt", mesh);
 
     expect(worker?.assignedTaskId).toBe(task.id);
-    expect(store.getTask(dirs.cwd, task.id)).toEqual(expect.objectContaining({
-      status: "in_progress",
-      assigned_to: worker?.name,
-      attempt_count: 1,
-    }));
+    expect(store.getTask(dirs.cwd, task.id)).toEqual(
+      expect.objectContaining({
+        status: "in_progress",
+        assigned_to: worker?.name,
+        attempt_count: 1,
+      }),
+    );
   });
 
   it("refuses a task that already has an active worker", () => {
@@ -207,6 +213,25 @@ describe("lobby workers", () => {
     expect(lobby.getLobbyWorkerCount(otherDirs.cwd)).toBe(1);
   });
 
+  it("only shuts down and reuses lobby workers owned by the requesting session", () => {
+    const first = lobby.spawnLobbyWorker(dirs.cwd, mesh, undefined, undefined, "Main", "session-a");
+    const second = lobby.spawnLobbyWorker(
+      dirs.cwd,
+      mesh,
+      undefined,
+      undefined,
+      "Main",
+      "session-b",
+    );
+    expect(
+      lobby.getAvailableLobbyWorkers(dirs.cwd, "session-a").map((worker) => worker.name),
+    ).toEqual([first?.name]);
+    lobby.shutdownLobbyWorkers(dirs.cwd, "session-a");
+    expect(first?.abort.signal.aborted).toBe(true);
+    expect(second?.abort.signal.aborted).toBe(false);
+    lobby.shutdownLobbyWorkers(dirs.cwd, "session-b");
+  });
+
   it("does not ask an already joined lobby worker to join again", () => {
     const worker = lobby.spawnLobbyWorker(dirs.cwd, mesh);
     const options = fake.runSubprocess.mock.calls[0]?.[0];
@@ -216,7 +241,7 @@ describe("lobby workers", () => {
   });
 
   it("aborts exploration after the coordination token budget", async () => {
-    fake.runSubprocess.mockImplementationOnce(async options => {
+    fake.runSubprocess.mockImplementationOnce(async (options) => {
       fake.registry.set(options.id, { status: "running" });
       options.onProgress?.({
         index: options.index,

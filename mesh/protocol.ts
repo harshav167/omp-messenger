@@ -1,14 +1,28 @@
 /**
  * omp-messenger - Mesh server wire protocol (JSON text frames over WebSocket)
  *
- * Shared by mesh/client.ts and mesh/server.ts. Imports only types.
+ * Shared by the OMP and Tern clients and the mesh server. Only type dependencies are imported.
  *
  * One socket = one agent identity registered in one or more channels. The
  * agent's name is unique per channel; channel-scoped frames carry `channel`.
  */
 
-import type { AgentMailMessage, AgentRegistration, AllClaims, AllCompletions, HistoryEntry } from "../lib.ts";
-import type { ChannelInfo, ClaimResult, CompleteResult, DeleteChannelResult, RenameResult, SendResult, UnclaimResult } from "./types.ts";
+import type {
+  AgentMailMessage,
+  AgentRegistration,
+  AllClaims,
+  AllCompletions,
+  HistoryEntry,
+} from "../lib.ts";
+import type {
+  ChannelInfo,
+  ClaimResult,
+  CompleteResult,
+  DeleteChannelResult,
+  RenameResult,
+  SendResult,
+  UnclaimResult,
+} from "./types.ts";
 
 export const MESH_SUBPROTOCOL = "omp-messenger.v2";
 
@@ -28,7 +42,14 @@ export interface ClaimAssertion {
 
 export type ClientFrame =
   /** `identityKey` is a per-machine secret (never broadcast) that lets one person's windows share a human name. */
-  | { t: "hello"; token: string; channels: string[]; agent: AgentRegistration; claims: ClaimAssertion[]; identityKey?: string }
+  | {
+      t: "hello";
+      token: string;
+      channels: string[];
+      agent: AgentRegistration;
+      claims: ClaimAssertion[];
+      identityKey?: string;
+    }
   | { t: "publish"; agent: AgentRegistration }
   /** Add channels to this socket's membership (idempotent). */
   | { t: "join"; id: string; channels: string[] }
@@ -44,7 +65,7 @@ export type ClientFrame =
    * A channel message: logged, then delivered to every other member of the channel. Members
    * the text mentions (`@name`, `@all`) get an interrupting delivery; the rest a gentle one.
    */
-  | { t: "post"; id: string; channel: string; text: string; replyTo?: string }
+  | { t: "post"; id: string; channel: string; text: string; replyTo?: string; messageId?: string }
   /** A page of the channel's log, newest last: entries with `seq < before` (default: the newest). */
   | { t: "history"; id: string; channel: string; before?: number; limit?: number }
   /**
@@ -90,17 +111,18 @@ export type ReplyResult =
   | PostResult
   | HistoryPage
   | WatchReply
-  | DeleteChannelReply;
+  | DeleteChannelReply
+  | UnsupportedResult;
 
 export type DeleteChannelReply = DeleteChannelResult;
 
 export type PostResult =
   | { ok: true; entry: HistoryEntry; delivered: string[] }
-  | { ok: false; error: "not_joined" | "empty" | "invalid_channel" };
+  | { ok: false; error: "not_joined" | "empty" | "invalid_channel" | "storage_failed" };
 
 export type HistoryPage =
   | { ok: true; channel: string; entries: HistoryEntry[]; hasMore: boolean }
-  | { ok: false; error: "invalid_channel" };
+  | { ok: false; error: "invalid_channel" | "storage_failed" };
 
 export type WatchReply =
   | { ok: true; watching: ChannelSnapshot[] }
@@ -109,8 +131,15 @@ export type WatchReply =
 /** Largest page a `history` request returns. */
 export const HISTORY_PAGE_MAX = 500;
 
+export type UnsupportedResult = { ok: false; error: "unsupported" };
+
 export type ServerFrame =
-  | { t: "welcome"; name: string; channels: ChannelSnapshot[] }
+  | {
+      t: "welcome";
+      name: string;
+      channels: ChannelSnapshot[];
+      server: { protocol: number; features: string[] };
+    }
   /** `channel` is set when the rejection concerns one channel of a multi-channel hello. */
   | { t: "reject"; error: RejectError; channel?: string }
   | { t: "peers"; channel: string; peers: AgentRegistration[] }
@@ -134,7 +163,13 @@ export function parseFrame<T>(raw: unknown): T | null {
   if (typeof raw !== "string") return null;
   try {
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || typeof parsed.t !== "string") return null;
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      typeof parsed.t !== "string"
+    )
+      return null;
     return parsed as T;
   } catch {
     return null;

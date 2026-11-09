@@ -1,11 +1,10 @@
 /**
  * omp-messenger - Configuration
- * 
+ *
  * Priority (highest to lowest):
  * 1. Project: .omp/omp-messenger.json
- * 2. Extension-specific: ~/.omp/agent/omp-messenger.json
- * 3. Main settings: ~/.omp/agent/settings.json → "messenger" key
- * 4. Defaults
+ * 2. Extension-specific: <OMP agent dir>/omp-messenger.json
+ * 3. Defaults
  */
 
 import { randomBytes } from "node:crypto";
@@ -69,16 +68,18 @@ const DEFAULT_CONFIG: MessengerConfig = {
  * token falls back to `~/.omp/agent/messenger/mesh.token`.
  */
 function resolveMeshConfig(raw: unknown): MeshConfig {
-  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const obj =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const fileUrl = typeof obj.url === "string" && obj.url.length > 0 ? obj.url : null;
   const url = process.env.OMP_MESSENGER_MESH_URL || fileUrl;
 
-  let token = process.env.OMP_MESSENGER_MESH_TOKEN || (typeof obj.token === "string" ? obj.token : "");
+  let token =
+    process.env.OMP_MESSENGER_MESH_TOKEN || (typeof obj.token === "string" ? obj.token : "");
   if (token.startsWith("$")) {
     token = process.env[token.slice(1)] ?? "";
   }
   if (!token) {
-    const tokenFile = join(homedir(), ".omp", "agent", "messenger", "mesh.token");
+    const tokenFile = meshTokenPath();
     if (existsSync(tokenFile)) {
       try {
         token = readFileSync(tokenFile, "utf-8").trim();
@@ -102,7 +103,9 @@ export function parseChannelList(raw: unknown): string[] {
     : typeof source === "string"
       ? source.split(",")
       : [];
-  const valid = items.map(item => (typeof item === "string" ? item.trim() : "")).filter(isValidChannelName);
+  const valid = items
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(isValidChannelName);
   return normalizeChannels(valid);
 }
 
@@ -153,24 +156,23 @@ export function matchesAutoRegisterPath(cwd: string, paths: string[]): boolean {
   return false;
 }
 
-const userAgentDir = () => join(homedir(), ".omp", "agent");
-const legacyUserAgentDir = () => join(homedir(), ".pi", "agent");
-
-/** Primary .omp config path; falls back to legacy .pi location for un-migrated setups. */
-function userConfigPath(): string {
-  const primary = join(userAgentDir(), "omp-messenger.json");
-  if (existsSync(primary)) return primary;
-  const legacy = join(legacyUserAgentDir(), "pi-messenger.json");
-  return existsSync(legacy) ? legacy : primary;
+function defaultAgentDir(): string {
+  const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+  if (configured === "~") return homedir();
+  if (configured?.startsWith("~/")) return join(homedir(), configured.slice(2));
+  return configured || join(homedir(), ".omp", "agent");
 }
 
-/** Primary .omp token path; falls back to legacy .pi token. */
-function meshTokenPath(): string {
-  const primary = join(userAgentDir(), "messenger", "mesh.token");
-  if (existsSync(primary)) return primary;
-  const legacy = join(legacyUserAgentDir(), "messenger", "mesh.token");
-  return existsSync(legacy) ? legacy : primary;
+let agentDirProvider: () => string = defaultAgentDir;
+
+/** Supply the host's directory resolver; OMP and Tern each inject their own runtime helper. */
+export function setAgentDirProvider(provider: () => string): void {
+  agentDirProvider = provider;
 }
+
+const userAgentDir = () => agentDirProvider();
+const userConfigPath = () => join(userAgentDir(), "omp-messenger.json");
+const meshTokenPath = () => join(userAgentDir(), "messenger", "mesh.token");
 
 /**
  * This machine's Messenger identity key (`~/.omp/agent/messenger/identity.key`, 0600), created on first
@@ -202,7 +204,9 @@ function readUserConfig(): Record<string, unknown> {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    console.warn(`[omp-messenger] Warning: Failed to parse ${configPath} (${msg}); using defaults.`);
+    console.warn(
+      `[omp-messenger] Warning: Failed to parse ${configPath} (${msg}); using defaults.`,
+    );
     return {};
   }
 }
@@ -233,7 +237,8 @@ export interface StoredMeshSettings {
 
 export function getStoredMeshSettings(): StoredMeshSettings {
   const raw = readUserConfig().mesh;
-  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const obj =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   let token = "";
   const tokenPath = meshTokenPath();
   if (existsSync(tokenPath)) {
@@ -259,9 +264,10 @@ export function saveMeshSettings(settings: StoredMeshSettings): void {
   const existing = readUserConfig();
   const url = settings.url.trim();
   const channels = normalizeChannels(settings.channels.filter(isValidChannelName));
-  const prevMesh = existing.mesh && typeof existing.mesh === "object" && !Array.isArray(existing.mesh)
-    ? existing.mesh as Record<string, unknown>
-    : {};
+  const prevMesh =
+    existing.mesh && typeof existing.mesh === "object" && !Array.isArray(existing.mesh)
+      ? (existing.mesh as Record<string, unknown>)
+      : {};
   // Keep an existing inline token in sync because it takes precedence over the token file.
   existing.mesh = {
     url: url || null,
@@ -282,32 +288,42 @@ export function saveMeshSettings(settings: StoredMeshSettings): void {
 
 function buildConfig(projectConfig?: Partial<MessengerConfig> | null): MessengerConfig {
   const extensionGlobalPath = userConfigPath();
-  const mainSettingsPath = join(homedir(), ".omp", "agent", "settings.json");
-
-  // Load from main settings.json (lowest priority of the three sources)
-  let settingsConfig: Partial<MessengerConfig> = {};
-  const mainSettings = readJsonFile(mainSettingsPath);
-  if (mainSettings && typeof mainSettings.messenger === "object" && mainSettings.messenger !== null) {
-    settingsConfig = mainSettings.messenger as Partial<MessengerConfig>;
-  }
-
-  // Load extension-specific global config
   const extensionConfig = readJsonFile(extensionGlobalPath) as Partial<MessengerConfig> | null;
 
   const merged = {
     ...DEFAULT_CONFIG,
-    ...settingsConfig,
     ...(extensionConfig ?? {}),
-    ...(projectConfig ?? {})
+    ...(projectConfig ?? {}),
   };
 
-  const nameWords = (merged as Record<string, unknown>).nameWords as { adjectives: string[]; nouns: string[] } | undefined;
+  const nameWords = (merged as Record<string, unknown>).nameWords as
+    | { adjectives: string[]; nouns: string[] }
+    | undefined;
 
   const sharedFields = {
     nameTheme: typeof merged.nameTheme === "string" ? merged.nameTheme : DEFAULT_CONFIG.nameTheme,
-    nameWords: nameWords && Array.isArray(nameWords.adjectives) && Array.isArray(nameWords.nouns) ? nameWords : undefined,
-    feedRetention: Math.max(1, Math.min(10_000, typeof merged.feedRetention === "number" ? merged.feedRetention : DEFAULT_CONFIG.feedRetention)),
-    stuckThreshold: Math.max(5, Math.min(86_400, typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold)),
+    nameWords:
+      nameWords && Array.isArray(nameWords.adjectives) && Array.isArray(nameWords.nouns)
+        ? nameWords
+        : undefined,
+    feedRetention: Math.max(
+      1,
+      Math.min(
+        10_000,
+        typeof merged.feedRetention === "number"
+          ? merged.feedRetention
+          : DEFAULT_CONFIG.feedRetention,
+      ),
+    ),
+    stuckThreshold: Math.max(
+      5,
+      Math.min(
+        86_400,
+        typeof merged.stuckThreshold === "number"
+          ? merged.stuckThreshold
+          : DEFAULT_CONFIG.stuckThreshold,
+      ),
+    ),
     stuckNotify: merged.stuckNotify !== false,
     stuckWakeAgent:
       typeof merged.stuckWakeAgent === "string" && merged.stuckWakeAgent.length > 0
@@ -363,9 +379,7 @@ export function loadGlobalConfig(): MessengerConfig {
 }
 
 export function loadConfig(cwd: string): MessengerConfig {
-  const primary = join(cwd, ".omp", "omp-messenger.json");
-  const legacy = join(cwd, ".pi", "pi-messenger.json");
-  const projectPath = existsSync(primary) ? primary : (existsSync(legacy) ? legacy : primary);
+  const projectPath = join(cwd, ".omp", "omp-messenger.json");
   const projectConfig = readJsonFile(projectPath) as Partial<MessengerConfig> | null;
   return buildConfig(projectConfig);
 }

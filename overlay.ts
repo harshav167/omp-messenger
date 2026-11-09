@@ -5,15 +5,21 @@
 import type { Component, Focusable, TUI } from "@oh-my-pi/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { Theme } from "@oh-my-pi/pi-coding-agent";
-import {
-  extractFolder,
-  formatDuration,
-  type MessengerState,
-} from "./lib.ts";
+import { extractFolder, formatDuration, type MessengerState } from "./lib.ts";
 import type { Mesh } from "./mesh/types.ts";
 import * as crewStore from "./crew/store.ts";
-import { adjustConcurrency, autonomousState, isAutonomousForCwd, isPlanningForCwd, planningState } from "./crew/state.ts";
-import { loadCrewConfig, cycleCoordinationLevel, setCoordinationOverride } from "./crew/utils/config.ts";
+import {
+  adjustConcurrency,
+  autonomousState,
+  isAutonomousForCwd,
+  isPlanningForCwd,
+  planningState,
+} from "./crew/state.ts";
+import {
+  loadCrewConfig,
+  cycleCoordinationLevel,
+  setCoordinationOverride,
+} from "./crew/utils/config.ts";
 import { readFeedEvents, type FeedEvent, type FeedEventType } from "./feed.ts";
 import type { Task } from "./crew/types.ts";
 import {
@@ -79,6 +85,9 @@ export class MessengerOverlay implements Component, Focusable {
     private done: (snapshot?: string) => void,
     private callbacks: OverlayCallbacks,
     cwd: string,
+    private parentAgentId?: string,
+    private ownerSessionId?: string,
+    private ownerSignal?: AbortSignal,
   ) {
     this.cwd = cwd;
     const cfg = loadConfig(this.cwd);
@@ -92,8 +101,12 @@ export class MessengerOverlay implements Component, Focusable {
     this.wasPlanning = isPlanningForCwd(this.cwd);
 
     this.progressUnsubscribe = onLiveWorkersChanged(() => {
-      this.syncCrewRefreshTimers();
-      this.tui.requestRender();
+      try {
+        this.syncCrewRefreshTimers();
+        this.tui.requestRender();
+      } catch (error) {
+        console.error("omp-messenger overlay refresh failed", error);
+      }
     });
 
     this.syncCrewRefreshTimers();
@@ -106,7 +119,9 @@ export class MessengerOverlay implements Component, Focusable {
   private handleTaskStart(task: Task): void {
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
     if (config.dependencies !== "advisory") {
-      const unmet = task.depends_on.filter(depId => crewStore.getTask(this.cwd, depId)?.status !== "done");
+      const unmet = task.depends_on.filter(
+        (depId) => crewStore.getTask(this.cwd, depId)?.status !== "done",
+      );
       if (unmet.length > 0) {
         setNotification(this.crewViewState, this.tui, false, `Unmet deps: ${unmet.join(", ")}`);
         this.tui.requestRender();
@@ -114,13 +129,22 @@ export class MessengerOverlay implements Component, Focusable {
       }
     }
     if (teamStore.taskNeedsApproval(this.cwd, task)) {
-      const message = teamStore.taskNeedsRevision(this.cwd, task) ? `${task.id} needs revision` : `${task.id} needs lead approval`;
+      const message = teamStore.taskNeedsRevision(this.cwd, task)
+        ? `${task.id} needs revision`
+        : `${task.id} needs lead approval`;
       setNotification(this.crewViewState, this.tui, false, message);
       this.tui.requestRender();
       return;
     }
 
-    const worker = spawnSingleWorker(this.cwd, task.id, this.mesh, this.state.model);
+    const worker = spawnSingleWorker(
+      this.cwd,
+      task.id,
+      this.mesh,
+      this.state.model,
+      this.parentAgentId,
+      this.ownerSessionId,
+    );
     if (worker) {
       setNotification(this.crewViewState, this.tui, true, `${worker.name} → ${task.id}`);
     } else {
@@ -130,7 +154,14 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private spawnWorkerForReadyTask(task: Task, newConcurrency: number): void {
-    const worker = spawnSingleWorker(this.cwd, task.id, this.mesh, this.state.model);
+    const worker = spawnSingleWorker(
+      this.cwd,
+      task.id,
+      this.mesh,
+      this.state.model,
+      this.parentAgentId,
+      this.ownerSessionId,
+    );
     if (!worker) {
       const message = teamStore.taskNeedsRevision(this.cwd, task)
         ? `${task.id} needs revision`
@@ -142,7 +173,12 @@ export class MessengerOverlay implements Component, Focusable {
       return;
     }
 
-    setNotification(this.crewViewState, this.tui, true, `${worker.name} → ${task.id} (${newConcurrency}w)`);
+    setNotification(
+      this.crewViewState,
+      this.tui,
+      true,
+      `${worker.name} → ${task.id} (${newConcurrency}w)`,
+    );
     this.tui.requestRender();
   }
 
@@ -157,49 +193,85 @@ export class MessengerOverlay implements Component, Focusable {
     if (!wasPlanningBefore || planning) return;
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
-    const readyTasks = crewStore.getReadyTasksFrom(tasks, { advisory: config.dependencies === "advisory" });
-    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(this.cwd, t));
+    const readyTasks = crewStore.getReadyTasksFrom(tasks, {
+      advisory: config.dependencies === "advisory",
+    });
+    const startableTasks = readyTasks.filter((t) => !teamStore.taskNeedsApproval(this.cwd, t));
     if (startableTasks.length > 0) {
       const target = Math.min(startableTasks.length, autonomousState.concurrency);
-      void spawnWorkersForReadyTasks(this.cwd, target, this.mesh, this.state.model).then(({ assigned }) => {
-        if (assigned > 0) {
-          setNotification(this.crewViewState, this.tui, true, `Plan ready — ${assigned} worker${assigned > 1 ? "s" : ""} started`);
-          this.tui.requestRender();
-        }
-      });
+      void spawnWorkersForReadyTasks(
+        this.cwd,
+        target,
+        this.mesh,
+        this.state.model,
+        this.parentAgentId,
+        this.ownerSessionId,
+        this.ownerSignal,
+      )
+        .then(({ assigned }) => {
+          if (assigned > 0) {
+            setNotification(
+              this.crewViewState,
+              this.tui,
+              true,
+              `Plan ready — ${assigned} worker${assigned > 1 ? "s" : ""} started`,
+            );
+            this.tui.requestRender();
+          }
+        })
+        .catch((error) => console.error("omp-messenger auto-spawn failed", error));
     } else if (readyTasks.length > 0) {
-      const rejected = readyTasks.filter(t => teamStore.taskNeedsRevision(this.cwd, t));
-      const pending = readyTasks.filter(t => teamStore.taskPendingApproval(this.cwd, t));
-      const message = rejected.length > 0
-        ? `Plan ready — ${rejected.length} task${rejected.length > 1 ? "s" : ""} need revision`
-        : `Plan ready — ${pending.length} task${pending.length > 1 ? "s" : ""} need lead approval`;
+      const rejected = readyTasks.filter((t) => teamStore.taskNeedsRevision(this.cwd, t));
+      const pending = readyTasks.filter((t) => teamStore.taskPendingApproval(this.cwd, t));
+      const message =
+        rejected.length > 0
+          ? `Plan ready — ${rejected.length} task${rejected.length > 1 ? "s" : ""} need revision`
+          : `Plan ready — ${pending.length} task${pending.length > 1 ? "s" : ""} need lead approval`;
       setNotification(this.crewViewState, this.tui, false, message);
       this.tui.requestRender();
     }
   }
 
   private checkAutoRefillWorkers(tasks: Task[], hasPlan: boolean): void {
-    const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
+    const inProgressCount = tasks.filter((t) => t.status === "in_progress").length;
     const prev = this.prevInProgressCount;
     this.prevInProgressCount = inProgressCount;
 
-    if (inProgressCount >= prev || inProgressCount >= autonomousState.concurrency || !hasPlan) return;
+    if (inProgressCount >= prev || inProgressCount >= autonomousState.concurrency || !hasPlan)
+      return;
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
-    const readyTasks = crewStore.getReadyTasksFrom(tasks, { advisory: config.dependencies === "advisory" });
-    const startableTasks = readyTasks.filter(t => !teamStore.taskNeedsApproval(this.cwd, t));
+    const readyTasks = crewStore.getReadyTasksFrom(tasks, {
+      advisory: config.dependencies === "advisory",
+    });
+    const startableTasks = readyTasks.filter((t) => !teamStore.taskNeedsApproval(this.cwd, t));
     if (startableTasks.length === 0) return;
 
     const slots = autonomousState.concurrency - inProgressCount;
     const target = Math.min(startableTasks.length, slots);
     if (target <= 0) return;
 
-    void spawnWorkersForReadyTasks(this.cwd, target, this.mesh, this.state.model).then(({ assigned }) => {
-      if (assigned > 0) {
-        setNotification(this.crewViewState, this.tui, true, `${assigned} worker${assigned > 1 ? "s" : ""} → ready tasks`);
-        this.tui.requestRender();
-      }
-    });
+    void spawnWorkersForReadyTasks(
+      this.cwd,
+      target,
+      this.mesh,
+      this.state.model,
+      this.parentAgentId,
+      this.ownerSessionId,
+      this.ownerSignal,
+    )
+      .then(({ assigned }) => {
+        if (assigned > 0) {
+          setNotification(
+            this.crewViewState,
+            this.tui,
+            true,
+            `${assigned} worker${assigned > 1 ? "s" : ""} → ready tasks`,
+          );
+          this.tui.requestRender();
+        }
+      })
+      .catch((error) => console.error("omp-messenger auto-refill failed", error));
   }
 
   private syncCrewRefreshTimers(): void {
@@ -213,10 +285,12 @@ export class MessengerOverlay implements Component, Focusable {
   private startProgressRefresh(): void {
     if (this.progressTimer) return;
     this.progressTimer = setInterval(() => {
-      if (hasLiveWorkers(this.cwd)) {
-        this.tui.requestRender();
-      } else {
+      try {
+        if (hasLiveWorkers(this.cwd)) this.tui.requestRender();
+        else this.stopProgressRefresh();
+      } catch (error) {
         this.stopProgressRefresh();
+        console.error("omp-messenger progress refresh failed", error);
       }
     }, 1000);
   }
@@ -231,10 +305,12 @@ export class MessengerOverlay implements Component, Focusable {
   private startPlanningRefresh(): void {
     if (this.planningTimer) return;
     this.planningTimer = setInterval(() => {
-      if (this.isPlanningActiveForCurrentProject()) {
-        this.tui.requestRender();
-      } else {
+      try {
+        if (this.isPlanningActiveForCurrentProject()) this.tui.requestRender();
+        else this.stopPlanningRefresh();
+      } catch (error) {
         this.stopPlanningRefresh();
+        console.error("omp-messenger planning refresh failed", error);
       }
     }, 15_000);
   }
@@ -267,7 +343,14 @@ export class MessengerOverlay implements Component, Focusable {
     if (this.crewViewState.inputMode === "block-reason") {
       const tasks = crewStore.getTasks(this.cwd);
       const task = tasks[this.crewViewState.selectedTaskIndex];
-      handleBlockReasonInput(data, this.crewViewState, this.cwd, task, this.state.agentName, this.tui);
+      handleBlockReasonInput(
+        data,
+        this.crewViewState,
+        this.cwd,
+        task,
+        this.state.agentName,
+        this.tui,
+      );
       return;
     }
 
@@ -279,7 +362,17 @@ export class MessengerOverlay implements Component, Focusable {
     if (this.crewViewState.inputMode === "revise-prompt") {
       const tasks = crewStore.getTasks(this.cwd);
       const task = tasks[this.crewViewState.selectedTaskIndex];
-      handleRevisePromptInput(data, this.crewViewState, this.cwd, task, this.state.agentName, this.tui);
+      handleRevisePromptInput(
+        data,
+        this.crewViewState,
+        this.cwd,
+        task,
+        this.state.agentName,
+        this.tui,
+        this.parentAgentId,
+        this.ownerSessionId,
+        this.ownerSignal,
+      );
       return;
     }
 
@@ -293,7 +386,12 @@ export class MessengerOverlay implements Component, Focusable {
       return;
     }
 
-    if (data === "+" || matchesKey(data, "=") || matchesKey(data, "shift+=") || matchesKey(data, "-")) {
+    if (
+      data === "+" ||
+      matchesKey(data, "=") ||
+      matchesKey(data, "shift+=") ||
+      matchesKey(data, "-")
+    ) {
       const delta = matchesKey(data, "-") ? -1 : 1;
       const crewDir = crewStore.getCrewDir(this.cwd);
       const config = loadCrewConfig(crewDir);
@@ -305,10 +403,21 @@ export class MessengerOverlay implements Component, Focusable {
       }
 
       if (next > prev) {
-        const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
+        const readyTasks = crewStore.getReadyTasks(this.cwd, {
+          advisory: config.dependencies === "advisory",
+        });
         if (readyTasks.length === 0) {
-          const worker = spawnLobbyWorker(this.cwd, this.mesh, undefined, this.state.model);
-          const label = worker ? `Lobby worker ${worker.name} spawned (${next}w)` : `Workers → ${next}`;
+          const worker = spawnLobbyWorker(
+            this.cwd,
+            this.mesh,
+            undefined,
+            this.state.model,
+            this.parentAgentId,
+            this.ownerSessionId,
+          );
+          const label = worker
+            ? `Lobby worker ${worker.name} spawned (${next}w)`
+            : `Workers → ${next}`;
           setNotification(this.crewViewState, this.tui, true, label);
         } else {
           this.spawnWorkerForReadyTask(readyTasks[0], next);
@@ -464,7 +573,14 @@ export class MessengerOverlay implements Component, Focusable {
         this.handleTaskStart(task);
         return;
       }
-      handleCrewKeyBinding(data, task, this.crewViewState, this.cwd, this.state.agentName, this.tui);
+      handleCrewKeyBinding(
+        data,
+        task,
+        this.crewViewState,
+        this.cwd,
+        this.state.agentName,
+        this.tui,
+      );
     }
   }
 
@@ -495,9 +611,15 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private formatRecentFeedEvent(event: FeedEvent): string {
-    const time = new Date(event.ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-    if (event.type === "task.done") return `${event.agent} completed ${event.target ?? "task"} (${time})`;
-    if (event.type === "task.start") return `${event.agent} started ${event.target ?? "task"} (${time})`;
+    const time = new Date(event.ts).toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    if (event.type === "task.done")
+      return `${event.agent} completed ${event.target ?? "task"} (${time})`;
+    if (event.type === "task.start")
+      return `${event.agent} started ${event.target ?? "task"} (${time})`;
     if (event.type === "message") {
       const dir = event.target ? `→ ${event.target}: ` : "✦ ";
       return event.preview
@@ -514,7 +636,9 @@ export class MessengerOverlay implements Component, Focusable {
     const liveWorkers = getLiveWorkers(this.cwd);
 
     if (this.isPlanningActiveForCurrentProject() && tasks.length === 0) {
-      const updated = planningState.updatedAt ? formatDuration(Math.max(0, Date.now() - new Date(planningState.updatedAt).getTime())) : "unknown";
+      const updated = planningState.updatedAt
+        ? formatDuration(Math.max(0, Date.now() - new Date(planningState.updatedAt).getTime()))
+        : "unknown";
       return [
         `Crew snapshot: planning in progress (pass ${planningState.pass}/${planningState.maxPasses}, ${planningState.phase}), ${autonomousState.concurrency}w concurrency`,
         "",
@@ -526,9 +650,10 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (!plan) {
       const discovered = discoverCrewAgents(this.cwd);
-      const configLine = discovered.length === 0
-        ? "Config: no crew agents discovered"
-        : `Config: ${discovered.map(agent => `${agent.name}${agent.model ? ` (${agent.model})` : ""}`).join(", ")}`;
+      const configLine =
+        discovered.length === 0
+          ? "Config: no crew agents discovered"
+          : `Config: ${discovered.map((agent) => `${agent.name}${agent.model ? ` (${agent.model})` : ""}`).join(", ")}`;
 
       return [
         `Crew snapshot: no active plan, ${autonomousState.concurrency}w concurrency`,
@@ -540,20 +665,22 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     const config = loadCrewConfig(crewStore.getCrewDir(this.cwd));
-    const readyTasks = crewStore.getReadyTasks(this.cwd, { advisory: config.dependencies === "advisory" });
-    const readyIds = new Set(readyTasks.map(task => task.id));
+    const readyTasks = crewStore.getReadyTasks(this.cwd, {
+      advisory: config.dependencies === "advisory",
+    });
+    const readyIds = new Set(readyTasks.map((task) => task.id));
     const liveTaskIds = new Set(Array.from(liveWorkers.keys()));
-    const activeLines = Array.from(liveWorkers.values()).map(worker => {
+    const activeLines = Array.from(liveWorkers.values()).map((worker) => {
       const activity = worker.progress.currentTool
         ? `${worker.progress.currentTool}${worker.progress.currentToolArgs ? ` ${worker.progress.currentToolArgs}` : ""}`
         : "thinking";
       return `${worker.taskId} (${worker.agent}, ${activity}, ${formatDuration(Date.now() - worker.startedAt)})`;
     });
 
-    const doneTasks = tasks.filter(task => task.status === "done");
-    const inProgressTasks = tasks.filter(task => task.status === "in_progress");
-    const blockedTasks = tasks.filter(task => task.status === "blocked");
-    const waitingTasks = tasks.filter(task => task.status === "todo" && !readyIds.has(task.id));
+    const doneTasks = tasks.filter((task) => task.status === "done");
+    const inProgressTasks = tasks.filter((task) => task.status === "in_progress");
+    const blockedTasks = tasks.filter((task) => task.status === "blocked");
+    const waitingTasks = tasks.filter((task) => task.status === "todo" && !readyIds.has(task.id));
     const recentEvents = readFeedEvents(this.cwd, 2);
     const headerParts = [
       `Crew snapshot: ${plan.completed_count}/${plan.task_count} tasks done`,
@@ -568,16 +695,18 @@ export class MessengerOverlay implements Component, Focusable {
       headerParts.join(", "),
       "",
       `Active: ${activeLines.length > 0 ? activeLines.join(", ") : "none"}`,
-      `Done: ${doneTasks.length > 0 ? doneTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
-      `In progress: ${inProgressTasks.length > 0 ? inProgressTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
-      `Ready: ${readyTasks.length > 0 ? readyTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
-      `Blocked: ${blockedTasks.length > 0 ? blockedTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
-      `Waiting: ${waitingTasks.length > 0 ? waitingTasks.map(task => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Done: ${doneTasks.length > 0 ? doneTasks.map((task) => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `In progress: ${inProgressTasks.length > 0 ? inProgressTasks.map((task) => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Ready: ${readyTasks.length > 0 ? readyTasks.map((task) => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Blocked: ${blockedTasks.length > 0 ? blockedTasks.map((task) => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
+      `Waiting: ${waitingTasks.length > 0 ? waitingTasks.map((task) => this.formatTaskSnapshotLine(task, liveTaskIds)).join(", ") : "none"}`,
     ];
 
     if (recentEvents.length > 0) {
       lines.push("");
-      lines.push(`Recent: ${recentEvents.map(event => this.formatRecentFeedEvent(event)).join(", ")}`);
+      lines.push(
+        `Recent: ${recentEvents.map((event) => this.formatRecentFeedEvent(event)).join(", ")}`,
+      );
     }
 
     return lines.join("\n");
@@ -589,10 +718,8 @@ export class MessengerOverlay implements Component, Focusable {
     const sectionW = innerW - 2;
     const border = (s: string) => this.theme.fg("dim", s);
     const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
-    const sanitizeRowContent = (content: string) => content
-      .replaceAll("\r", " ")
-      .replaceAll("\n", " ")
-      .replaceAll("\t", " ");
+    const sanitizeRowContent = (content: string) =>
+      content.replaceAll("\r", " ").replaceAll("\n", " ").replaceAll("\t", " ");
     const row = (content: string) => {
       const safe = truncateToWidth(sanitizeRowContent(content), sectionW);
       return border("│") + pad(" " + safe, innerW) + border("│");
@@ -605,7 +732,10 @@ export class MessengerOverlay implements Component, Focusable {
       this.crewViewState.selectedTaskIndex = 0;
       if (this.crewViewState.mode === "detail") this.crewViewState.mode = "list";
     } else {
-      this.crewViewState.selectedTaskIndex = Math.max(0, Math.min(this.crewViewState.selectedTaskIndex, tasks.length - 1));
+      this.crewViewState.selectedTaskIndex = Math.max(
+        0,
+        Math.min(this.crewViewState.selectedTaskIndex, tasks.length - 1),
+      );
     }
 
     const selectedTask = tasks[this.crewViewState.selectedTaskIndex] ?? null;
@@ -622,13 +752,19 @@ export class MessengerOverlay implements Component, Focusable {
     const leftBorder = Math.floor(borderLen / 2);
     const rightBorder = borderLen - leftBorder;
 
-    lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
-    lines.push(row(renderStatusBar(this.theme, this.cwd, sectionW, tasks, {
-      kind: this.mesh.kind,
-      status: this.mesh.status(),
-      channels: this.mesh.channels(),
-      peerCount: this.mesh.peers().length,
-    })));
+    lines.push(
+      border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"),
+    );
+    lines.push(
+      row(
+        renderStatusBar(this.theme, this.cwd, sectionW, tasks, {
+          kind: this.mesh.kind,
+          status: this.mesh.status(),
+          channels: this.mesh.channels(),
+          peerCount: this.mesh.peers().length,
+        }),
+      ),
+    );
     lines.push(emptyRow());
 
     const chromeLines = 6;
@@ -642,7 +778,13 @@ export class MessengerOverlay implements Component, Focusable {
 
     let contentLines: string[];
     if (this.crewViewState.mode === "detail" && selectedTask) {
-      contentLines = renderDetailView(this.cwd, selectedTask, sectionW, contentHeight, this.crewViewState);
+      contentLines = renderDetailView(
+        this.cwd,
+        selectedTask,
+        sectionW,
+        contentHeight,
+        this.crewViewState,
+      );
     } else {
       const workersLimit = termRows <= 26 ? 2 : 5;
       const hasWorkers = hasLiveWorkers(this.cwd);
@@ -657,7 +799,7 @@ export class MessengerOverlay implements Component, Focusable {
         new Map([[this.cwd, tasks]]),
       );
       const agentsHeight = 2;
-      const workersHeight = () => workerLines.length > 0 ? workerLines.length + 1 : 0;
+      const workersHeight = () => (workerLines.length > 0 ? workerLines.length + 1 : 0);
       const available = contentHeight - workersHeight() - agentsHeight;
 
       const isFeedFocus = this.crewViewState.feedFocus;
@@ -697,19 +839,41 @@ export class MessengerOverlay implements Component, Focusable {
       let feedLines = renderFeedSection(this.theme, displayEvents, sectionW, prevTs);
       if (feedLines.length > feedHeight) feedLines = feedLines.slice(-feedHeight);
 
-      while (workerLines.length > 0 && workersHeight() + mainHeight + (feedLines.length > 0 ? feedLines.length + 1 : 0) + agentsHeight > contentHeight) {
+      while (
+        workerLines.length > 0 &&
+        workersHeight() +
+          mainHeight +
+          (feedLines.length > 0 ? feedLines.length + 1 : 0) +
+          agentsHeight >
+          contentHeight
+      ) {
         workerLines = workerLines.slice(0, workerLines.length - 1);
       }
 
       let mainLines: string[];
       if (!hasPlan && !planning) {
-        mainLines = renderMeshPanel(this.theme, this.state, this.mesh, this.meshUrl, this.stuckThresholdMs, sectionW, mainHeight);
+        mainLines = renderMeshPanel(
+          this.theme,
+          this.state,
+          this.mesh,
+          this.meshUrl,
+          this.stuckThresholdMs,
+          sectionW,
+          mainHeight,
+        );
       } else if (planning && tasks.length === 0) {
         mainLines = renderPlanningState(this.theme, this.cwd, sectionW, mainHeight);
       } else if (isFeedFocus && tasks.length > 0) {
         mainLines = renderTaskSummary(this.theme, this.cwd, sectionW, mainHeight, tasks);
       } else {
-        mainLines = renderTaskList(this.theme, this.cwd, sectionW, mainHeight, this.crewViewState, tasks);
+        mainLines = renderTaskList(
+          this.theme,
+          this.cwd,
+          sectionW,
+          mainHeight,
+          this.crewViewState,
+          tasks,
+        );
       }
 
       contentLines = [];
@@ -753,48 +917,64 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private static readonly SIGNIFICANT_EVENTS = new Set<FeedEventType>([
-    "task.done", "task.block", "task.start", "message",
-    "plan.done", "plan.failed", "task.revise", "task.revise-tree",
+    "task.done",
+    "task.block",
+    "task.start",
+    "message",
+    "plan.done",
+    "plan.failed",
+    "task.revise",
+    "task.revise-tree",
   ]);
 
   private detectAndFlashEvents(events: FeedEvent[], prevTs: string | null): void {
     if (prevTs === null) return;
-    const newEvents = events.filter(e => e.ts > prevTs);
+    const newEvents = events.filter((e) => e.ts > prevTs);
     if (newEvents.length === 0) return;
 
-    const significant = newEvents.filter(e => MessengerOverlay.SIGNIFICANT_EVENTS.has(e.type));
+    const significant = newEvents.filter((e) => MessengerOverlay.SIGNIFICANT_EVENTS.has(e.type));
     if (significant.length === 0) return;
 
     const last = significant[significant.length - 1];
-    const sameType = significant.filter(e => e.type === last.type);
+    const sameType = significant.filter((e) => e.type === last.type);
 
     let message: string;
     if (sameType.length > 1) {
       const label =
-        last.type === "task.done" ? `${sameType.length} tasks completed` :
-        last.type === "task.start" ? `${sameType.length} tasks started` :
-        last.type === "task.block" ? `${sameType.length} tasks blocked` :
-        last.type === "message" ? `${sameType.length} new messages` :
-        `${sameType.length} ${last.type} events`;
+        last.type === "task.done"
+          ? `${sameType.length} tasks completed`
+          : last.type === "task.start"
+            ? `${sameType.length} tasks started`
+            : last.type === "task.block"
+              ? `${sameType.length} tasks blocked`
+              : last.type === "message"
+                ? `${sameType.length} new messages`
+                : `${sameType.length} ${last.type} events`;
       message = label;
     } else {
       const target = last.target ? ` ${last.target}` : "";
       const preview = last.preview ? ` — ${last.preview.slice(0, 40)}` : "";
       message =
-        last.type === "task.done" ? `${last.agent} completed${target}` :
-        last.type === "task.start" ? `${last.agent} started${target}` :
-        last.type === "task.block" ? `${last.agent} blocked${target}${preview}` :
-        last.type === "message" ? `${last.agent}${preview || " sent a message"}` :
-        last.type === "plan.done" ? "Planning completed" :
-        last.type === "plan.failed" ? "Planning failed" :
-        `${last.agent} ${last.type}${target}`;
+        last.type === "task.done"
+          ? `${last.agent} completed${target}`
+          : last.type === "task.start"
+            ? `${last.agent} started${target}`
+            : last.type === "task.block"
+              ? `${last.agent} blocked${target}${preview}`
+              : last.type === "message"
+                ? `${last.agent}${preview || " sent a message"}`
+                : last.type === "plan.done"
+                  ? "Planning completed"
+                  : last.type === "plan.failed"
+                    ? "Planning failed"
+                    : `${last.agent} ${last.type}${target}`;
     }
 
     setNotification(this.crewViewState, this.tui, true, message);
   }
 
   private checkCompletion(tasks: Task[], planning: boolean): void {
-    const allDone = tasks.length > 0 && tasks.every(t => t.status === "done");
+    const allDone = tasks.length > 0 && tasks.every((t) => t.status === "done");
     const isIdle = !hasLiveWorkers(this.cwd) && !isAutonomousForCwd(this.cwd) && !planning;
 
     if (!allDone) {
@@ -808,7 +988,11 @@ export class MessengerOverlay implements Component, Focusable {
       setNotification(this.crewViewState, this.tui, true, "All tasks complete! Closing in 3s...");
       this.completionTimer = setTimeout(() => {
         this.completionTimer = null;
-        this.done(this.generateSnapshot());
+        try {
+          this.done(this.generateSnapshot());
+        } catch (error) {
+          console.error("omp-messenger completion callback failed", error);
+        }
       }, 3000);
     }
   }

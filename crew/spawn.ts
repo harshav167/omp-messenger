@@ -12,11 +12,7 @@ import { discoverCrewSkills } from "./utils/discover.ts";
 import { buildWorkerPrompt } from "./prompt.ts";
 import * as teamStore from "./team/store.ts";
 import { logFeedEvent } from "../feed.ts";
-import {
-  spawnWorkerForTask,
-  getAvailableLobbyWorkers,
-  assignTaskToLobbyWorker,
-} from "./lobby.ts";
+import { spawnWorkerForTask, getAvailableLobbyWorkers, assignTaskToLobbyWorker } from "./lobby.ts";
 
 export interface SpawnResult {
   assigned: number;
@@ -28,6 +24,9 @@ export async function spawnWorkersForReadyTasks(
   maxWorkers: number,
   mesh: Mesh,
   sessionModel?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
+  ownerSignal?: AbortSignal,
 ): Promise<SpawnResult> {
   const plan = store.getPlan(cwd);
   if (!plan) return { assigned: 0, firstWorkerName: null };
@@ -41,15 +40,25 @@ export async function spawnWorkersForReadyTasks(
   let assigned = 0;
   let firstWorkerName: string | null = null;
 
-  const lobby = getAvailableLobbyWorkers(cwd);
+  const lobby = getAvailableLobbyWorkers(cwd, ownerSessionId);
   for (const lw of lobby) {
-    if (assigned >= workerCap) break;
-    const fresh = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" }).filter(t => !teamStore.taskNeedsApproval(cwd, t));
+    if (assigned >= workerCap || ownerSignal?.aborted) break;
+    const fresh = store
+      .getReadyTasks(cwd, { advisory: config.dependencies === "advisory" })
+      .filter((t) => !teamStore.taskNeedsApproval(cwd, t));
     if (fresh.length === 0) break;
 
     const task = fresh[0];
-    const others = fresh.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, teamStore.buildTeamPromptContext(cwd, task));
+    const others = fresh.filter((t) => t.id !== task.id);
+    const prompt = buildWorkerPrompt(
+      task,
+      prdLabel,
+      cwd,
+      config,
+      others,
+      skills,
+      teamStore.buildTeamPromptContext(cwd, task),
+    );
 
     store.updateTask(cwd, task.id, {
       status: "in_progress",
@@ -59,25 +68,48 @@ export async function spawnWorkersForReadyTasks(
       attempt_count: task.attempt_count + 1,
     });
 
-    if (!await assignTaskToLobbyWorker(lw, task.id, prompt, mesh)) {
+    if (!(await assignTaskToLobbyWorker(lw, task.id, prompt, mesh, ownerSignal))) {
       store.updateTask(cwd, task.id, { status: "todo", assigned_to: undefined });
       continue;
     }
 
-    store.appendTaskProgress(cwd, task.id, "system", `Assigned to lobby worker ${lw.name} (attempt ${task.attempt_count + 1})`);
+    store.appendTaskProgress(
+      cwd,
+      task.id,
+      "system",
+      `Assigned to lobby worker ${lw.name} (attempt ${task.attempt_count + 1})`,
+    );
     logFeedEvent(cwd, lw.name, "task.start", task.id, task.title);
     if (!firstWorkerName) firstWorkerName = lw.name;
     assigned++;
   }
 
-  while (assigned < workerCap) {
-    const fresh = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" }).filter(t => !teamStore.taskNeedsApproval(cwd, t));
+  while (assigned < workerCap && !ownerSignal?.aborted) {
+    const fresh = store
+      .getReadyTasks(cwd, { advisory: config.dependencies === "advisory" })
+      .filter((t) => !teamStore.taskNeedsApproval(cwd, t));
     if (fresh.length === 0) break;
 
     const task = fresh[0];
-    const others = fresh.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, teamStore.buildTeamPromptContext(cwd, task));
-    const worker = spawnWorkerForTask(cwd, task.id, prompt, mesh, sessionModel);
+    const others = fresh.filter((t) => t.id !== task.id);
+    const prompt = buildWorkerPrompt(
+      task,
+      prdLabel,
+      cwd,
+      config,
+      others,
+      skills,
+      teamStore.buildTeamPromptContext(cwd, task),
+    );
+    const worker = spawnWorkerForTask(
+      cwd,
+      task.id,
+      prompt,
+      mesh,
+      sessionModel,
+      parentAgentId,
+      ownerSessionId,
+    );
     if (!worker) break;
 
     if (!firstWorkerName) firstWorkerName = worker.name;
@@ -92,6 +124,8 @@ export function spawnSingleWorker(
   taskId: string,
   mesh: Mesh,
   sessionModel?: string,
+  parentAgentId?: string,
+  ownerSessionId?: string,
 ): { name: string } | null {
   const plan = store.getPlan(cwd);
   if (!plan) return null;
@@ -104,9 +138,27 @@ export function spawnSingleWorker(
   const prdLabel = store.getPlanLabel(plan);
   const skills = discoverCrewSkills(cwd);
   if (teamStore.taskNeedsApproval(cwd, task)) return null;
-  const readyTasks = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" }).filter(t => !teamStore.taskNeedsApproval(cwd, t));
-  const others = readyTasks.filter(t => t.id !== task.id);
-  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills, teamStore.buildTeamPromptContext(cwd, task));
-  const worker = spawnWorkerForTask(cwd, taskId, prompt, mesh, sessionModel);
+  const readyTasks = store
+    .getReadyTasks(cwd, { advisory: config.dependencies === "advisory" })
+    .filter((t) => !teamStore.taskNeedsApproval(cwd, t));
+  const others = readyTasks.filter((t) => t.id !== task.id);
+  const prompt = buildWorkerPrompt(
+    task,
+    prdLabel,
+    cwd,
+    config,
+    others,
+    skills,
+    teamStore.buildTeamPromptContext(cwd, task),
+  );
+  const worker = spawnWorkerForTask(
+    cwd,
+    taskId,
+    prompt,
+    mesh,
+    sessionModel,
+    parentAgentId,
+    ownerSessionId,
+  );
   return worker ? { name: worker.name } : null;
 }

@@ -12,13 +12,16 @@ import { createFakeSdk } from "../helpers/sdk.ts";
 function writeWorkerAgent(cwd: string): void {
   const filePath = path.join(cwd, ".omp", "messenger", "crew", "agents", "crew-worker.md");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `---
+  fs.writeFileSync(
+    filePath,
+    `---
 name: crew-worker
 description: Test worker
 crewRole: worker
 ---
 You are a worker.
-`);
+`,
+  );
 }
 
 describe("crew/graceful shutdown", () => {
@@ -57,68 +60,77 @@ describe("crew/graceful shutdown", () => {
     let finishRun: ((result: SdkSingleResult) => void) | undefined;
     let workerName = "";
 
-    fake.runSubprocess.mockImplementation(options => {
+    fake.runSubprocess.mockImplementation((options) => {
       const run = Promise.withResolvers<SdkSingleResult>();
       workerName = options.id;
       fs.writeFileSync(path.join(registryDir, `${workerName}.json`), "{}");
-      const finish = (aborted: boolean): void => run.resolve({
-        index: options.index,
-        id: options.id,
-        agent: options.agent.name,
-        agentSource: "user",
-        task: options.task,
-        exitCode: aborted ? 143 : 0,
-        output: "",
-        stderr: "",
-        truncated: false,
-        durationMs: 1,
-        tokens: 0,
-        requests: 1,
-        aborted,
-      });
+      const finish = (aborted: boolean): void =>
+        run.resolve({
+          index: options.index,
+          id: options.id,
+          agent: options.agent.name,
+          agentSource: "user",
+          task: options.task,
+          exitCode: aborted ? 143 : 0,
+          output: "",
+          stderr: "",
+          truncated: false,
+          durationMs: 1,
+          tokens: 0,
+          requests: 1,
+          aborted,
+        });
       finishRun = run.resolve;
       options.signal?.addEventListener("abort", () => finish(true), { once: true });
       return run.promise;
     });
 
-    const sendSpy = vi.spyOn(testMesh.mesh, "send").mockImplementation(async (to, text, options) => {
-      finishRun?.({
-        index: 0,
-        id: to,
-        agent: "crew-worker",
-        agentSource: "user",
-        task: "execute task",
-        exitCode: 0,
-        output: "",
-        stderr: "",
-        truncated: false,
-        durationMs: 1,
-        tokens: 0,
-        requests: 1,
+    const sendSpy = vi
+      .spyOn(testMesh.mesh, "send")
+      .mockImplementation(async (to, text, options) => {
+        finishRun?.({
+          index: 0,
+          id: to,
+          agent: "crew-worker",
+          agentSource: "user",
+          task: "execute task",
+          exitCode: 0,
+          output: "",
+          stderr: "",
+          truncated: false,
+          durationMs: 1,
+          tokens: 0,
+          requests: 1,
+        });
+        return {
+          ok: true,
+          message: {
+            id: "shutdown",
+            from: options?.from ?? "crew-orchestrator",
+            to,
+            text,
+            timestamp: new Date().toISOString(),
+            replyTo: null,
+            gentle: options?.gentle,
+          },
+        };
       });
-      return {
-        ok: true,
-        message: {
-          id: "shutdown",
-          from: options?.from ?? "crew-orchestrator",
-          to,
-          text,
-          timestamp: new Date().toISOString(),
-          replyTo: null,
-          gentle: options?.gentle,
-        },
-      };
-    });
 
     const controller = new AbortController();
-    const resultPromise = spawnAgents([{
-      agent: "crew-worker",
-      task: "execute task",
-      taskId: "task-1",
-    }], dirs.cwd, {
-      signal: controller.signal,
-      mesh: testMesh.mesh,
-    });
+    const resultPromise = spawnAgents(
+      [
+        {
+          agent: "crew-worker",
+          task: "execute task",
+          taskId: "task-1",
+        },
+      ],
+      dirs.cwd,
+      {
+        signal: controller.signal,
+        mesh: testMesh.mesh,
+      },
+    );
     controller.abort();
     const [result] = await resultPromise;
 
@@ -129,6 +141,55 @@ describe("crew/graceful shutdown", () => {
     );
     expect(result?.wasGracefullyShutdown).toBe(true);
     expect(fs.existsSync(path.join(registryDir, `${workerName}.json`))).toBe(false);
+  });
+
+  it("aborts after the grace deadline when the shutdown message never settles", async () => {
+    vi.useFakeTimers();
+    const fake = createFakeSdk();
+    setSdk(fake.sdk);
+    writeWorkerAgent(dirs.cwd);
+    const mesh = createTestMesh(dirs.cwd).mesh;
+    const stuck = Promise.withResolvers<never>();
+    vi.spyOn(mesh, "send").mockReturnValue(stuck.promise);
+    fake.runSubprocess.mockImplementation((options) => {
+      const run = Promise.withResolvers<SdkSingleResult>();
+      options.signal?.addEventListener(
+        "abort",
+        () => {
+          run.resolve({
+            index: options.index,
+            id: options.id,
+            agent: options.agent.name,
+            agentSource: "user",
+            task: options.task,
+            exitCode: 143,
+            aborted: true,
+            output: "",
+            stderr: "",
+            truncated: false,
+            durationMs: 1,
+            tokens: 0,
+            requests: 1,
+          });
+        },
+        { once: true },
+      );
+      return run.promise;
+    });
+
+    const controller = new AbortController();
+    const running = spawnAgents(
+      [{ agent: "crew-worker", task: "execute task", taskId: "task-1" }],
+      dirs.cwd,
+      { signal: controller.signal, mesh },
+    );
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(30_000);
+    const [result] = await running;
+
+    expect(mesh.send).toHaveBeenCalledTimes(1);
+    expect(result?.exitCode).toBe(143);
+    expect(result?.wasGracefullyShutdown).toBe(true);
   });
 
   it("result processing uses taskId and graceful shutdown branches correctly", async () => {
@@ -142,22 +203,24 @@ describe("crew/graceful shutdown", () => {
 
     vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
       store.updateTask(dirs.cwd, task.id, { status: "in_progress", assigned_to: "crew-worker" });
-      return [{
-        agent: "crew-worker",
-        exitCode: 0,
-        output: "",
-        truncated: false,
-        progress: {
+      return [
+        {
           agent: "crew-worker",
-          status: "running" as const,
-          recentTools: [],
-          toolCallCount: 0,
-          tokens: 0,
-          durationMs: 0,
+          exitCode: 0,
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "running" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: task.id,
+          wasGracefullyShutdown: true,
         },
-        taskId: task.id,
-        wasGracefullyShutdown: true,
-      }];
+      ];
     });
 
     const response = await workHandler.execute(
@@ -189,7 +252,30 @@ describe("crew/graceful shutdown", () => {
       call++;
       if (call === 1) {
         store.updateTask(dirs.cwd, t1.id, { status: "done" });
-        return [{
+        return [
+          {
+            agent: "crew-worker",
+            exitCode: 1,
+            output: "",
+            truncated: false,
+            progress: {
+              agent: "crew-worker",
+              status: "failed" as const,
+              recentTools: [],
+              toolCallCount: 0,
+              tokens: 0,
+              durationMs: 0,
+            },
+            taskId: t1.id,
+            wasGracefullyShutdown: true,
+            error: "terminated",
+          },
+        ];
+      }
+
+      store.updateTask(dirs.cwd, t2.id, { status: "in_progress", assigned_to: "crew-worker" });
+      return [
+        {
           agent: "crew-worker",
           exitCode: 1,
           output: "",
@@ -202,30 +288,11 @@ describe("crew/graceful shutdown", () => {
             tokens: 0,
             durationMs: 0,
           },
-          taskId: t1.id,
-          wasGracefullyShutdown: true,
-          error: "terminated",
-        }];
-      }
-
-      store.updateTask(dirs.cwd, t2.id, { status: "in_progress", assigned_to: "crew-worker" });
-      return [{
-        agent: "crew-worker",
-        exitCode: 1,
-        output: "",
-        truncated: false,
-        progress: {
-          agent: "crew-worker",
-          status: "failed" as const,
-          recentTools: [],
-          toolCallCount: 0,
-          tokens: 0,
-          durationMs: 0,
+          taskId: t2.id,
+          wasGracefullyShutdown: false,
+          error: "crash",
         },
-        taskId: t2.id,
-        wasGracefullyShutdown: false,
-        error: "crash",
-      }];
+      ];
     });
 
     const first = await workHandler.execute(
@@ -266,29 +333,30 @@ describe("crew/graceful shutdown", () => {
     writeWorkerAgent(dirs.cwd);
     store.createPlan(dirs.cwd, "docs/PRD.md");
     const task = store.createTask(dirs.cwd, "Task one", "Desc one");
+    const controller = new AbortController();
 
     vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
+      controller.abort();
       store.updateTask(dirs.cwd, task.id, { status: "in_progress", assigned_to: "crew-worker" });
-      return [{
-        agent: "crew-worker",
-        exitCode: 1,
-        output: "",
-        truncated: false,
-        progress: {
+      return [
+        {
           agent: "crew-worker",
-          status: "failed" as const,
-          recentTools: [],
-          toolCallCount: 0,
-          tokens: 0,
-          durationMs: 0,
+          exitCode: 1,
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "failed" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: task.id,
+          wasGracefullyShutdown: true,
         },
-        taskId: task.id,
-        wasGracefullyShutdown: true,
-      }];
+      ];
     });
-
-    const controller = new AbortController();
-    controller.abort();
 
     const appendEntry = vi.fn();
     const response = await workHandler.execute(
@@ -303,6 +371,124 @@ describe("crew/graceful shutdown", () => {
     expect(state.autonomousState.stopReason).toBe("manual");
     expect(appendEntry).toHaveBeenCalledWith("crew-state", state.autonomousState);
     expect(response.content[0].text).toContain("Autonomous mode stopped (cancelled).");
+  });
+
+  it("does not let a stale wave stop a replacement autonomous run", async () => {
+    const store = await import("../../crew/store.ts");
+    const agents = await import("../../crew/agents.ts");
+    const workHandler = await import("../../crew/handlers/work.ts");
+    const state = await import("../../crew/state.ts");
+
+    state.stopAutonomous("manual");
+    state.autonomousState.cwd = null;
+    state.autonomousState.waveNumber = 0;
+    state.autonomousState.waveHistory = [];
+    state.autonomousState.startedAt = null;
+    state.autonomousState.stoppedAt = null;
+    state.autonomousState.stopReason = null;
+    writeWorkerAgent(dirs.cwd);
+    store.createPlan(dirs.cwd, "docs/PRD.md");
+    const task = store.createTask(dirs.cwd, "Task one", "Desc one");
+    const owner = new AbortController();
+
+    vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
+      owner.abort();
+      state.stopAutonomous("manual");
+      state.startAutonomous(dirs.cwd, 2);
+      store.updateTask(dirs.cwd, task.id, {
+        status: "in_progress",
+        assigned_to: "ReplacementWorker",
+      });
+      return [
+        {
+          agent: "crew-worker",
+          exitCode: 143,
+          started: true,
+          workerName: "OldWorker",
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "cancelled" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: task.id,
+          wasGracefullyShutdown: true,
+        },
+      ];
+    });
+
+    try {
+      await workHandler.execute(
+        { action: "work", autonomous: true, concurrency: 1 },
+        createTestMesh(dirs.cwd).mesh,
+        createMockContext(dirs.cwd),
+        vi.fn(),
+        undefined,
+        undefined,
+        owner.signal,
+      );
+
+      expect(state.autonomousState.active).toBe(true);
+      expect(state.autonomousState.waveHistory).toEqual([]);
+      expect(state.autonomousState.stopReason).toBeNull();
+      expect(store.getTask(dirs.cwd, task.id)).toMatchObject({
+        status: "in_progress",
+        assigned_to: "ReplacementWorker",
+      });
+    } finally {
+      state.stopAutonomous("manual");
+    }
+  });
+
+  it("does not reset a replacement task for an unstarted queue result", async () => {
+    const store = await import("../../crew/store.ts");
+    const agents = await import("../../crew/agents.ts");
+    const workHandler = await import("../../crew/handlers/work.ts");
+    writeWorkerAgent(dirs.cwd);
+    store.createPlan(dirs.cwd, "docs/PRD.md");
+    const task = store.createTask(dirs.cwd, "Task one", "Desc one");
+
+    vi.spyOn(agents, "spawnAgents").mockImplementation(async () => {
+      store.updateTask(dirs.cwd, task.id, {
+        status: "in_progress",
+        assigned_to: "ReplacementWorker",
+      });
+      return [
+        {
+          agent: "crew-worker",
+          exitCode: 143,
+          started: false,
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "cancelled" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: task.id,
+          wasGracefullyShutdown: true,
+        },
+      ];
+    });
+
+    await workHandler.execute(
+      { action: "work" },
+      createTestMesh(dirs.cwd).mesh,
+      createMockContext(dirs.cwd),
+      vi.fn(),
+    );
+
+    expect(store.getTask(dirs.cwd, task.id)).toMatchObject({
+      status: "in_progress",
+      assigned_to: "ReplacementWorker",
+    });
   });
 
   it("clamps fractional concurrency and passes all ready tasks to spawnAgents", async () => {
@@ -370,28 +556,30 @@ describe("crew/graceful shutdown", () => {
     const t1 = store.createTask(dirs.cwd, "Task one", "Desc one");
     const t2 = store.createTask(dirs.cwd, "Task two", "Desc two");
 
-    vi.spyOn(agents, "spawnAgents").mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
-      for (const t of tasks) {
-        if (t.taskId) {
-          store.updateTask(dirs.cwd, t.taskId, { status: "done" });
+    vi.spyOn(agents, "spawnAgents").mockImplementation(
+      async (tasks: Array<{ taskId?: string }>) => {
+        for (const t of tasks) {
+          if (t.taskId) {
+            store.updateTask(dirs.cwd, t.taskId, { status: "done" });
+          }
         }
-      }
-      return tasks.map(t => ({
-        agent: "crew-worker",
-        exitCode: 0,
-        output: "",
-        truncated: false,
-        progress: {
+        return tasks.map((t) => ({
           agent: "crew-worker",
-          status: "completed" as const,
-          recentTools: [],
-          toolCallCount: 0,
-          tokens: 0,
-          durationMs: 0,
-        },
-        taskId: t.taskId,
-      }));
-    });
+          exitCode: 0,
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "completed" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: t.taskId,
+        }));
+      },
+    );
 
     const response = await workHandler.execute(
       { action: "work", concurrency: 2 },
@@ -441,26 +629,28 @@ describe("crew/graceful shutdown", () => {
     store.createPlan(dirs.cwd, "docs/PRD.md");
     const t1 = store.createTask(dirs.cwd, "Abandoned task", "Worker forgot task.done");
 
-    vi.spyOn(agents, "spawnAgents").mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
-      for (const t of tasks) {
-        if (t.taskId) store.startTask(dirs.cwd, t.taskId, "Worker");
-      }
-      return tasks.map(t => ({
-        agent: "crew-worker",
-        exitCode: 0,
-        output: "",
-        truncated: false,
-        progress: {
+    vi.spyOn(agents, "spawnAgents").mockImplementation(
+      async (tasks: Array<{ taskId?: string }>) => {
+        for (const t of tasks) {
+          if (t.taskId) store.startTask(dirs.cwd, t.taskId, "Worker");
+        }
+        return tasks.map((t) => ({
           agent: "crew-worker",
-          status: "running" as const,
-          recentTools: [],
-          toolCallCount: 0,
-          tokens: 0,
-          durationMs: 0,
-        },
-        taskId: t.taskId,
-      }));
-    });
+          exitCode: 0,
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "running" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: t.taskId,
+        }));
+      },
+    );
 
     const response = await workHandler.execute(
       { action: "work" },
@@ -484,28 +674,30 @@ describe("crew/graceful shutdown", () => {
     store.createPlan(dirs.cwd, "docs/PRD.md");
     const t1 = store.createTask(dirs.cwd, "Interrupted task", "Graceful non-zero");
 
-    vi.spyOn(agents, "spawnAgents").mockImplementation(async (tasks: Array<{ taskId?: string }>) => {
-      for (const t of tasks) {
-        if (t.taskId) store.startTask(dirs.cwd, t.taskId, "Worker");
-      }
-      return tasks.map(t => ({
-        agent: "crew-worker",
-        exitCode: 1,
-        output: "",
-        truncated: false,
-        progress: {
+    vi.spyOn(agents, "spawnAgents").mockImplementation(
+      async (tasks: Array<{ taskId?: string }>) => {
+        for (const t of tasks) {
+          if (t.taskId) store.startTask(dirs.cwd, t.taskId, "Worker");
+        }
+        return tasks.map((t) => ({
           agent: "crew-worker",
-          status: "failed" as const,
-          recentTools: [],
-          toolCallCount: 0,
-          tokens: 0,
-          durationMs: 0,
-        },
-        taskId: t.taskId,
-        wasGracefullyShutdown: true,
-        error: "terminated",
-      }));
-    });
+          exitCode: 1,
+          output: "",
+          truncated: false,
+          progress: {
+            agent: "crew-worker",
+            status: "failed" as const,
+            recentTools: [],
+            toolCallCount: 0,
+            tokens: 0,
+            durationMs: 0,
+          },
+          taskId: t.taskId,
+          wasGracefullyShutdown: true,
+          error: "terminated",
+        }));
+      },
+    );
 
     const response = await workHandler.execute(
       { action: "work" },

@@ -15,8 +15,14 @@
  */
 
 import { userInfo } from "node:os";
-import { isValidAgentName, isValidChannelName, type AgentMailMessage, type HistoryEntry } from "../../lib.ts";
-import { loadConfig, messengerIdentityKey } from "../../config.ts";
+import {
+  isValidAgentName,
+  isValidChannelName,
+  type AgentMailMessage,
+  type HistoryEntry,
+} from "../../lib.ts";
+import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { loadConfig, messengerIdentityKey, setAgentDirProvider } from "../../config.ts";
 import type { ChannelInfo } from "../../mesh/types.ts";
 import type { ChannelSnapshot } from "../../mesh/protocol.ts";
 import { connect, ui, type Key, type Session, type Surface, type TspEvent } from "@stencil-hq/tern";
@@ -24,6 +30,8 @@ import { MessengerMesh, type ConnectionState } from "./mesh.ts";
 import {
   applyCompletion,
   applyNativeEdit,
+  chatTranscript,
+  clipboardSequence,
   createChannel,
   createComposer,
   editComposer,
@@ -38,8 +46,19 @@ import {
   type ChannelView,
   type Completion,
 } from "./model.ts";
-import { buildView, COMPOSER_ID, idPart, MEMBERS_COLS, SETTINGS_ID, sidebarLayout, STYLESHEET, type ViewState } from "./view.ts";
+import {
+  buildView,
+  COMPOSER_ID,
+  idPart,
+  MEMBERS_COLS,
+  SETTINGS_ID,
+  sidebarLayout,
+  STYLESHEET,
+  type ViewState,
+} from "./view.ts";
 import { MessengerSettings } from "./settings.ts";
+
+setAgentDirProvider(getAgentDir);
 
 const SURFACE = "omp-messenger";
 /** Settings open as a full-screen surface over the inline chat; closing it shows the chat exactly as it was. */
@@ -66,7 +85,9 @@ function parseArgs(argv: string[]): Args {
     else if (flag === "--name" && value) args.name = argv[++i];
     else if (flag === "--channel" && value) args.channels.push(argv[++i]);
     else if (flag === "--help" || flag === "-h") {
-      process.stdout.write("usage: bun tern-plugin/app/main.ts [--url ws://host:port] [--token T] [--name you] [--channel name]...\n");
+      process.stdout.write(
+        "usage: bun tern-plugin/app/main.ts [--url ws://host:port] [--token T] [--name you] [--channel name]...\n",
+      );
       process.exit(0);
     }
   }
@@ -79,7 +100,7 @@ function defaultName(): string {
   return isValidAgentName(cleaned) ? cleaned : "human";
 }
 
-class MessengerApp {
+export class MessengerApp {
   #session: Session | undefined;
   #surface: Surface | undefined;
   readonly #mesh: MessengerMesh;
@@ -91,18 +112,23 @@ class MessengerApp {
   #settings: MessengerSettings | undefined;
   #settingsSurface: Surface | undefined;
 
-  constructor(private readonly args: Args) {
+  constructor(
+    private readonly args: Args,
+    identityKey = messengerIdentityKey(),
+  ) {
     const config = loadConfig(process.cwd());
     const url = args.url ?? config.mesh.url ?? "";
     const token = args.token ?? config.mesh.token;
-    const channels = (args.channels.length > 0 ? args.channels : config.mesh.channels).filter(isValidChannelName);
+    const channels = (args.channels.length > 0 ? args.channels : config.mesh.channels).filter(
+      isValidChannelName,
+    );
     const name = args.name ?? defaultName();
 
     this.#state = {
       self: name,
       connection: "connecting",
       url,
-      channels: channels.map(channel => createChannel(channel, true)),
+      channels: channels.map((channel) => createChannel(channel, true)),
       active: channels[0] ?? "main",
       composer: createComposer(),
       completion: null,
@@ -113,47 +139,65 @@ class MessengerApp {
       sidebars: { channels: true, members: true },
     };
     this.#state.composer = this.#state.channels[0]?.draft ?? createComposer();
-    this.#mesh = new MessengerMesh({ url, token, name, channels, cwd: process.cwd(), identityKey: messengerIdentityKey() }, {
-      state: (state, detail) => this.#onConnection(state, detail),
-      welcome: (self, snapshots) => {
-        for (const channel of this.#state.channels) channel.joined = snapshots.some(snapshot => snapshot.channel === channel.name);
-        this.#state.self = self;
-        for (const snapshot of snapshots) {
-          const channel = this.#channel(snapshot.channel, true);
-          channel.joined = true;
-          channel.members = snapshot.peers;
-        }
-        if (!this.#activeChannel()?.joined) this.#switchTo(snapshots[0]?.channel ?? "");
-        for (const channel of this.#state.channels) if (channel.following) void this.#loadHistory(channel, true);
-        void this.#discoverChannels();
-        this.#render();
+    this.#mesh = new MessengerMesh(
+      { url, token, name, channels, cwd: process.cwd(), identityKey },
+      {
+        state: (state, detail) => this.#onConnection(state, detail),
+        welcome: (self, snapshots) => {
+          for (const channel of this.#state.channels)
+            channel.joined = snapshots.some((snapshot) => snapshot.channel === channel.name);
+          this.#state.self = self;
+          for (const snapshot of snapshots) {
+            const channel = this.#channel(snapshot.channel, true);
+            channel.joined = true;
+            channel.members = snapshot.peers;
+          }
+          if (!this.#activeChannel()?.joined) this.#switchTo(snapshots[0]?.channel ?? "");
+          for (const channel of this.#state.channels)
+            if (channel.following) void this.#loadHistory(channel, true);
+          void this.#discoverChannels();
+          this.#render();
+        },
+        peers: (channelName, peers) => {
+          const channel = this.#channel(channelName, false);
+          channel.members = peers;
+          this.#updateCompletion();
+          this.#render();
+        },
+        log: (entry) => this.#onLog(entry),
+        direct: (message) => this.#onDirect(message),
+        channels: (infos) => this.#applyChannelList(infos),
+        removed: (channel, by, channels, added) => this.#onRemoved(channel, by, channels, added),
+        deleted: (channel, by) => {
+          this.#forgetChannel(channel);
+          if (by !== this.#state.self) this.#notice(`#${channel} was deleted by ${by}`, "info");
+        },
       },
-      peers: (channelName, peers) => {
-        const channel = this.#channel(channelName, false);
-        channel.members = peers;
-        this.#updateCompletion();
-        this.#render();
-      },
-      log: entry => this.#onLog(entry),
-      direct: message => this.#onDirect(message),
-      channels: infos => this.#applyChannelList(infos),
-      removed: (channel, by, channels, added) => this.#onRemoved(channel, by, channels, added),
-      deleted: (channel, by) => {
-        this.#forgetChannel(channel);
-        if (by !== this.#state.self) this.#notice(`#${channel} was deleted by ${by}`, "info");
-      },
-    });
+    );
   }
 
-  async run(): Promise<number> {
-    const session = await connect({ app: "omp-messenger", version: VERSION, features: ["edit", "undo", "send"] });
-    if (!session) throw new Error("Messenger needs native program surfaces enabled in a Tern pane.");
+  async run(existingSession?: Session): Promise<number> {
+    const session =
+      existingSession ??
+      (await connect({
+        app: "omp-messenger",
+        version: VERSION,
+        features: ["edit", "undo", "send"],
+      }));
+    if (!session)
+      throw new Error("Messenger needs native program surfaces enabled in a Tern pane.");
     this.#session = session;
     try {
       this.#state.cols = session.caps.cols;
       this.#state.hour12 = session.caps.hour12;
-      // Inline, like omp's own sessions: the pane keeps the newest message in view until you scroll up, and holds your place while you read.
-      this.#surface = session.open({ id: SURFACE, mode: "inline", title: "Messenger", role: "omp.messenger" });
+      // window.luau identifies an existing Messenger pane by this exact title.
+      this.#surface = session.open({
+        id: SURFACE,
+        mode: "inline",
+        title: "Messenger",
+        role: "omp.messenger",
+        ...(session.caps.features.includes("font") ? { font: "sans" as const } : {}),
+      });
       this.#surface.stylesheet("main", STYLESHEET);
       this.#refocus();
       if (this.#state.url) this.#mesh.connect();
@@ -174,25 +218,47 @@ class MessengerApp {
 
   #render(): void {
     if (this.#exiting) return;
-    this.#surface?.render(buildView(this.#state));
+    this.#surface?.render(
+      buildView(
+        this.#state,
+        (event) => {
+          if (!this.#canSend()) return;
+          replaceDraft(this.#state.composer, event.text);
+          void this.#submit();
+        },
+        (action, entry) => {
+          if (action === "mention") this.#onAction("mention", entry.from, "");
+          else {
+            process.stdout.write(clipboardSequence(entry.text));
+            this.#notice("Sent message to clipboard", "info");
+          }
+        },
+        () => {
+          if (this.#canSend()) void this.#submit();
+        },
+      ),
+    );
     if (this.#settings) this.#settingsSurface?.render({ main: ui.col({}, this.#settings.view()) });
   }
 
-
   #onEvent(event: TspEvent): void {
     if ("sf" in event && event.sf && event.sf !== SURFACE && event.sf !== SETTINGS_SURFACE) return;
+    const rawActionValue = event.ev === "action" && "value" in event ? event.value : undefined;
+    if (rawActionValue !== undefined && typeof rawActionValue !== "string") return;
+    const actionValue = typeof rawActionValue === "string" ? rawActionValue : undefined;
     if (this.#settings && "id" in event && event.id === SETTINGS_ID) {
       if (event.ev === "action" && "act" in event) {
         if (event.act === "close") {
-          if (event.value) this.#settings.editing = undefined;
+          if (actionValue) this.#settings.editing = undefined;
           else this.#closeSettings();
-        } else if (event.act === "page") this.#settings.page = event.value ?? "connection";
+        } else if (event.act === "page") this.#settings.page = actionValue ?? "connection";
         else if (event.act === "settings-save") this.#saveSettings();
         else if (event.act === "settings-add-path") this.#settings.addPath();
-        else if (event.act === "settings-remove-path") this.#settings.removePath(event.value);
+        else if (event.act === "settings-remove-path") this.#settings.removePath(actionValue);
       } else if (event.ev === "activate" && "item" in event) this.#settings.activate(event.item);
       else if (event.ev === "select" && "item" in event) this.#settings.focus = event.item;
-      else if (event.ev === "change" && "item" in event) this.#settings.change(event.item, event.value);
+      else if (event.ev === "change" && "item" in event)
+        this.#settings.change(event.item, event.value);
       this.#render();
       return;
     }
@@ -216,8 +282,11 @@ class MessengerApp {
         return;
       }
       case "focus":
-        if ("id" in event && (event.id === COMPOSER_ID && !this.#state.dialog
-          || event.id === "layer.dialog.body.input" && this.#state.dialog?.kind === "create")) {
+        if (
+          "id" in event &&
+          ((event.id === COMPOSER_ID && !this.#state.dialog) ||
+            (event.id === "layer.dialog.body.input" && this.#state.dialog?.kind === "create"))
+        ) {
           this.#surface?.focus(event.id);
         }
         return;
@@ -226,7 +295,7 @@ class MessengerApp {
         if ("id" in event && "item" in event) this.#onSelect(event.id, event.item);
         return;
       case "action":
-        if ("act" in event && "id" in event) this.#onAction(event.act, event.value, event.id);
+        if ("act" in event && "id" in event) this.#onAction(event.act, actionValue, event.id);
         return;
       case "send":
         if ("id" in event && "text" in event && event.id === COMPOSER_ID && this.#canSend()) {
@@ -251,25 +320,38 @@ class MessengerApp {
 
   #field(id: string) {
     if (this.#state.dialog?.kind === "create") {
-      return id === "layer.dialog.body.input" && this.#state.dialog.operation.state !== "pending" ? this.#state.dialog.input : undefined;
+      return id === "layer.dialog.body.input" && this.#state.dialog.operation.state !== "pending"
+        ? this.#state.dialog.input
+        : undefined;
     }
-    return !this.#state.dialog && !this.#settings && !this.#state.panel && this.#activeChannel()?.joined && id === COMPOSER_ID ? this.#state.composer : undefined;
+    return !this.#state.dialog &&
+      !this.#settings &&
+      !this.#state.panel &&
+      this.#activeChannel()?.joined &&
+      id === COMPOSER_ID
+      ? this.#state.composer
+      : undefined;
   }
 
   #onSelect(listId: string, itemId: string): void {
     if (listId.endsWith(".rail.list")) {
-      const channel = this.#state.channels.find(c => itemId.endsWith(`.ch-${idPart(c.name)}`));
+      const channel = this.#state.channels.find((c) => itemId.endsWith(`.ch-${idPart(c.name)}`));
       if (channel) this.#switchTo(channel.name);
       return;
     }
     if (listId === "layer.suggestions.suggest") {
-      const name = this.#state.completion?.options.find(option => itemId.endsWith(`.sg-${idPart(option)}`));
+      const name = this.#state.completion?.options.find((option) =>
+        itemId.endsWith(`.sg-${idPart(option)}`),
+      );
       this.#complete(name);
     }
   }
 
   #onAction(act: string, value: string | undefined, nodeId: string): void {
-    if (act === "send-message") { void this.#submit(); return; }
+    if (act === "send-message") {
+      void this.#submit();
+      return;
+    }
     if (act === "mention" && value) {
       const channel = this.#activeChannel();
       if (!channel) return;
@@ -318,7 +400,7 @@ class MessengerApp {
       if (channel) void this.#loadHistory(channel, true);
     } else if (act === "delete-channel") {
       // From a rail row's context menu (node `ch-<name>`) or the timeline header's trash icon.
-      const fromRow = this.#state.channels.find(c => nodeId.endsWith(`.ch-${idPart(c.name)}`));
+      const fromRow = this.#state.channels.find((c) => nodeId.endsWith(`.ch-${idPart(c.name)}`));
       this.#openDelete((fromRow ?? this.#activeChannel())?.name);
     } else if (act === "dialog-confirm") {
       void this.#confirmDialog();
@@ -329,25 +411,45 @@ class MessengerApp {
 
   #canSend(): boolean {
     const channel = this.#activeChannel();
-    return this.#state.connection === "connected" && channel?.joined === true && !channel.sending && !this.#state.dialog && !this.#settings && !this.#state.panel;
+    return (
+      this.#state.connection === "connected" &&
+      channel?.joined === true &&
+      !channel.sending &&
+      !this.#state.dialog &&
+      !this.#settings &&
+      !this.#state.panel
+    );
   }
 
   #saveSettings(): void {
     if (!this.#settings?.save()) return;
     const config = loadConfig(process.cwd());
     const url = this.args.url ?? config.mesh.url;
-    if (!url) { this.#settings.error = "The effective configuration has no WebSocket server."; return; }
+    if (!url) {
+      this.#settings.error = "The effective configuration has no WebSocket server.";
+      return;
+    }
     this.#closeSettings();
     this.#state.url = url;
     this.#state.stuckThresholdMs = config.stuckThreshold * 1000;
-    this.#mesh.reconfigure(url, this.args.token ?? config.mesh.token, this.args.channels.length ? this.args.channels : config.mesh.channels);
+    this.#mesh.reconfigure(
+      url,
+      this.args.token ?? config.mesh.token,
+      this.args.channels.length ? this.args.channels : config.mesh.channels,
+    );
     this.#notice("Saved user settings. Reconnecting with effective configuration.", "info");
   }
 
   #openSettings(): void {
     this.#state.panel = null;
     this.#settings = new MessengerSettings(process.cwd(), this.#state.url);
-    this.#settingsSurface ??= this.#session?.open({ id: SETTINGS_SURFACE, mode: "screen", title: "Messenger settings", role: "omp.messenger.settings" });
+    this.#settingsSurface ??= this.#session?.open({
+      id: SETTINGS_SURFACE,
+      mode: "screen",
+      title: "Messenger settings",
+      role: "omp.messenger.settings",
+      ...(this.#session.caps.features.includes("font") ? { font: "sans" as const } : {}),
+    });
     this.#render();
   }
 
@@ -377,9 +479,9 @@ class MessengerApp {
     this.#closeSettings();
     this.#state.panel = null;
     if (name === "main") return this.#notice("#main can't be deleted", "error");
-    const channel = this.#state.channels.find(c => c.name === name);
+    const channel = this.#state.channels.find((c) => c.name === name);
     if (!channel) return this.#notice(`No channel #${name}`, "error");
-    const members = channel.members.map(m => m.name).filter(m => m !== this.#state.self);
+    const members = channel.members.map((m) => m.name).filter((m) => m !== this.#state.self);
     this.#state.dialog = { kind: "delete", channel: name, members, operation: { state: "ready" } };
     this.#render();
   }
@@ -402,7 +504,7 @@ class MessengerApp {
       undoDraft(dialog.input, key.shift);
       return this.#render();
     }
-    if (key.name === "paste" || key.name === "text" || (key.text && !key.ctrl && !key.meta)) {
+    if (key.name === "paste" || (key.text && !key.ctrl && !key.meta)) {
       insertText(dialog.input, (key.text ?? "").replace(/[\r\n]/g, ""));
     } else if (!editComposer(dialog.input, key)) {
       return;
@@ -414,23 +516,31 @@ class MessengerApp {
   async #confirmDialog(): Promise<void> {
     const dialog = this.#state.dialog;
     if (!dialog || dialog.operation.state === "pending") return;
-    const name = dialog.kind === "create" ? dialog.input.text.trim().replace(/^#/, "") : dialog.channel;
+    const name =
+      dialog.kind === "create" ? dialog.input.text.trim().replace(/^#/, "") : dialog.channel;
     if (!isValidChannelName(name)) {
-      dialog.operation = { state: "error", error: "Use 1–48 lowercase letters, digits, - or _, starting with a letter or digit." };
+      dialog.operation = {
+        state: "error",
+        error: "Use 1–48 lowercase letters, digits, - or _, starting with a letter or digit.",
+      };
       return this.#render();
     }
     dialog.operation = { state: "pending" };
     this.#render();
-    const error = dialog.kind === "create" ? await this.#createChannel(name) : await this.#deleteChannel(name);
+    const error =
+      dialog.kind === "create" ? await this.#createChannel(name) : await this.#deleteChannel(name);
     if (this.#state.dialog !== dialog) return;
     if (error) dialog.operation = { state: "error", error };
-    else { dialog.operation = { state: "ready" }; this.#closeDialog(); }
+    else {
+      dialog.operation = { state: "ready" };
+      this.#closeDialog();
+    }
     this.#render();
   }
 
   /** Joining a channel creates it on the server when it doesn't exist yet. */
   async #createChannel(name: string): Promise<string | undefined> {
-    const existed = this.#state.channels.some(c => c.name === name);
+    const existed = this.#state.channels.some((c) => c.name === name);
     const result = await this.#mesh.join(name);
     if (typeof result === "string") {
       this.#notice(`Couldn't open #${name}: ${result}`, "error");
@@ -446,12 +556,22 @@ class MessengerApp {
 
   async #deleteChannel(name: string): Promise<string | undefined> {
     const reply = await this.#mesh.deleteChannel(name);
-    const error = !reply ? "The mesh did not confirm deletion. Reconnect and check the channel before retrying."
-      : reply.ok === false ? reply.error === "protected" ? "#main can't be deleted" : `Deletion failed: ${reply.error}` : undefined;
+    const error = !reply
+      ? "The mesh did not confirm deletion. Reconnect and check the channel before retrying."
+      : reply.ok === false
+        ? reply.error === "protected"
+          ? "#main can't be deleted"
+          : `Deletion failed: ${reply.error}`
+        : undefined;
     if (error) return error;
     if (!reply || reply.ok === false) return;
     this.#forgetChannel(name);
-    this.#notice(reply.removed.length > 0 ? `Deleted #${name} — removed and told ${reply.removed.join(", ")}` : `Deleted #${name}`, "success");
+    this.#notice(
+      reply.removed.length > 0
+        ? `Deleted #${name} — removed and told ${reply.removed.join(", ")}`
+        : `Deleted #${name}`,
+      "success",
+    );
   }
 
   /** Someone (maybe us) deleted a channel this member was in. */
@@ -467,8 +587,11 @@ class MessengerApp {
   }
 
   #forgetChannel(name: string): void {
-    this.#state.channels = this.#state.channels.filter(c => c.name !== name);
-    if (this.#state.active === name) this.#switchTo(this.#state.channels.find(c => c.joined)?.name ?? this.#state.channels[0]?.name ?? "");
+    this.#state.channels = this.#state.channels.filter((c) => c.name !== name);
+    if (this.#state.active === name)
+      this.#switchTo(
+        this.#state.channels.find((c) => c.joined)?.name ?? this.#state.channels[0]?.name ?? "",
+      );
     else this.#render();
   }
 
@@ -481,7 +604,10 @@ class MessengerApp {
       return;
     }
     if (this.#state.panel) {
-      if (key.name === "escape") { this.#state.panel = null; this.#refocus(); }
+      if (key.name === "escape") {
+        this.#state.panel = null;
+        this.#refocus();
+      }
       return;
     }
     const composer = this.#state.composer;
@@ -499,14 +625,16 @@ class MessengerApp {
     if (completion) {
       if (key.name === "up" || (key.name === "p" && key.ctrl)) return this.#moveCompletion(-1);
       if (key.name === "down" || (key.name === "n" && key.ctrl)) return this.#moveCompletion(1);
-      if (key.name === "tab" || (key.name === "enter" && !key.shift)) return this.#complete(completion.options[completion.selected]);
+      if (key.name === "tab" || (key.name === "enter" && !key.shift))
+        return this.#complete(completion.options[completion.selected]);
       if (key.name === "escape") {
         this.#state.completion = null;
         return this.#render();
       }
     }
 
-    if (key.alt && (key.name === "up" || key.name === "down")) return this.#cycleChannel(key.name === "up" ? -1 : 1);
+    if (key.alt && (key.name === "up" || key.name === "down"))
+      return this.#cycleChannel(key.name === "up" ? -1 : 1);
     if (key.ctrl && key.name === "tab") return this.#cycleChannel(key.shift ? -1 : 1);
     if (key.name === "escape") {
       if (composer.text !== "") {
@@ -518,7 +646,7 @@ class MessengerApp {
     if (key.name === "enter") {
       if (key.shift || key.alt) insertText(composer, "\n");
       else return void this.#submit();
-    } else if (key.name === "paste" || key.name === "text" || (key.text && !key.ctrl && !key.meta)) {
+    } else if (key.name === "paste" || (key.text && !key.ctrl && !key.meta)) {
       insertText(composer, (key.text ?? "").replace(/\r\n?/g, "\n"));
     } else if (key.name === "space" && !key.ctrl) {
       insertText(composer, " ");
@@ -536,7 +664,11 @@ class MessengerApp {
   #updateCompletion(): void {
     const channel = this.#activeChannel();
     const previous = this.#state.completion;
-    const next = findCompletion(this.#state.composer, channel?.members.map(m => m.name) ?? [], this.#state.self);
+    const next = findCompletion(
+      this.#state.composer,
+      channel?.members.map((m) => m.name) ?? [],
+      this.#state.self,
+    );
     if (next && previous && previous.start === next.start) {
       const keep = next.options.indexOf(previous.options[previous.selected]);
       next.selected = keep >= 0 ? keep : 0;
@@ -546,7 +678,8 @@ class MessengerApp {
 
   #moveCompletion(delta: number): void {
     const completion = this.#state.completion as Completion;
-    completion.selected = (completion.selected + delta + completion.options.length) % completion.options.length;
+    completion.selected =
+      (completion.selected + delta + completion.options.length) % completion.options.length;
     this.#render();
   }
 
@@ -587,10 +720,14 @@ class MessengerApp {
         ? await this.#mesh.send(channel.name, recipient, raw)
         : await this.#mesh.post(channel.name, raw);
       if (!result || result.ok === false) {
-        channel.sendError = result?.ok === false ? `Not sent: ${result.error}` : "Delivery was not confirmed. Your draft is preserved. Check history before retrying.";
+        channel.sendError =
+          result?.ok === false
+            ? `Not sent: ${result.error}`
+            : "Delivery was not confirmed. Your draft is preserved. Check history before retrying.";
         return;
       }
-      if ("entry" in result && channel.following) channel.log = mergeLog(channel.log, [result.entry]);
+      if ("entry" in result && channel.following)
+        channel.log = mergeLog(channel.log, [result.entry]);
       if (composer.text === originalDraft) submitComposer(composer);
       if (this.#activeChannel() === channel) this.#state.completion = null;
       this.#notice(recipient ? `Delivered to ${recipient}` : "Posted to channel", "success");
@@ -606,7 +743,11 @@ class MessengerApp {
     switch (command) {
       case "join":
       case "create":
-        if (!arg || !isValidChannelName(arg)) return this.#notice(`Usage: /${command} <channel> (lowercase letters, digits, - and _)`, "error");
+        if (!arg || !isValidChannelName(arg))
+          return this.#notice(
+            `Usage: /${command} <channel> (lowercase letters, digits, - and _)`,
+            "error",
+          );
         await this.#createChannel(arg);
         return;
       case "delete":
@@ -626,24 +767,47 @@ class MessengerApp {
       case "settings":
         this.#openSettings();
         return;
+      case "cp":
+        return this.#copyChat();
       case "help":
-        return this.#notice("/create <channel> · /join <channel> · /delete <channel> · /dm <name> <msg> · @name · @all · ⌥↑↓ switch channel", "info");
+        return this.#notice(
+          "/create <channel> · /join <channel> · /delete <channel> · /dm <name> <msg> · /cp copy chat · @name · @all · ⌥↑↓ switch channel",
+          "info",
+        );
       default:
         return this.#notice(`Unknown command /${command} (try /help)`, "error");
     }
   }
 
+  /** Copies the active channel's whole history, read from the server rather than the loaded window. */
+  async #copyChat(): Promise<void> {
+    const channel = this.#activeChannel();
+    if (!channel) return this.#notice("Choose a channel to copy", "error");
+    this.#notice(`Copying #${channel.name}…`, "info");
+    const history = await this.#mesh.allHistory(channel.name);
+    if (history.ok === false)
+      return this.#notice(`Couldn't copy #${channel.name}: ${history.error}`, "error");
+    // OSC 52 requests a clipboard write; the terminal may deny or ignore it.
+    process.stdout.write(clipboardSequence(chatTranscript(channel.name, history.entries)));
+    this.#notice(
+      `Sent #${channel.name}: ${history.entries.length} messages to clipboard`,
+      "success",
+    );
+  }
+
   // -- channels --------------------------------------------------------------
 
   #activeChannel(): ChannelView | undefined {
-    return this.#state.channels.find(channel => channel.name === this.#state.active);
+    return this.#state.channels.find((channel) => channel.name === this.#state.active);
   }
 
   #channel(name: string, joined: boolean): ChannelView {
-    let channel = this.#state.channels.find(c => c.name === name);
+    let channel = this.#state.channels.find((c) => c.name === name);
     if (!channel) {
       channel = createChannel(name, joined);
-      this.#state.channels = [...this.#state.channels, channel].sort((a, b) => Number(b.joined) - Number(a.joined) || a.name.localeCompare(b.name));
+      this.#state.channels = [...this.#state.channels, channel].sort(
+        (a, b) => Number(b.joined) - Number(a.joined) || a.name.localeCompare(b.name),
+      );
     }
     return channel;
   }
@@ -665,7 +829,7 @@ class MessengerApp {
   #cycleChannel(delta: number): void {
     const channels = this.#state.channels;
     if (channels.length === 0) return;
-    const index = channels.findIndex(channel => channel.name === this.#state.active);
+    const index = channels.findIndex((channel) => channel.name === this.#state.active);
     this.#switchTo(channels[(index + delta + channels.length) % channels.length].name);
   }
 
@@ -679,11 +843,14 @@ class MessengerApp {
    * (unless joined or open), and watch all of them so their logs and members stay live.
    */
   #applyChannelList(infos: readonly ChannelInfo[]): void {
-    const listed = new Set(infos.map(info => info.name).filter(isValidChannelName));
+    const listed = new Set(infos.map((info) => info.name).filter(isValidChannelName));
     for (const name of listed) this.#channel(name, false);
-    this.#state.channels = this.#state.channels.filter(c => listed.has(c.name) || c.joined);
-    if (!this.#activeChannel()) this.#switchTo(this.#state.channels.find(c => c.joined)?.name ?? this.#state.channels[0]?.name ?? "");
-    this.#mesh.watch(this.#state.channels.map(c => c.name));
+    this.#state.channels = this.#state.channels.filter((c) => listed.has(c.name) || c.joined);
+    if (!this.#activeChannel())
+      this.#switchTo(
+        this.#state.channels.find((c) => c.joined)?.name ?? this.#state.channels[0]?.name ?? "",
+      );
+    this.#mesh.watch(this.#state.channels.map((c) => c.name));
     this.#render();
   }
 
@@ -707,7 +874,9 @@ class MessengerApp {
         channel.hasNewer ||= count > channel.log.length;
       }
       channel.hasMore = page.hasMore;
-    } else channel.historyError = page?.ok === false ? page.error : "Couldn't load history. Check the connection and retry.";
+    } else
+      channel.historyError =
+        page?.ok === false ? page.error : "Couldn't load history. Check the connection and retry.";
     this.#render();
   }
 
@@ -721,15 +890,20 @@ class MessengerApp {
 
   #onLog(entry: HistoryEntry): void {
     const channel = this.#channel(entry.channel, false);
-    const isNew = !channel.log.some(existing => existing.seq === entry.seq);
+    const isNew = !channel.log.some((existing) => existing.seq === entry.seq);
     if (channel.following) {
       const oldest = channel.log[0]?.seq;
       channel.log = mergeLog(channel.log, [entry]);
       if (oldest !== undefined && channel.log[0]?.seq > oldest) channel.hasMore = true;
     } else channel.hasNewer ||= isNew;
-    if (isNew && (entry.channel !== this.#state.active || !channel.following) && entry.from !== this.#state.self) {
+    if (
+      isNew &&
+      (entry.channel !== this.#state.active || !channel.following) &&
+      entry.from !== this.#state.self
+    ) {
       channel.unread++;
-      if (entry.mentions.includes(this.#state.self) || entry.mentions.includes("all")) channel.mentions++;
+      if (entry.mentions.includes(this.#state.self) || entry.mentions.includes("all"))
+        channel.mentions++;
     }
     this.#render();
   }
@@ -737,7 +911,7 @@ class MessengerApp {
   #onDirect(message: AgentMailMessage): void {
     // Agents reply to the human with a direct message; the channel log carries it for
     // watched channels. Unwatched ones still surface as a notice.
-    if (message.channel && this.#state.channels.some(c => c.name === message.channel)) return;
+    if (message.channel && this.#state.channels.some((c) => c.name === message.channel)) return;
     this.#notice(`${message.from}: ${message.text.slice(0, 80)}`, "info");
   }
 
@@ -763,10 +937,14 @@ class MessengerApp {
   }
 }
 
-try {
-  const code = await new MessengerApp(parseArgs(process.argv.slice(2))).run();
-  process.exit(code);
-} catch (error) {
-  process.stderr.write(`omp-messenger: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
+if (import.meta.main) {
+  try {
+    const code = await new MessengerApp(parseArgs(process.argv.slice(2))).run();
+    process.exit(code);
+  } catch (error) {
+    process.stderr.write(
+      `omp-messenger: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exit(1);
+  }
 }

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import * as zod from "@oh-my-pi/omptype/zod";
 import { createTempCrewDirs } from "./helpers/temp-dirs.ts";
 import { createTestMesh } from "./helpers/mesh.ts";
 import piMessengerExtension from "../index.ts";
@@ -15,8 +17,8 @@ vi.mock("@oh-my-pi/pi-tui", () => ({
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
 interface MockPi {
-  pi: Record<string, never>;
-  typebox: { Type: unknown };
+  pi: { getAgentDir: () => string };
+  zod: typeof zod;
   handlers: Record<string, Handler[]>;
   registerTool: ReturnType<typeof vi.fn>;
   registerCommand: ReturnType<typeof vi.fn>;
@@ -29,8 +31,8 @@ interface MockPi {
 function createMockPi(): MockPi {
   const handlers: Record<string, Handler[]> = {};
   return {
-    pi: {},
-    typebox: { Type: new Proxy({}, { get: () => () => ({}) }) },
+    pi: { getAgentDir: () => path.join(process.env.HOME ?? "", ".omp", "agent") },
+    zod,
     handlers,
     registerTool: vi.fn(),
     registerCommand: vi.fn(),
@@ -49,7 +51,11 @@ function createCtx(cwd: string, idle = false) {
     hasUI: false,
     isIdle: () => idle,
     ui: { notify: vi.fn(), setStatus: vi.fn(), theme: { fg: (_c: string, t: string) => t } },
-    sessionManager: { getEntries: () => [], getSessionId: () => "receiver-session", getSessionFile: () => undefined },
+    sessionManager: {
+      getEntries: () => [],
+      getSessionId: () => "receiver-session",
+      getSessionFile: () => undefined,
+    },
     model: { id: "m" },
   };
 }
@@ -62,9 +68,16 @@ interface Delivery {
 
 function deliveries(pi: MockPi): Delivery[] {
   return pi.sendMessage.mock.calls.flatMap(([msg, opts]) => {
-    if (!msg || typeof msg !== "object" || !("customType" in msg) || typeof msg.customType !== "string") return [];
+    if (
+      !msg ||
+      typeof msg !== "object" ||
+      !("customType" in msg) ||
+      typeof msg.customType !== "string"
+    )
+      return [];
     if (msg.customType !== "irc:incoming") return [];
-    const details = "details" in msg && msg.details && typeof msg.details === "object" ? msg.details : {};
+    const details =
+      "details" in msg && msg.details && typeof msg.details === "object" ? msg.details : {};
     const text = "message" in details && typeof details.message === "string" ? details.message : "";
     return [{ customType: msg.customType, text, opts }];
   });
@@ -92,12 +105,16 @@ describe("peer message delivery mode", () => {
 
   afterEach(() => {
     for (const [key, value] of Object.entries(originalEnv)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   });
 
   async function setupReceiver(cwd: string, idle: boolean) {
-    fs.writeFileSync(path.join(cwd, ".omp", "omp-messenger.json"), JSON.stringify({ autoRegister: true }));
+    fs.writeFileSync(
+      path.join(cwd, ".omp", "omp-messenger.json"),
+      JSON.stringify({ autoRegister: true }),
+    );
     const pi = createMockPi();
     piMessengerExtension(pi as never);
     const ctx = createCtx(cwd, idle);
@@ -114,6 +131,23 @@ describe("peer message delivery mode", () => {
     return mesh;
   }
 
+  it("publishes the current provider-qualified model identity", async () => {
+    const { cwd } = createTempCrewDirs();
+    const sender = createTestMesh(cwd, { agentName: "Sender", cwd });
+    const ctx = createCtx(cwd) as unknown as ExtensionContext;
+    let provider = "provider-a";
+    Object.defineProperty(ctx, "models", {
+      value: { current: () => ({ provider, id: "shared-id" }) },
+    });
+    expect(await sender.mesh.join(ctx)).toBe(true);
+    const registryPath = path.join(sender.base, "registry", "Sender.json");
+    expect(JSON.parse(fs.readFileSync(registryPath, "utf8")).model).toBe("provider-a/shared-id");
+    provider = "provider-b";
+    sender.mesh.publish(ctx);
+    expect(JSON.parse(fs.readFileSync(registryPath, "utf8")).model).toBe("provider-b/shared-id");
+    sender.mesh.close();
+  });
+
   it("busy receiver: steers by default, aside only when the sender marks the message gentle", async () => {
     const { cwd } = createTempCrewDirs();
     const { pi, ctx } = await setupReceiver(cwd, false);
@@ -125,8 +159,14 @@ describe("peer message delivery mode", () => {
 
     const delivered = deliveries(pi);
     expect(delivered).toHaveLength(2);
-    expect(delivered.find(d => d.text === "interrupt me")).toMatchObject({ customType: "irc:incoming", opts: { triggerTurn: true, deliverAs: "steer" } });
-    expect(delivered.find(d => d.text === "when convenient")).toMatchObject({ customType: "irc:incoming", opts: { triggerTurn: true, deliverAs: "aside" } });
+    expect(delivered.find((d) => d.text === "interrupt me")).toMatchObject({
+      customType: "irc:incoming",
+      opts: { triggerTurn: true, deliverAs: "steer" },
+    });
+    expect(delivered.find((d) => d.text === "when convenient")).toMatchObject({
+      customType: "irc:incoming",
+      opts: { triggerTurn: true, deliverAs: "aside" },
+    });
   });
 
   it("idle receiver: same irc:incoming record, delivered as steer so an Esc'd session wakes", async () => {
@@ -138,7 +178,11 @@ describe("peer message delivery mode", () => {
     await pi.handlers.turn_end?.[0]?.({ type: "turn_end" }, ctx);
 
     const [delivered] = deliveries(pi);
-    expect(delivered).toMatchObject({ customType: "irc:incoming", text: "wake up", opts: { triggerTurn: true, deliverAs: "steer" } });
+    expect(delivered).toMatchObject({
+      customType: "irc:incoming",
+      text: "wake up",
+      opts: { triggerTurn: true, deliverAs: "steer" },
+    });
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload).toMatchObject({ details: { from: "Sender", message: "wake up" } });
   });
@@ -156,15 +200,23 @@ describe("peer message delivery mode", () => {
 
       const delivered = deliveries(pi);
       expect(delivered).toHaveLength(3);
-      expect(delivered.find(d => d.text === "@receiver review please")?.opts).toEqual({ triggerTurn: true, deliverAs: "steer" });
-      expect(delivered.find(d => d.text === "@all standup in 5")?.opts).toEqual({ triggerTurn: true, deliverAs: "steer" });
+      expect(delivered.find((d) => d.text === "@receiver review please")?.opts).toEqual({
+        triggerTurn: true,
+        deliverAs: "steer",
+      });
+      expect(delivered.find((d) => d.text === "@all standup in 5")?.opts).toEqual({
+        triggerTurn: true,
+        deliverAs: "steer",
+      });
       // Busy: aside rides the step boundary. Idle: aside would start a turn, so a plain append.
-      expect(delivered.find(d => d.text === "just thinking out loud")?.opts).toEqual(
+      expect(delivered.find((d) => d.text === "just thinking out loud")?.opts).toEqual(
         idle ? { triggerTurn: false } : { triggerTurn: false, deliverAs: "aside" },
       );
-      const ambient = pi.sendMessage.mock.calls.find(([msg]) => msg?.details?.message === "just thinking out loud")?.[0];
+      const ambient = pi.sendMessage.mock.calls.find(
+        ([msg]) => msg?.details?.message === "just thinking out loud",
+      )?.[0];
       expect(ambient).toMatchObject({ details: { kind: "post", channel: "main", mentions: [] } });
       expect(ambient.content).toContain("#main · Sender");
     }
-});
+  });
 });

@@ -58,28 +58,83 @@ export const COMMANDS: Record<string, string> = {
   "/delete": "Confirm channel deletion",
   "/dm": "Deliver to one member, recorded in channel history",
   "/settings": "Open Messenger settings",
+  "/cp": "Copy this channel's whole chat to the clipboard",
   "/help": "Show command help",
 };
 
+/** Local `YYYY-MM-DD HH:MM`, or the raw value when it isn't a date. */
+function localStamp(value: string | number): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** A channel's messages as plain text, oldest first: one header line, then `[time] from: text` per message. */
+export function chatTranscript(
+  channel: string,
+  entries: readonly HistoryEntry[],
+  now = Date.now(),
+): string {
+  const lines = [`#${channel} · ${entries.length} messages · copied ${localStamp(now)}`, ""];
+  for (const entry of [...entries].sort((a, b) => a.seq - b.seq)) {
+    const who =
+      entry.kind === "dm" ? `${entry.from} → ${entry.to ?? "?"} (individual)` : entry.from;
+    const [first = "", ...rest] = entry.text.split("\n");
+    lines.push(
+      `[${localStamp(entry.timestamp)}] ${who}: ${first}`,
+      ...rest.map((line) => `  ${line}`),
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+/** Encode an OSC 52 clipboard request; the terminal may reject or ignore it. */
+export function clipboardSequence(text: string): string {
+  return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x1b\\`;
+}
+
 export function createChannel(name: string, joined: boolean): ChannelView {
-  return { name, joined, members: [], log: [], hasMore: true, loadingHistory: false, unread: 0, mentions: 0, following: true, hasNewer: false, draft: createComposer(), sending: false };
+  return {
+    name,
+    joined,
+    members: [],
+    log: [],
+    hasMore: true,
+    loadingHistory: false,
+    unread: 0,
+    mentions: 0,
+    following: true,
+    hasNewer: false,
+    draft: createComposer(),
+    sending: false,
+  };
 }
 
 export function createComposer(): Composer {
   return { text: "", cursor: 0, history: [], recall: null, stash: "", undo: [], redo: [] };
 }
 
-export function mergeLog(log: HistoryEntry[], entries: readonly HistoryEntry[], keep: "newest" | "oldest" = "newest"): HistoryEntry[] {
+export function mergeLog(
+  log: HistoryEntry[],
+  entries: readonly HistoryEntry[],
+  keep: "newest" | "oldest" = "newest",
+): HistoryEntry[] {
   const bySeq = new Map<number, HistoryEntry>();
   for (const entry of log) bySeq.set(entry.seq, entry);
   for (const entry of entries) bySeq.set(entry.seq, entry);
   const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
-  return merged.length <= CHANNEL_LOG_LIMIT ? merged : keep === "oldest" ? merged.slice(0, CHANNEL_LOG_LIMIT) : merged.slice(-CHANNEL_LOG_LIMIT);
+  return merged.length <= CHANNEL_LOG_LIMIT
+    ? merged
+    : keep === "oldest"
+      ? merged.slice(0, CHANNEL_LOG_LIMIT)
+      : merged.slice(-CHANNEL_LOG_LIMIT);
 }
 
 function remember(composer: Composer): void {
   const previous = composer.undo.at(-1);
-  if (previous?.text !== composer.text) composer.undo.push({ text: composer.text, cursor: composer.cursor });
+  if (previous?.text !== composer.text)
+    composer.undo.push({ text: composer.text, cursor: composer.cursor });
   if (composer.undo.length > 100) composer.undo.shift();
   composer.redo = [];
 }
@@ -91,9 +146,22 @@ export function replaceDraft(composer: Composer, text: string, cursor = text.len
   composer.recall = null;
 }
 
-export function applyNativeEdit(composer: Composer, edit: { from: number; to: number; text: string; cursor: number; len: number }): boolean {
-  if (edit.len !== composer.text.length || edit.from < 0 || edit.to < edit.from || edit.to > edit.len) return false;
-  replaceDraft(composer, composer.text.slice(0, edit.from) + edit.text + composer.text.slice(edit.to), edit.cursor);
+export function applyNativeEdit(
+  composer: Composer,
+  edit: { from: number; to: number; text: string; cursor: number; len: number },
+): boolean {
+  if (
+    edit.len !== composer.text.length ||
+    edit.from < 0 ||
+    edit.to < edit.from ||
+    edit.to > edit.len
+  )
+    return false;
+  replaceDraft(
+    composer,
+    composer.text.slice(0, edit.from) + edit.text + composer.text.slice(edit.to),
+    edit.cursor,
+  );
   return true;
 }
 
@@ -112,7 +180,8 @@ export function undoDraft(composer: Composer, redo = false): boolean {
 /** Insert `text` at the caret. */
 export function insertText(composer: Composer, text: string): void {
   if (text) remember(composer);
-  composer.text = composer.text.slice(0, composer.cursor) + text + composer.text.slice(composer.cursor);
+  composer.text =
+    composer.text.slice(0, composer.cursor) + text + composer.text.slice(composer.cursor);
   composer.cursor += text.length;
   composer.recall = null;
 }
@@ -153,7 +222,12 @@ export function editComposer(
 ): boolean {
   const { text, cursor } = composer;
   const word = key.alt || key.ctrl;
-  if (key.name === "backspace" || key.name === "delete" || key.ctrl && ["u", "w", "k"].includes(key.name)) remember(composer);
+  if (
+    key.name === "backspace" ||
+    key.name === "delete" ||
+    (key.ctrl && ["u", "w", "k"].includes(key.name))
+  )
+    remember(composer);
   switch (key.name) {
     case "backspace": {
       if (key.meta) {
@@ -175,11 +249,21 @@ export function editComposer(
       return true;
     }
     case "left":
-      composer.cursor = key.meta ? text.lastIndexOf("\n", cursor - 1) + 1 : word ? wordStart(text, cursor) : stepLeft(text, cursor);
+      composer.cursor = key.meta
+        ? text.lastIndexOf("\n", cursor - 1) + 1
+        : word
+          ? wordStart(text, cursor)
+          : stepLeft(text, cursor);
       return true;
     case "right": {
       const lineEnd = text.indexOf("\n", cursor);
-      composer.cursor = key.meta ? (lineEnd < 0 ? text.length : lineEnd) : word ? wordEnd(text, cursor) : stepRight(text, cursor);
+      composer.cursor = key.meta
+        ? lineEnd < 0
+          ? text.length
+          : lineEnd
+        : word
+          ? wordEnd(text, cursor)
+          : stepRight(text, cursor);
       return true;
     }
     case "home":
@@ -278,20 +362,28 @@ export function submitComposer(composer: Composer): string {
  * characters up to the caret. Options are `all` plus the channel's member names
  * (prefix matches first, then substring), excluding the human.
  */
-export function findCompletion(composer: Composer, members: readonly string[], self: string): Completion | null {
+export function findCompletion(
+  composer: Composer,
+  members: readonly string[],
+  self: string,
+): Completion | null {
   const before = composer.text.slice(0, composer.cursor);
   if (before.startsWith("/") && !/\s/.test(before)) {
-    const options = Object.keys(COMMANDS).filter(command => command.startsWith(before));
-    return options.length ? { kind: "command", start: 0, query: before, options, selected: 0 } : null;
+    const options = Object.keys(COMMANDS).filter((command) => command.startsWith(before));
+    return options.length
+      ? { kind: "command", start: 0, query: before, options, selected: 0 }
+      : null;
   }
   const match = /(^|[\s(])@([A-Za-z0-9_-]*)$/.exec(before);
   if (!match) return null;
   const query = match[2];
   const start = composer.cursor - query.length - 1;
   const lower = query.toLowerCase();
-  const names = ["all", ...members.filter(name => name !== self)];
-  const prefix = names.filter(name => name.toLowerCase().startsWith(lower));
-  const inner = names.filter(name => !name.toLowerCase().startsWith(lower) && name.toLowerCase().includes(lower));
+  const names = ["all", ...members.filter((name) => name !== self)];
+  const prefix = names.filter((name) => name.toLowerCase().startsWith(lower));
+  const inner = names.filter(
+    (name) => !name.toLowerCase().startsWith(lower) && name.toLowerCase().includes(lower),
+  );
   const options = [...prefix, ...inner];
   if (options.length === 0) return null;
   if (options.length === 1 && options[0].toLowerCase() === lower) return null;
